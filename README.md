@@ -35,6 +35,8 @@ The agents that run Mimir each sign with their own locally held Stellar seed, pr
 | Agent API | `POST /api/agents/v1/{action}`, signed envelope (base64 Ed25519) or bearer key |
 
 > **Architecture reference:** [`docs/STELLAR_NETWORK.md`](docs/STELLAR_NETWORK.md) is the one-page summary of how every piece maps onto Stellar.
+>
+> **Release readiness:** [`docs/RELEASE_READINESS.md`](docs/RELEASE_READINESS.md) is the reproducible pre-release, deployment-verification, and rollback checklist.
 
 ---
 
