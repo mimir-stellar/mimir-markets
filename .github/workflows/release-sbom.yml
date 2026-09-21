@@ -1,0 +1,29 @@
+name: release-sbom
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  sbom:
+    name: Publish release SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the published release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Generate and attach CycloneDX SBOM
+        uses: anchore/sbom-action@v0.20.6
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: mimir-${{ github.event.release.tag_name }}.cdx.json
+          artifact-name: mimir-${{ github.event.release.tag_name }}-sbom
+          upload-artifact: true
+          upload-release-assets: true
