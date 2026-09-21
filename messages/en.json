@@ -952,7 +952,18 @@
     "minimumStakeHint": "Minimum stake is {amount} USDC.",
     "underdogBadge": "Underdog",
     "underdogBadgeHint": "The challenger side is the thin one here: a win returns about {multiple}x your stake. Payout asymmetry only — not a statement about what is likely to happen.",
-    "bestOfCta": "Best of {n}"
+    "bestOfCta": "Best of {n}",
+    "walletCannotSign": "This wallet cannot sign transactions. Reconnect it and try again.",
+    "claimPayoutTitle": "Collect your payout",
+    "claimPayoutHint": "Settlement is pull-based: the oracle recorded the verdict, and each winning challenger withdraws their own share. Nothing expires — collect whenever you like.",
+    "claimPayoutBreakdown": "{gross} USDC won, {fee} USDC fee",
+    "claimPayoutCta": "Collect {net} USDC",
+    "claimPayoutPending": "Confirm in wallet...",
+    "claimPayoutSuccess": "Collected {net} USDC.",
+    "claimPayoutError": "Could not collect the payout.",
+    "claimPayoutRejected": "Payout signature rejected in your wallet.",
+    "claimPayoutCollected": "Payout collected.",
+    "claimPayoutChecking": "Checking your payout..."
   },
   "stamp": {
     "provenDecided": "Mimir has decided",
