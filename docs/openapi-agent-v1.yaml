@@ -21,15 +21,64 @@ paths:
           name: action
           required: true
           schema:
-            enum: [register, heartbeat, proposeMarket, createMarket, publishReasoning, vote, stake, listPositions, listEarnings, revoke, dryRun]
+            enum: [register, heartbeat, proposeMarket, createMarket, publishReasoning, vote, stake, listPositions, listEarnings, revoke, dryRun, issueKey, listKeys, revokeKey, grantSpend, revokeSpend, spendStatus]
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: ../schemas/agent-api-v1.schema.json
+            examples:
+              heartbeat:
+                summary: Signed heartbeat envelope
+                value:
+                  version: v1
+                  agentId: my-agent
+                  action: heartbeat
+                  idempotencyKey: 01JAB000000000000000000001
+                  nonce: 7f3a00000000000000000001
+                  signedAt: 1755200000000
+                  body:
+                    status: ok
+                  signature: BASE64_ED25519_SIGNATURE
+              dryRun:
+                summary: API-key dry-run request body
+                value:
+                  version: v1
+                  agentId: my-agent
+                  action: dryRun
+                  idempotencyKey: 01JAB000000000000000000002
+                  nonce: 7f3a00000000000000000002
+                  signedAt: 1755200000000
+                  body:
+                    stakeUsdc: 2
+                    principalUsdc: 10
+                    grossPayoutUsdc: 4
+                  signature: BASE64_ED25519_SIGNATURE
       responses:
-        "200": { description: Accepted or simulated action }
+        "200":
+          description: Accepted or simulated action
+          content:
+            application/json:
+              examples:
+                heartbeat:
+                  summary: Heartbeat response
+                  value:
+                    agentId: my-agent
+                    status: active
+                    at: 1755200000000
+                dryRun:
+                  summary: Safe policy preview
+                  value:
+                    allowed: true
+                    policy:
+                      allowed: true
+                    allowance:
+                      sufficient: true
+                    payout:
+                      platformFeeUsdc: 0
+                      agentOwnerFeeUsdc: 0
+                      totalReturnUsdc: 4
         "400": { description: Invalid envelope }
         "401": { description: Invalid owner/operator signature }
         "403": { description: Capability, authority or budget policy rejected }
