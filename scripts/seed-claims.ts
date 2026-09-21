@@ -28,6 +28,7 @@ import { createClaim } from "../lib/contract";
 import { readAgentBalances, walletFromKeypair } from "../lib/agent-wallets";
 import { requireMarketContractId } from "../lib/stellar";
 import { envValue } from "./lib/stellar-env";
+import { resolveSeedNow } from "./lib/demo-seed-clock";
 
 const DRY_RUN             = process.env.DRY_RUN === "1";
 const STAKE_USDC          = 2;
@@ -47,8 +48,8 @@ interface SeedClaim {
   label:           string;
 }
 
-function deadlineAt(secs: number): number {
-  return Math.floor(Date.now() / 1000) + secs;
+function deadlineAt(now: number, secs: number): number {
+  return now + secs;
 }
 
 const SEED_CLAIMS: SeedClaim[] = [
@@ -215,8 +216,10 @@ const SEED_CLAIMS: SeedClaim[] = [
 
 async function main(): Promise<void> {
   if (DRY_RUN) {
+    const seedNow = resolveSeedNow({ dryRun: true });
     console.log("═".repeat(47));
     console.log("  Mimir Seed Claims — DRY RUN (USDC stakes)");
+    console.log(`  Reference time: ${new Date(seedNow * 1000).toISOString()}`);
     console.log(`  ${SEED_CLAIMS.length} claims would be created`);
     console.log(`  Each stake: ${STAKE_USDC} USDC`);
     console.log(`  Total USDC needed: ~${SEED_CLAIMS.length * STAKE_USDC} USDC`);
@@ -238,6 +241,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const wallet = walletFromKeypair(Keypair.fromSecret(secret));
+  const seedNow = resolveSeedNow({ dryRun: false });
   const contractId = requireMarketContractId();
   const balances = await readAgentBalances(wallet.address);
 
@@ -280,7 +284,7 @@ async function main(): Promise<void> {
         creator_position: seed.creatorPosition,
         counter_position: seed.counterPosition,
         resolution_url:   seed.resolutionUrl,
-        deadline:         deadlineAt(seed.deadlineSecs),
+        deadline:         deadlineAt(seedNow, seed.deadlineSecs),
         stake_amount:     STAKE_USDC,
         category:         seed.category,
         market_type:      "binary",

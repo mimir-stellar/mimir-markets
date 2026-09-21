@@ -1075,7 +1075,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run test:squad`                         | Squad view and pool suites                                                         |
 | `npm run test:schema`                        | Schema backlog suites                                                              |
 | `npm run warm:vs-index`                      | Rebuild the Neon read-index from current on-chain state                            |
-| `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run)                                                  |
+| `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run); dry-run uses a stable timestamp and no secrets |
 | `npx tsx scripts/demo-full-cycle.ts`         | Full create -> challenge -> settle demo in ~90s                                    |
 | `npx tsx scripts/check-claim.ts <id>`        | Print a claim's state and deadline                                                 |
 
