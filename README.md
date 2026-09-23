@@ -786,6 +786,7 @@ mimir-markets/
 │   ├── x402/                             # config.ts (prices) · stellar-scheme.ts · server.ts · buyer.ts
 │   ├── paid-revenue.ts                   # atomic USDC settlement ledger
 │   ├── contract.ts                       # high-level TypeScript contract client
+│   ├── ci/                               # fail-closed changed-path scope (tier allowlist, under test)
 │   ├── db.ts                             # Neon read-index
 │   ├── llm.ts                            # model-routed LLM call
 │   ├── wallet.tsx                        # frontend wallet context (Stellar Wallets Kit)
@@ -805,7 +806,8 @@ mimir-markets/
 │   ├── x402-stellar-smoke.ts             # payment-scheme smoke against live Testnet
 │   ├── demo-full-cycle.ts                # full create -> challenge -> settle in 90s
 │   ├── seed-claims.ts                    # bulk-seed demo markets
-│   └── warm-vs-index.ts                  # rebuild Neon cache from on-chain
+│   ├── warm-vs-index.ts                  # rebuild Neon cache from on-chain
+│   └── ci/                               # changed-paths driver (CI matrix) + driver-parity check
 └── tests/node/                           # node:test unit + integration suites
 ```
 
@@ -1051,6 +1053,8 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run build` / `npm start`                | Production build / serve                                                           |
 | `npm run typecheck`                          | `tsc --noEmit` across app, workers and scripts                                     |
 | `npm run check:terms`                        | Forbidden-terms lint (keeps pre-Stellar chain names and bespoke-402 residue out)   |
+| `npm run check:driver-parity`                | Pin `scripts/ci/changed-paths.mjs` to `lib/ci/path-scope.ts` (lists + verdicts)    |
+| `npm run ci:changed-paths`                   | Classify the current change set locally (`--base <ref>`, same rules CI runs)       |
 | `npm run test:contracts`                     | `cargo test --release` over `contracts-soroban`                                     |
 | `npm run workers`                            | Run all agent workers in parallel (Railway entry point: oracle + market-creator + council + sync + traders) |
 | `npm run oracle`                             | Run only the oracle (settler; optionally `AUTO_CHALLENGE=1`)                       |
@@ -1078,6 +1082,30 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run)                                                  |
 | `npx tsx scripts/demo-full-cycle.ts`         | Full create -> challenge -> settle demo in ~90s                                    |
 | `npx tsx scripts/check-claim.ts <id>`        | Print a claim's state and deadline                                                 |
+
+### CI: fail-closed path filters
+
+CI decides what to run from an allowlist (`.github/workflows/ci.yml`). The
+`paths` job classifies every changed path via `scripts/ci/changed-paths.mjs`
+(mirrored and under test in `lib/ci/path-scope.ts`), then the `suites` matrix
+runs only the tiers (`app`, `agents`, `contracts`, `tests`) the change touches.
+The rules that keep it honest:
+
+- **Fail closed.** A path matching no scope is UNKNOWN and fails the job. When
+  the change set cannot be determined at all (missing event payload, failed
+  fetch, no merge-base), every tier runs. A green check never hides suites.
+- **Adding a scope is a reviewed decision.** New top-level directories, root
+  files and docs exemptions must be added to both `lib/ci/path-scope.ts` and
+  `scripts/ci/changed-paths.mjs`; `npm run check:driver-parity` fails when the
+  two drift, and `tests/node/ci-path-scope.test.ts` pins the behaviour.
+- **Doc-only changes** (README, CHANGELOG, LICENSE, `docs/`) are the only changes that
+  enable nothing.
+
+To preview what CI would run for your branch:
+
+```bash
+npm run ci:changed-paths -- --base origin/main
+```
 
 ---
 

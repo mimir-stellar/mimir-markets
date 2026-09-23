@@ -13,28 +13,78 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  # What changed? Fail-closed allowlist: a path is either a known scope or the
+  # job fails. Unknown paths never silently shrink what CI runs — see
+  # scripts/ci/changed-paths.mjs and lib/ci/path-scope.ts.
+  paths:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
+    outputs:
+      tiers_json: ${{ steps.paths.outputs.tiers_json }}
+      unknown: ${{ steps.paths.outputs.unknown }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # This job only reads the tree — it never pushes. Leaving the token in
-          # .git/config lets any later step (or an uploaded artifact) carry a
-          # credential that nothing here needs.
+          # merge-base needs real history; a shallow clone would make the path
+          # job fail closed on every run.
+          fetch-depth: 0
+          persist-credentials: false
+      - id: paths
+        # Exits 1 on an undecidable change set (after emitting the all-tier
+        # fallback) — that is the fail-closed signal, surfaced by the next step.
+        continue-on-error: true
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          args=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            args="--base $BEFORE"
+          fi
+          node scripts/ci/changed-paths.mjs $args
+      - name: surface an undecidable change set
+        run: |
+          if [ "${{ steps.paths.outcome }}" != "success" ]; then
+            echo "::error::changed-paths could not determine the change set (see the step log above). The suites below run ALL tiers as the fail-closed fallback — do not merge until the trigger context is fixed."
+            exit 1
+          fi
+          echo "resolved change set; tiers_json=${{ steps.paths.outputs.tiers_json }} unknown=${{ steps.paths.outputs.unknown }}"
+
+  # Tier suites. The union of all tiers equals the old single verify job; a
+  # tier runs only when a path in its scope changed (or when the change set was
+  # undecidable, in which case every tier runs).
+  suites:
+    needs: paths
+    if: ${{ !cancelled() && needs.paths.outputs.tiers_json != '' && needs.paths.outputs.tiers_json != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: ${{ fromJSON(needs.paths.outputs.tiers_json) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
+        if: matrix.tier != 'contracts'
       - run: npm run check:terms
       - run: npm run typecheck
+        if: matrix.tier != 'contracts'
+      # The driver and the tested scope module must agree before the matrix
+      # selection is trusted; a drift fails the tests tier instead of silently
+      # skewing what CI runs.
+      - run: npm run check:driver-parity
+        if: matrix.tier == 'tests'
       - run: npm run test:contracts
+        if: matrix.tier == 'contracts'
       - run: cargo build --manifest-path contracts-soroban/Cargo.toml --release --target wasm32v1-none
+        if: matrix.tier == 'contracts'
       - run: npm run test:smoke
+        if: matrix.tier == 'app' || matrix.tier == 'tests'
       - run: npm run build
+        if: matrix.tier == 'app'
