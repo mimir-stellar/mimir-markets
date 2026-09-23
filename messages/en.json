@@ -20,6 +20,8 @@
     "live": "Live",
     "cached": "Cached",
     "stale": "Stale",
+    "staleWarningTitle": "Challenge data may be out of date.",
+    "staleWarningDescription": "The read index is behind or its last update is unknown. Check the latest on-chain details before making a decision.",
     "refresh": "Refresh",
     "refreshing": "Refreshing",
     "sourceIndex": "indexed cache",
