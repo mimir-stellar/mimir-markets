@@ -518,6 +518,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // ── Signing ────────────────────────────────────────────────────────────────
 
   const signTransaction = useCallback<SignTransaction>(async (xdr, opts) => {
+    if (!addressRef.current) {
+      throw new Error(NO_WALLET);
+    }
+
     // SEP-43 has an optional "sign and submit for me" mode that the SDK's
     // SignTransaction type exposes and the kit's per-module `signTransaction`
     // does not implement — it would silently drop the flag and hand back an
@@ -529,6 +533,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         "This wallet layer does not sign-and-submit; submit the signed transaction through Soroban RPC.",
       );
     }
+
     const kit = await loadKit();
     const signerAddress = opts?.address ?? addressRef.current ?? undefined;
     try {
