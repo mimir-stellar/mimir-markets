@@ -79,7 +79,7 @@ import {
 } from "../../lib/stellar";
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll } from "../../lib/ops/heartbeat";
-import { unitsToUsdc, usdcToUnits } from "../../lib/usdc";
+import { unitsToUsdc, usdcToUnits, formatAtomicUsdc } from "../../lib/usdc";
 import {
   fetchEvidence as fetchEvidenceShared,
   EvidenceFetchError,
@@ -90,6 +90,8 @@ import {
   gatherCouncilVerdict,
   scoreCouncilVotes,
   payCouncilBonuses,
+  parseCouncilBonusPool,
+  isConfirmedCouncilSettlement,
   verdictToProbability,
   Q_PRIOR,
   type CouncilVote,
@@ -130,7 +132,7 @@ const COUNCIL_VOTE_CAP    = Number(process.env.COUNCIL_VOTE_CAP_USDC ?? "0.005")
 // oracle's terminal, history-informed assessment) split a bonus pool.
 const COUNCIL_SELF_RESOLVING = COUNCIL_SETTLEMENT && process.env.COUNCIL_SELF_RESOLVING === "1";
 const COUNCIL_ALPHA          = Number(process.env.COUNCIL_ALPHA ?? "0.25");
-const COUNCIL_BONUS_USDC     = Number(process.env.COUNCIL_BONUS_USDC ?? "0.01");
+const COUNCIL_BONUS_ATOMIC   = parseCouncilBonusPool(process.env.COUNCIL_BONUS_USDC ?? "0.01");
 const SETTLEMENT_DELAY_MS = Number(process.env.ORACLE_SETTLEMENT_DELAY_MS ?? "900000");
 
 // Free-tier Gemini is 5 RPM on new accounts and the oracle has no other rate
@@ -544,13 +546,27 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   // Cross-entropy bonuses AFTER the on-chain settle: informative jurors split
   // the pool, parrots and dissenters-from-evidence get nothing. Best-effort —
   // a failed transfer never affects the already-final settlement.
-  if (bonusVotes && COUNCIL_BONUS_USDC > 0) {
-    const receipts = await payCouncilBonuses(bonusVotes, COUNCIL_BONUS_USDC, ORACLE);
-    for (const r of receipts) {
-      console.log(`[settle] 🏆 Bonus ${r.bonusUsdc.toFixed(7)} USDC → ${r.slug}${r.txHash ? ` — ${getExplorerTxUrl(r.txHash)}` : " (transfer failed)"}`);
-    }
-    if (receipts.length === 0) {
-      console.log(`[settle] No positive-score jurors this round — bonus pool untouched.`);
+  if (bonusVotes && COUNCIL_BONUS_ATOMIC > 0n) {
+    try {
+      // The send response may be pending. Soroban, not the worker or DB, is the
+      // authority on whether this claim really resolved to this evidence hash.
+      const confirmed = settled.pending ? null : await fetchClaim(claim.id);
+      if (!isConfirmedCouncilSettlement(confirmed, verdictToSide(verdict.verdict), evidenceHash, Boolean(settled.pending))) {
+        console.warn(`[settle] Bonus for claim #${claim.id} withheld: resolution not confirmed on chain`);
+      } else {
+        const receipts = await payCouncilBonuses({
+          votes: bonusVotes, poolAtomic: COUNCIL_BONUS_ATOMIC, payerWallet: ORACLE,
+          claimId: claim.id, contractId: CONTRACT_ID, settlementTxHash: settled.txHash,
+        });
+        for (const r of receipts) {
+          console.log(`[settle] Bonus ${formatAtomicUsdc(r.amountAtomic)} USDC to ${r.slug}: ${r.status}${r.txHash ? ` (${getExplorerTxUrl(r.txHash)})` : ""}`);
+        }
+        if (receipts.length === 0) console.log(`[settle] No eligible positive-score jurors for claim #${claim.id}`);
+      }
+    } catch {
+      // Already-resolved market payouts are not rolled back by a bonus failure.
+      // Do not retry an uncertain classic payment automatically.
+      console.warn(`[settle] Bonus for claim #${claim.id} withheld for manual reconciliation`);
     }
   }
   return true;

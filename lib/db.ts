@@ -461,6 +461,23 @@ const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_resource ON payments_v2(resource)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_seller ON payments_v2(seller)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_tx ON payments_v2(network, transaction_hash, resource)" },
+  // The oracle's classic USDC bonus transfer is outside Soroban settlement.
+  // Reserve once before submission; an ambiguous failure stays held for manual
+  // reconciliation rather than risking a second transfer after a restart.
+  { sql: `CREATE TABLE IF NOT EXISTS council_bonus_payouts (
+    network TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    claim_id BIGINT NOT NULL CHECK (claim_id > 0),
+    juror_slug TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    amount_atomic NUMERIC(78,0) NOT NULL CHECK (amount_atomic > 0),
+    settlement_tx_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('reserved', 'confirmed', 'review')),
+    payment_tx_hash TEXT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    PRIMARY KEY (network, contract_id, claim_id, juror_slug)
+  )` },
   // Rebuildable read-index for MimirV2 fee events. Every monetary value stays
   // in atomic USDC units; transaction hash + log index makes replay idempotent.
   { sql: `CREATE TABLE IF NOT EXISTS fee_policies (
