@@ -53,7 +53,13 @@ applyWorkerGeminiKey("ORACLE_GEMINI_API_KEY");
 
 import { requireEnv, requireAnyLLMKey, applyWorkerGeminiKey, createThrottle } from "../../lib/agent-bootstrap";
 import { kellyFraction } from "../../lib/kelly";
-import { isVerdict, type Verdict } from "../../lib/verdict";
+import { type VerdictPayload } from "../../lib/verdict";
+import {
+  parseLLMVerdictWithRetry,
+  VERDICT_LLM_SCHEMA,
+  VERDICT_RETRY_SUFFIX,
+} from "../../lib/verdict-parser";
+// extractJson is passed as the injected extractor — keeps verdict-parser SDK-free.
 import { INJECTION_GUARD, fenceUntrusted } from "../../lib/prompt-safety";
 import { callLLM, activeLLMProvider, activeLLMModel, activeLLMKeyFingerprint, pickGeminiModel, extractJson } from "../../lib/llm";
 import {
@@ -154,24 +160,10 @@ const ORACLE_PAYER  = payingWalletFor(ORACLE);
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ClaimOnChain = ClaimData;
 
-interface OracleVerdict {
-  verdict:     Verdict;
-  confidence:  number;
-  explanation: string;
-}
-
-// Gemini responseSchema for evaluateClaim's verdict — see lib/llm.ts jsonSchema
-// comment. responseMimeType alone still let the model answer in prose for some
-// claims (observed in prod: markdown bullet breakdowns instead of JSON).
-const ORACLE_VERDICT_SCHEMA = {
-  type: "object",
-  properties: {
-    verdict: { type: "string", enum: ["CREATOR_WINS", "CHALLENGERS_WIN", "DRAW", "UNRESOLVABLE"] },
-    confidence: { type: "integer" },
-    explanation: { type: "string" },
-  },
-  required: ["verdict", "confidence", "explanation"],
-} as const;
+// VerdictPayload (verdict + confidence + explanation) is the canonical shape
+// the LLM must emit, defined in lib/verdict.ts. OracleVerdict is an alias kept
+// so the rest of this file (tierVerdict, verdictToSide, etc.) needs no rename.
+type OracleVerdict = VerdictPayload;
 
 // ── Fetch claim from contract ─────────────────────────────────────────────────
 // `readClaimRaw` already retries and returns null for a missing claim (Soroban
@@ -303,44 +295,30 @@ Return JSON only:
   // which used to settle claims as UNRESOLVABLE. Parse failure THROWS so the
   // poll loop retries next round instead of finalizing a refund on-chain.
   //
-  // Gemini still intermittently ignores responseSchema and restates the claim as
-  // a markdown bullet list instead of emitting JSON (seen in prod on stock
-  // claims). Since the model+prompt are deterministic per agent, retrying next
-  // poll can loop forever on the same claim — so retry once inline with a
-  // hardened "JSON only" nudge before throwing. We never salvage the prose into
-  // a money decision; if both attempts fail to parse, we throw and wait.
-  let parsed: OracleVerdict | null = null;
-  let lastText = "";
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const attemptPrompt = attempt === 1
-      ? prompt
-      : `${prompt}\n\nCRITICAL: Output ONLY the raw JSON object above. Do NOT restate the question, do NOT explain your reasoning outside the "explanation" field, do NOT use markdown or bullet lists. Your entire response must start with { and end with }.`;
-    lastText = await throttledLLM(attemptPrompt, {
-      maxTokens: 1024,
-      jsonOnly: true,
-      model: pickGeminiModel("oracle"),
-      jsonSchema: ORACLE_VERDICT_SCHEMA,
-    });
-    const jsonStr = extractJson(lastText);
-    if (!jsonStr) continue;
-    try {
-      parsed = JSON.parse(jsonStr) as OracleVerdict;
-      break;
-    } catch {
-      parsed = null;
-    }
+  // parseLLMVerdictWithRetry runs up to two attempts: the first with the base
+  // prompt, and — if parsing fails — a second with VERDICT_RETRY_SUFFIX appended
+  // as a hardened "JSON only" nudge. We never salvage prose into a money decision;
+  // if both attempts fail to parse, we throw so the poll loop retries next round.
+  const { result, lastRawText, attempts } = await parseLLMVerdictWithRetry({
+    extractor: extractJson,
+    buildPrompt: (attempt) =>
+      attempt === 1 ? prompt : `${prompt}${VERDICT_RETRY_SUFFIX}`,
+    callLLMFn: (p) =>
+      throttledLLM(p, {
+        maxTokens: 1024,
+        jsonOnly: true,
+        model: pickGeminiModel("oracle"),
+        jsonSchema: VERDICT_LLM_SCHEMA,
+      }),
+  });
+
+  if (!result.ok) {
+    throw new Error(
+      `Oracle verdict ${result.reason} after ${attempts} attempt(s): ${result.detail} — raw: ${lastRawText.slice(0, 200)}`,
+    );
   }
-  if (!parsed) {
-    throw new Error(`Oracle verdict unparseable (no JSON after retry): ${lastText.slice(0, 200)}`);
-  }
-  if (!isVerdict(parsed.verdict)) {
-    throw new Error(`Oracle verdict invalid: ${String(parsed.verdict).slice(0, 50)}`);
-  }
-  return {
-    verdict: parsed.verdict,
-    confidence: Math.max(0, Math.min(100, Math.round(parsed.confidence ?? 50))),
-    explanation: (parsed.explanation ?? "").slice(0, 500),
-  };
+
+  return result.payload;
 }
 
 /**

@@ -3,13 +3,29 @@
  *
  * Wraps the same evaluation logic the oracle uses, but prepends each
  * persona's `promptBias` so the LLM "thinks" through that worldview.
- * Output schema and confidence parsing match the oracle exactly so the
- * downstream Kelly sizing + commit logic can be shared.
+ * Output schema and confidence parsing match the oracle exactly (shared
+ * VERDICT_LLM_SCHEMA + parseLLMVerdictWithRetry) so validation behaviour
+ * is identical at every settlement boundary.
+ *
+ * Failure semantics differ deliberately from the oracle:
+ *   - The oracle THROWS on unparseable output so the poll loop retries the
+ *     full settlement next round — a mis-parse must never silently produce a
+ *     money decision on-chain.
+ *   - A council persona FALLS BACK to UNRESOLVABLE/0 on any unrecoverable
+ *     parse error, because an abstaining juror is acceptable; the quorum
+ *     check in gatherCouncilVerdict handles an under-staffed jury.
+ *   - A dependency failure (LLM API down) is treated the same way — the
+ *     persona abstains and the oracle may fall back to solo settlement.
  */
 
 import { callLLM, pickGeminiModel, extractJson } from "../../../lib/llm";
 import { unitsToUsdc } from "../../../lib/usdc";
-import { isVerdict, type Verdict } from "../../../lib/verdict";
+import { type Verdict } from "../../../lib/verdict";
+import {
+  parseLLMVerdictWithRetry,
+  VERDICT_LLM_SCHEMA,
+  VERDICT_RETRY_SUFFIX,
+} from "../../../lib/verdict-parser";
 import type { PersonaSpec } from "../personas";
 import type { ClaimOnChain } from "./types";
 
@@ -24,6 +40,13 @@ export interface PersonaVerdict {
   confidence:  number;
   explanation: string;
 }
+
+/** Returned when parsing fails after both attempts — juror abstains. */
+const ABSTAIN_FALLBACK = (displayName: string, detail: string): PersonaVerdict => ({
+  verdict:     "UNRESOLVABLE",
+  confidence:  0,
+  explanation: `[${displayName} abstained — ${detail}]`.slice(0, 500),
+});
 
 export async function evaluateClaimAsPersona(
   persona: PersonaSpec,
@@ -77,29 +100,31 @@ Return JSON only:
 - Stay in character (${persona.displayName}) when writing the explanation.
 - Never invent evidence. Cite what you actually saw above.`;
 
-  const text = await callLLM(prompt, {
-    maxTokens: 512,
-    jsonOnly: true,
-    model: pickGeminiModel(persona.slug),
+  // parseLLMVerdictWithRetry makes up to two LLM calls:
+  //   attempt 1 — base prompt with VERDICT_LLM_SCHEMA for Gemini structured output.
+  //   attempt 2 — same prompt + VERDICT_RETRY_SUFFIX when attempt 1 is unparseable.
+  // On any unrecoverable failure the persona abstains (UNRESOLVABLE/0) rather
+  // than throwing — a juror abstaining is acceptable; settlement must not be
+  // blocked by one bad LLM response.
+  const { result } = await parseLLMVerdictWithRetry({
+    extractor: extractJson,
+    buildPrompt: (attempt) =>
+      attempt === 1 ? prompt : `${prompt}${VERDICT_RETRY_SUFFIX}`,
+    callLLMFn: (p) =>
+      callLLM(p, {
+        maxTokens: 512,
+        jsonOnly: true,
+        model: pickGeminiModel(persona.slug),
+        jsonSchema: VERDICT_LLM_SCHEMA,
+      }),
   });
 
-  try {
-    const jsonStr = extractJson(text);
-    if (!jsonStr) throw new Error("No JSON");
-    const parsed = JSON.parse(jsonStr) as PersonaVerdict;
-    if (!isVerdict(parsed.verdict)) {
-      throw new Error("Invalid verdict");
-    }
-    return {
-      verdict:     parsed.verdict,
-      confidence:  Math.max(0, Math.min(100, Math.round(parsed.confidence ?? 50))),
-      explanation: (parsed.explanation ?? "").slice(0, 500),
-    };
-  } catch {
-    return {
-      verdict:     "UNRESOLVABLE",
-      confidence:  0,
-      explanation: `[${persona.displayName} failed to parse LLM response]`,
-    };
+  if (!result.ok) {
+    return ABSTAIN_FALLBACK(
+      persona.displayName,
+      `${result.reason}: ${result.detail.slice(0, 120)}`,
+    );
   }
+
+  return result.payload;
 }
