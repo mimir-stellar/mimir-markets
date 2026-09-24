@@ -28,12 +28,17 @@ function authorizeWorker(request: Request, route: string) {
 export async function GET(request: Request) {
   try {
     const auth = authorizeWorker(request, "/api/cron/challenge-opportunities");
-    if (!auth.allowed && auth.error) {
+    if (!auth.allowed) {
+      // Fail closed: unauthorized or malformed requests are rejected immediately.
       // The tier's error already carries a machine-readable code, a retryable flag
       // and a Retry-After when waiting can help.
-      return NextResponse.json(auth.error.body, {
-        status: auth.error.status,
-        headers: auth.error.headers,
+      const errorResponse = auth.error
+        ? auth.error
+        : createApiError("unauthorized", "Unauthorized cron call");
+
+      return NextResponse.json(errorResponse, {
+        status: auth.error?.status ?? 401,
+        headers: auth.error?.headers,
       });
     }
 

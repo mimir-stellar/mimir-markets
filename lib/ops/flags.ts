@@ -30,6 +30,7 @@ export const PAUSABLE = [
   "market_creator_worker",
   "council_worker",
   "oracle_settlement",
+  "cron_execution",
 ] as const;
 export type Pausable = (typeof PAUSABLE)[number];
 

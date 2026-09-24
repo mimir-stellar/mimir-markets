@@ -36,7 +36,9 @@ export type ApiErrorCode =
   | "budget_exhausted"
   // ── 5xx and upstream ──
   | "upstream_unavailable"
-  | "internal_error";
+  | "internal_error"
+  // ── 403: Cron-specific failures ──
+  | "cron_unauthorized";
 
 interface ErrorSpec {
   status: number;
@@ -75,6 +77,10 @@ const SPECS: Record<ApiErrorCode, ErrorSpec> = {
 
   upstream_unavailable: { status: 503, retryable: true, retryAfterSeconds: 30 },
   internal_error: { status: 500, retryable: true, retryAfterSeconds: 5 },
+
+  // Cron jobs must fail closed on unauthorized access to preserve contract-first
+  // accounting and prevent unauthorized state mutations.
+  cron_unauthorized: { status: 403, retryable: false },
 };
 
 export interface ApiError extends ApiErrorShape {

@@ -38,16 +38,16 @@ function authorizeWorker(request: Request, route: string) {
 }
 
 export async function GET(request: Request) {
-  // Authorized outside the try: an unauthenticated caller must never reach the
-  // heartbeat below, not even through the error path, or it could keep a dead
-  // sync worker looking merely degraded instead of missing.
+  // Fail closed on unauthorized cron calls. An unauthenticated caller must never
+  // reach the heartbeat below, not even through the error path, or it could keep
+  // a dead sync worker looking merely degraded instead of missing.
   const auth = authorizeWorker(request, "/api/cron/sync");
-  if (!auth.allowed && auth.error) {
+  if (!auth.allowed) {
     // The tier's error already carries a machine-readable code, a retryable flag
     // and a Retry-After when waiting can help.
-    return NextResponse.json(auth.error.body, {
-      status: auth.error.status,
-      headers: auth.error.headers,
+    return NextResponse.json(auth.error?.body ?? { error: "unauthorized" }, {
+      status: auth.error?.status ?? 401,
+      headers: auth.error?.headers,
     });
   }
 
