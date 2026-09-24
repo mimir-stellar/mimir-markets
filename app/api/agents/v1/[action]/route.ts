@@ -36,7 +36,7 @@ import { buildAgentDryRun } from "@/lib/agents/dry-run";
 import { isFeatureEnabled, checkWriteAllowed, type Pausable } from "@/lib/ops/flags";
 import { getUsdcBalanceUnits, usdcToUnits, parseUsdcAtomic } from "@/lib/usdc";
 import { getAgentEarningsSummary } from "@/lib/db";
-import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
+import { gateOrPause } from "@/lib/server/pause-registry";
 import { apiError } from "@/lib/api/errors";
 
 export const dynamic = "force-dynamic";
@@ -375,7 +375,12 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
     if (!gate.allowed) {
       await audit(request, "rejected", gate.reason);
-      return errorResponse(actionVerdictToError(gate, "researcher"));
+      const message = gate.detail ?? gate.reason ?? "research action denied";
+      if (gate.reason === "revoked") return errorResponse(apiError("agent_revoked", message));
+      if (gate.reason === "paused") return errorResponse(apiError("agent_paused", message));
+      if (gate.reason === "missing_capability") return errorResponse(apiError("capability_missing", message));
+      if (gate.reason === "rate_limit_exceeded") return errorResponse(apiError("rate_limited", message));
+      return errorResponse(apiError("forbidden", message));
     }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
   } else {
