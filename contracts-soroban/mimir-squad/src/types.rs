@@ -79,4 +79,6 @@ pub enum Error {
     UnsupportedToken = 23,
     Overflow = 24,
     UnsupportedDecimals = 25,
+    /// Payout is parked because the recipient's trustline is frozen or invalid.
+    PayoutParked = 26,
 }
