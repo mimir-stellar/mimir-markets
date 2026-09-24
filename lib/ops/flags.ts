@@ -121,6 +121,7 @@ export const FEATURES = [
   "virtual_baskets",
   "agent_baskets",
   "fee_policy",
+  "x402_quote_expiry",
 ] as const;
 export type Feature = (typeof FEATURES)[number];
 
@@ -152,6 +153,9 @@ const FEATURE_DEFAULTS: Record<Feature, boolean> = {
   // independent audit yet (see docs/LAUNCH_GATE_STATUS.md). Turning this on before
   // that gate closes would charge fees against an escrow nobody has reviewed.
   fee_policy: false,
+  // x402_quote_expiry: Enforces strict expiration on payment quotes to preserve
+  // contract-first accounting and prevent stale quote exploitation.
+  x402_quote_expiry: true,
 };
 
 function featureEnvKey(feature: Feature): string {
