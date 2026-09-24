@@ -240,9 +240,15 @@ pub fn transition_deadline(env: &Env, claim_id: u64) -> Result<(), Error> {
 
     // Cancellation is a refund: no fee.
     let usdc = storage::usdc(env)?;
+    let pending_before = storage::withdrawable(env, &creator);
     escrow::push_or_park(env, &usdc, &creator, refund);
 
-    events::ClaimCancelled { id: claim_id }.publish(env);
+    events::ClaimCancelled {
+        id: claim_id,
+        refund,
+        parked: storage::withdrawable(env, &creator) > pending_before,
+    }
+    .publish(env);
     Ok(())
 }
 
