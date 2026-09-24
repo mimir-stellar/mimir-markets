@@ -7,9 +7,11 @@
  * This is what binds the 10 personas to settlement: every juror is paid, and
  * the consensus — not a single oracle call — decides the payout.
  *
- * Best-effort: any persona that errors or times out simply abstains. If fewer
- * than `quorum` decisive votes come back, returns null so the caller falls back
- * to its own (solo) verdict — council voting never blocks a settlement.
+ * Best-effort: any persona that errors or times out is a dependency_failure
+ * abstention (see `lib/council/quorum.ts`). Invalid, stale, duplicated, and
+ * cancelled votes never pad the jury. If fewer than `quorum` decisive votes
+ * remain, returns null so the caller falls back to its own (solo) verdict —
+ * council voting never blocks a settlement of an open/active claim.
  *
  * Self-resolving mode (opt-in via `selfResolving` config) implements the
  * mechanism from "Self-Resolving Prediction Markets for Unverifiable Outcomes"
@@ -27,6 +29,13 @@ import { transferUsdc, type AgentWallet } from "../../lib/agent-wallets";
 import { isAccountAddress } from "../../lib/stellar";
 import { usdcToUnits } from "../../lib/usdc";
 import { isVerdict, type Verdict } from "../../lib/verdict";
+import {
+  classifyVoteAttempt,
+  evaluateQuorum,
+  normalizeQuorum,
+  type ClaimSettleState,
+  type ClassifiedVote,
+} from "../../lib/council/quorum";
 
 export type { Verdict };
 
@@ -177,11 +186,23 @@ export async function gatherCouncilVerdict(args: {
   votePriceBot?: number;
   capUsdc?: number;
   quorum?: number;
+  /**
+   * On-chain claim lifecycle. Cancelled / already-resolved claims abort
+   * before a council tally can override chain-as-source-of-truth.
+   */
+  claimState?: ClaimSettleState;
   /** Enables the sequential self-resolving mechanism (see module header). */
   selfResolving?: SelfResolvingConfig;
 }): Promise<CouncilVerdict | null> {
   const capUnits = usdcToUnits(args.capUsdc ?? 0.005);
-  const quorum = args.quorum ?? 3;
+  const quorum = normalizeQuorum(args.quorum ?? 3);
+  const claimState: ClaimSettleState = args.claimState ?? "active";
+  // Cancelled / resolved claims never buy votes — chain already decided.
+  if (claimState === "cancelled" || claimState === "resolved") {
+    const gate = evaluateQuorum([], quorum, { claimState });
+    console.warn(`[council] ${gate.reason}`);
+    return null;
+  }
   const sr = args.selfResolving;
   // Random order prevents the same persona from always reporting first
   // (uninformed) or last (most informed) — part of the mechanism's
@@ -190,6 +211,8 @@ export async function gatherCouncilVerdict(args: {
   if (personas.length === 0) return null;
 
   const votes: CouncilVote[] = [];
+  const classified: ClassifiedVote[] = [];
+  const seenSlugs = new Set<string>();
   const qHistory: number[] = [];
   const history: string[] = [];
   let qPrev = Q_PRIOR;
@@ -205,15 +228,55 @@ export async function gatherCouncilVerdict(args: {
     }
     try {
       const r = await fetchWithBudget(url, args.payer, capUnits);
-      if (!r.response.ok) continue;
-      const body = (await r.response.json()) as VoteResponse;
-      const verdict = body.verdict;
-      if (!isVerdict(verdict)) {
+      if (!r.response.ok) {
+        classified.push(
+          classifyVoteAttempt({
+            slug: p.slug,
+            claimId: args.claimId,
+            expectedClaimId: args.claimId,
+            claimState,
+            status: "http_error",
+            httpStatus: r.response.status,
+          }),
+        );
         continue;
       }
+      const body = (await r.response.json()) as VoteResponse;
+      const bodyClaimId =
+        typeof (body as { claimId?: unknown }).claimId === "number"
+          ? (body as { claimId: number }).claimId
+          : args.claimId;
+      const classifiedVote = classifyVoteAttempt({
+        slug: p.slug,
+        claimId: bodyClaimId,
+        expectedClaimId: args.claimId,
+        claimState,
+        status: "ok",
+        verdict: body.verdict,
+        confidence: body.confidence,
+      });
+      // First valid vote per slug wins; later ones are duplicated and dropped.
+      if (classifiedVote.disposition === "valid" && seenSlugs.has(classifiedVote.slug)) {
+        classified.push({
+          ...classifiedVote,
+          disposition: "duplicated",
+          reason: `duplicate vote for persona '${classifiedVote.slug}'`,
+          decisive: false,
+          verdict: undefined,
+          confidence: undefined,
+        });
+        continue;
+      }
+      classified.push(classifiedVote);
+      if (classifiedVote.disposition !== "valid" || !classifiedVote.verdict) {
+        continue;
+      }
+      seenSlugs.add(classifiedVote.slug);
+      const verdict = classifiedVote.verdict;
+      if (!isVerdict(verdict)) continue;
       const priceUnits = r.payment?.priceUnits ?? null;
       if (priceUnits != null) totalPaidUnits += priceUnits;
-      const confidence = Math.max(0, Math.min(100, Math.round(body.confidence ?? 0)));
+      const confidence = classifiedVote.confidence ?? 0;
       const vote: CouncilVote = {
         slug: p.slug,
         displayName: p.displayName,
@@ -243,7 +306,16 @@ export async function gatherCouncilVerdict(args: {
         break;
       }
     } catch {
-      // persona abstains on any error
+      // persona abstains on dependency failure — recorded for quorum audit
+      classified.push(
+        classifyVoteAttempt({
+          slug: p.slug,
+          claimId: args.claimId,
+          expectedClaimId: args.claimId,
+          claimState,
+          status: "network_error",
+        }),
+      );
     }
   }
 
@@ -256,8 +328,12 @@ export async function gatherCouncilVerdict(args: {
   }
   tally.decisive = tally.creator + tally.challengers;
 
-  // Not enough jurors voted decisively — let the caller settle solo.
-  if (tally.decisive < quorum) return null;
+  // Quorum + fallback policy: below quorum / dependency-heavy ballots → solo.
+  const gate = evaluateQuorum(classified, quorum, { claimState });
+  if (gate.action !== "use_council") {
+    console.warn(`[council] ${gate.reason}`);
+    return null;
+  }
 
   let verdict: Verdict;
   let winningVotes: CouncilVote[];

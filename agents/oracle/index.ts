@@ -88,6 +88,7 @@ import {
   Q_PRIOR,
   type CouncilVote,
 } from "./council-vote";
+import { normalizeQuorum } from "../../lib/council/quorum";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -114,7 +115,7 @@ const EVIDENCE_MIN_USDC   = Number(process.env.EVIDENCE_MIN_USDC ?? "0.001");// 
 // if too few jurors vote. Off by default so a missing web server never blocks settlement.
 const COUNCIL_SETTLEMENT  = process.env.COUNCIL_SETTLEMENT === "1";
 const COUNCIL_BASE_URL    = process.env.MIMIR_BASE_URL ?? "http://localhost:3000";
-const COUNCIL_QUORUM      = Number(process.env.COUNCIL_QUORUM ?? "3");
+const COUNCIL_QUORUM      = normalizeQuorum(process.env.COUNCIL_QUORUM ?? "3");
 const COUNCIL_VOTE_CAP    = Number(process.env.COUNCIL_VOTE_CAP_USDC ?? "0.005");
 
 // Self-resolving jury (arXiv:2306.04305): jurors vote sequentially in random
@@ -501,6 +502,7 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
       payer:         ORACLE_PAYER,
       capUsdc:       COUNCIL_VOTE_CAP,
       quorum:        COUNCIL_QUORUM,
+      claimState:    claim.state,
       ...(COUNCIL_SELF_RESOLVING
         ? { selfResolving: { alpha: COUNCIL_ALPHA, minVotes: COUNCIL_QUORUM } }
         : {}),
@@ -526,7 +528,7 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
       rawVerdict = { verdict: council.verdict, confidence: council.confidence, explanation: council.explanation };
       commit = `${evidence.text}\n[council]${JSON.stringify(council.tally)}`;
     } else {
-      console.log(`[settle] Council below quorum — settling solo.`);
+      console.log(`[settle] Council quorum/fallback gate — settling solo.`);
       rawVerdict = await evaluateClaim(claim, evidence.text);
     }
   } else {
