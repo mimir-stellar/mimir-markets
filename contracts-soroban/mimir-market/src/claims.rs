@@ -109,6 +109,14 @@ pub fn create_claim(env: &Env, creator: Address, params: CreateParams) -> Result
         category,
     }
     .publish(env);
+    events::FeePolicySnapshotted {
+        id,
+        platform_fee_bps: snapshot.platform_fee_bps,
+        agent_owner_fee_bps: snapshot.agent_owner_fee_bps,
+        platform_recipient: snapshot.platform_recipient.clone(),
+        agent_owner_recipient: snapshot.agent_owner_recipient.clone(),
+    }
+    .publish(env);
     if let Some(agent) = params.agent_owner_recipient {
         events::AgentAttributed {
             id,
