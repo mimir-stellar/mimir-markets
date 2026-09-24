@@ -6,7 +6,7 @@ export const AGENT_API_ACTIONS = [
   "vote", "stake", "listPositions", "listEarnings", "revoke", "dryRun",
   // Credential and budget management. issueKey/revokeKey and grantSpend are
   // owner-signed; the rest an agent may call with its own key.
-  "issueKey", "listKeys", "revokeKey", "grantSpend", "revokeSpend", "spendStatus",
+  "issueKey", "listKeys", "revokeKey", "grantSpend", "revokeSpend", "spendStatus", "fetchResearch",
 ] as const;
 export type AgentApiAction = (typeof AGENT_API_ACTIONS)[number];
 
