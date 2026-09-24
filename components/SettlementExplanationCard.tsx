@@ -8,6 +8,7 @@ import { GlassCard } from "@/components/ui";
 import { formatDeadline, normalizeResolutionSource } from "@/lib/constants";
 import { computeClaimQuality } from "@/lib/claimQuality";
 import type { VSData } from "@/lib/contract";
+import SettlementReceipt from "@/components/SettlementReceipt";
 
 type SettlementExplanationCardProps = {
   vs: VSData;
@@ -231,7 +232,7 @@ export default function SettlementExplanationCard({
             </div>
           </div>
 
-          {/* SETTLEMENT RECEIPT removed by design request */}
+          <SettlementReceipt vs={vs} />
         </div>
       </div>
     </GlassCard>

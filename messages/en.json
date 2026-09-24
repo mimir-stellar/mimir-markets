@@ -644,6 +644,28 @@
       "challengers": "Challenger side wins",
       "draw": "Draw",
       "unresolvable": "Marked unresolvable"
+    },
+    "receiptPot": "Total pot",
+    "receiptRemainingEscrow": "Remaining escrow",
+    "receiptWinner": "Winner address",
+    "receiptOutcomeNone": "No outcome recorded",
+    "receiptValueUnavailable": "—",
+    "receiptChainNote": "Amounts and outcome come from the on-chain claim record. Challenger payouts stay pull-based after settlement.",
+    "receiptStatus": {
+      "loading": "Loading",
+      "invalid": "Not settled",
+      "stale": "Stale",
+      "disconnected": "Disconnected",
+      "dependency_failure": "Unavailable",
+      "ready": "Final"
+    },
+    "receiptStatusHint": {
+      "loading": "Fetching the contract-backed settlement receipt.",
+      "invalid": "This claim is not settled yet, so no settlement receipt is available.",
+      "stale": "Showing the last known settlement receipt. Refresh if the market may have changed.",
+      "disconnected": "Wallet or network is disconnected. Reconnect to verify the live on-chain receipt.",
+      "dependency_failure": "Settlement fields could not be mapped from the claim record. Retry after the index catches up.",
+      "ready": "Contract-backed settlement receipt for this claim."
     }
   },
   "dashboard": {
