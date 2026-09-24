@@ -1618,6 +1618,10 @@
     "expiredNoRivalHintCreator": "Challenges are now closed because the deadline has passed. Cancel to reclaim your stake.",
     "expiredNoRivalHintViewer": "Challenges are now closed because the deadline has passed without a rival joining.",
     "notFound": "VS not found",
+    "loadingRetry": "Waiting for on-chain data…",
+    "dependencyFailure": "Could not reach the contract. Check your connection and try again.",
+    "invalidMarketId": "Invalid market ID.",
+    "refreshAriaLabel": "Refresh market data",
     "progressAriaLabel": "Challenge lifecycle progress",
     "progressSectionKicker": "Challenge lifecycle",
     "progressStepFraction": "Step {current} of {total}",
@@ -2020,16 +2024,42 @@
     "fresh_hours": "captured {value}h ago",
     "fresh_days": "captured {value}d ago"
   },
-  "fees": {
-    "loadFailed": "Could not read the fee schedule from the network.",
-    "agentWhatYouEarn": "What you earn",
-    "agentDescription1": "When somebody else profits through your agent you take <strong>{agent}%</strong> of their profit, and the protocol takes <strong>{platform}%</strong>. Fees are charged on profit only, never on the stake - so a winner never receives less than they put in, and a loser is charged nothing.",
-    "agentDescription2": "Using your own agent costs you no agent fee. You would only be paying yourself.",
-    "basketWhatYouEarn": "What you earn",
-    "basketDescription1": "When somebody profits by following your basket you take <strong>{basket}%</strong> of their profit. The agents' owners keep their <strong>{agent}%</strong> and the protocol takes <strong>{platform}%</strong> - all charged on profit only.",
-    "basketDescription2": "Following your own basket costs you no basket fee.",
-    "followDescription": "On profit: {platform}% protocol, {agent}% to the agents' owners, {basketPart}. Losses are never charged.",
-    "followBasketIsOwn": "and no basket fee � this basket is yours",
-    "followBasketCreator": "{basket}% to whoever composed it"
+  "researchCitations": {
+    "title": "Research sources",
+    "excerpt": "Excerpt",
+    "noHash": "No content hash",
+    "unsafeLink": "Link blocked",
+    "duplicatedNote": "{count} duplicate source(s) collapsed.",
+    "privacyNote": "Citations show public source links and content hashes only — no wallet addresses, prompts, or analytics identifiers.",
+    "trust": {
+      "primary": "Primary",
+      "corroborating": "Corroborating",
+      "unverified": "Unverified",
+      "unknown": "Unspecified"
+    },
+    "status": {
+      "ready": "Cited",
+      "empty": "No sources",
+      "invalid": "Invalid",
+      "stale": "Stale",
+      "cancelled": "Cancelled",
+      "dependency_failure": "Unavailable"
+    },
+    "statusHint": {
+      "ready": "Research-source citations for this claim. Hashes let you verify the page later.",
+      "empty": "No research sources were attached to this view.",
+      "invalid": "Source links were missing or unsafe, so citations are not shown.",
+      "stale": "Cited sources look stale relative to the claim deadline or freshness window.",
+      "cancelled": "This claim is cancelled, so research citations are withheld.",
+      "dependency_failure": "Citation fields could not be mapped from the source record."
+    },
+    "rowStatus": {
+      "ready": "Ready",
+      "invalid": "Invalid",
+      "stale": "Stale",
+      "duplicated": "Duplicate",
+      "cancelled": "Cancelled",
+      "dependency_failure": "Bad hash"
+    }
   }
 }
