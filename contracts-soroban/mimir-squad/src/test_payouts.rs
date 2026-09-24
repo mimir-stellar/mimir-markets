@@ -575,3 +575,8 @@ fn preview_is_zero_for_non_winners_and_unresolved_markets() {
     let stranger = Address::generate(&f.env);
     assert_eq!(f.client().preview_claim(&id, &SIDE_A, &stranger).net, 0);
 }
+
+#[test]
+fn conservation_error_code_is_stable() {
+    assert_eq!(Error::ConservationViolation as u32, 26);
+}

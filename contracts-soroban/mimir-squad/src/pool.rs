@@ -17,6 +17,33 @@ fn require_side(side: u32) -> Result<(), Error> {
     Ok(())
 }
 
+/// Invariant: escrow accounting must conserve funds.
+///
+/// After resolve, `remaining_escrow == pool_a + pool_b`.
+/// After each claim, `remaining_escrow` never goes negative and never exceeds
+/// the original pools. Fees are accrued separately and are not part of
+/// `remaining_escrow`.
+fn assert_market_conservation(market: &Market) -> Result<(), Error> {
+    if market.remaining_escrow < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    if market.pool_a < 0 || market.pool_b < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    if market.resolved {
+        let total = market
+            .pool_a
+            .checked_add(market.pool_b)
+            .ok_or(Error::Overflow)?;
+        // Remaining escrow must never exceed the resolved pool total.
+        if market.remaining_escrow > total {
+            return Err(Error::ConservationViolation);
+        }
+    }
+    Ok(())
+}
+
+
 pub fn initialize(
     env: &Env,
     usdc: Address,
@@ -215,7 +242,11 @@ pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
 
     market.resolved = true;
     market.result = result;
-    market.remaining_escrow = market.pool_a + market.pool_b;
+    market.remaining_escrow = market
+        .pool_a
+        .checked_add(market.pool_b)
+        .ok_or(Error::Overflow)?;
+    assert_market_conservation(&market)?;
     storage::set_market(env, market_id, &market);
 
     events::Resolved {
@@ -291,10 +322,17 @@ pub fn claim(
             .ok_or(Error::Overflow)?;
     }
 
-    market.remaining_escrow -= gross;
+    market.remaining_escrow = market
+        .remaining_escrow
+        .checked_sub(gross)
+        .ok_or(Error::ConservationViolation)?;
+    assert_market_conservation(&market)?;
     storage::set_market(env, market_id, &market);
 
-    let net = gross - fee;
+    let net = gross.checked_sub(fee).ok_or(Error::ConservationViolation)?;
+    if net < 0 {
+        return Err(Error::ConservationViolation);
+    }
     storage::set_accrued_fees(env, storage::accrued_fees(env) + fee);
 
     let usdc = storage::usdc(env)?;
