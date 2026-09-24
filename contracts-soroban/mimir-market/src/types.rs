@@ -257,4 +257,10 @@ pub enum Error {
     AlreadyClaimedPayout = 34,
     ChallengersDidNotWin = 35,
     UnsupportedDecimals = 36,
+    /// The parent claim referenced by `parent_id` does not exist.
+    ParentClaimNotFound = 37,
+    /// The parent claim is not in a state that allows creating a rematch.
+    ParentClaimInvalidState = 38,
+    /// The parent claim has already been used for a rematch (no duplicate rematches).
+    ParentClaimAlreadyRematched = 39,
 }

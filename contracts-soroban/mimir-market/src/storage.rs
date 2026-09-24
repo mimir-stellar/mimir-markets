@@ -5,7 +5,7 @@
 
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
-use crate::types::{Challenger, Claim, Error, FeePolicy, PendingFeePolicy};
+use crate::types::{Challenger, Claim, Error, FeePolicy, PendingFeePolicy, RematchStatus};
 
 #[contracttype]
 #[derive(Clone)]
@@ -27,6 +27,8 @@ pub enum DataKey {
     Withdrawable(Address),
     /// Accrued, unclaimed fees. Always pulled, never pushed.
     Accrued(Address),
+    /// Rematch parent link validation cache: (parent_id, child_id) -> RematchStatus
+    RematchParent(u64, u64),
 }
 
 /// Persistent entries are bumped to roughly 30 days of ledgers on touch so an
@@ -234,4 +236,33 @@ pub fn add_accrued_fees(env: &Env, who: &Address, delta: i128) {
 
 pub fn clear_accrued_fees(env: &Env, who: &Address) {
     set_address_i128(env, DataKey::Accrued(who.clone()), 0);
+}
+
+// ── Rematch Parent Link Validation ───────────────────────────────────────────
+
+pub fn get_rematch_parent_status(
+    env: &Env,
+    parent_id: u64,
+    child_id: u64,
+) -> Option<RematchStatus> {
+    let key = DataKey::RematchParent(parent_id, child_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn set_rematch_parent_status(
+    env: &Env,
+    parent_id: u64,
+    child_id: u64,
+    status: &RematchStatus,
+) {
+    let key = DataKey::RematchParent(parent_id, child_id);
+    env.storage().persistent().set(&key, status);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
+}
+
+pub fn clear_rematch_parent_status(env: &Env, parent_id: u64, child_id: u64) {
+    let key = DataKey::RematchParent(parent_id, child_id);
+    env.storage().persistent().remove(&key);
 }
