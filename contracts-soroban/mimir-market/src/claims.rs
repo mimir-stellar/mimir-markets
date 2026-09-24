@@ -96,7 +96,7 @@ pub fn create_claim(env: &Env, creator: Address, params: CreateParams) -> Result
             is_private: params.is_private,
             invite_key_hash,
         },
-        fees: snapshot,
+        fees: snapshot.clone(),
     };
 
     let category = claim.category.clone();

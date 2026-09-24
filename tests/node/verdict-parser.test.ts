@@ -42,18 +42,34 @@ import {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Minimal extractJson stub: returns the first {...} block found via regex.
+ * Minimal extractJson stub: returns the first balanced {...} block.
  * Handles fenced code blocks (strips the fence first) and prose wrappers.
- * Good enough for the cases tests need to exercise; the real extractJson in
- * lib/llm.ts has full balanced-brace walking.
+ * Mirrors the first-object behavior of the real extractJson in lib/llm.ts.
  */
 function stubExtract(text: string): string | null {
   // Strip ```json ... ``` fences
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenced) return fenced[1].trim();
-  // Find first { ... } block
-  const m = text.match(/\{[\s\S]*\}/);
-  return m ? m[0] : null;
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      depth++;
+    } else if (char === "}" && --depth === 0) {
+      return text.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 /** Identity extractor: text already IS the JSON string. */
