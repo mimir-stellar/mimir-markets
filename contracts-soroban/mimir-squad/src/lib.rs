@@ -30,3 +30,5 @@ mod test_fee_rounding;
 mod test_lifecycle;
 #[cfg(test)]
 mod test_payouts;
+#[cfg(test)]
+mod test_cancellation;
