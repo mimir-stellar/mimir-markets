@@ -62,6 +62,47 @@ export interface PauseState {
 }
 
 /**
+ * The canonical per-capability pause detail returned on any blocked write.
+ *
+ * Structured so an autonomous agent can branch on `capability` and `viaGlobal`
+ * without parsing a human-readable string. `pausedAt` is epoch ms derived from
+ * `MIMIR_PAUSE_<CAP>_AT` (or `MIMIR_PAUSE_ALL_AT` for the global switch); absent
+ * when the env var was not set — which is fine: the important fields are
+ * `capability` and `reason`.
+ *
+ * Exposed on every 503 / 403 that a pause produces so callers never have to
+ * infer these fields from a prose message.
+ */
+export interface CapabilityPauseDetail {
+  capability: Pausable;
+  reason: string;
+  viaGlobal: boolean;
+  /** Epoch ms when this capability was paused, when the operator set the timestamp. */
+  pausedAt?: number;
+}
+
+/** Build a `CapabilityPauseDetail` from the current pause state. */
+export function buildPauseDetail(
+  capability: Pausable,
+  state: PauseState,
+  env: Record<string, string | undefined> = process.env,
+): CapabilityPauseDetail {
+  const reason =
+    state.reason ??
+    `${capability.replace(/_/g, " ")} is temporarily paused${state.viaGlobal ? " (all writes)" : ""}`;
+
+  const rawAt = state.viaGlobal
+    ? env.MIMIR_PAUSE_ALL_AT
+    : env[`${envKeyFor(capability)}_AT`];
+  const pausedAt =
+    rawAt !== undefined && /^\d+$/.test(rawAt.trim())
+      ? parseInt(rawAt.trim(), 10)
+      : undefined;
+
+  return { capability, reason, viaGlobal: state.viaGlobal, ...(pausedAt !== undefined ? { pausedAt } : {}) };
+}
+
+/**
  * Is this capability paused?
  *
  * `MIMIR_PAUSE_ALL` exists for the one case where an operator genuinely wants
@@ -213,6 +254,11 @@ export interface WriteGateResult {
   reason?: WriteBlockReason;
   /** Human-readable, shown to the user so a block is explainable. */
   detail?: string;
+  /**
+   * Present exactly when `reason === "paused"`. Carries the structured
+   * per-capability detail an autonomous agent can act on without parsing prose.
+   */
+  pauseDetail?: CapabilityPauseDetail;
 }
 
 /**
@@ -241,12 +287,12 @@ export function checkWriteAllowed(
   }
   const pause = pauseState(args.capability, env);
   if (pause.paused) {
+    const pauseDetail = buildPauseDetail(args.capability, pause, env);
     return {
       allowed: false,
       reason: "paused",
-      detail:
-        pause.reason ??
-        `${args.capability.replace(/_/g, " ")} is temporarily paused${pause.viaGlobal ? " (all writes)" : ""}`,
+      detail: pauseDetail.reason,
+      pauseDetail,
     };
   }
   return { allowed: true };

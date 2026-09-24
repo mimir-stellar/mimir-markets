@@ -32,9 +32,11 @@ import {
 } from "@/lib/agents/registry";
 import { auditAgentRequest, consumeNonce, loadAgent, loadIdempotentResponse, saveAgent, saveIdempotentResponse } from "@/lib/agents/store";
 import { buildAgentDryRun } from "@/lib/agents/dry-run";
-import { isFeatureEnabled } from "@/lib/ops/flags";
+import { isFeatureEnabled, checkWriteAllowed, type Pausable } from "@/lib/ops/flags";
 import { getUsdcBalanceUnits, usdcToUnits, parseUsdcAtomic } from "@/lib/usdc";
 import { getAgentEarningsSummary } from "@/lib/db";
+import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
+import { apiError } from "@/lib/api/errors";
 
 export const dynamic = "force-dynamic";
 
@@ -64,6 +66,11 @@ function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
+/** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
+function errorResponse(err: import("@/lib/api/errors").ApiErrorResult): Response {
+  return Response.json(err.body, { status: err.status, headers: { ...err.headers, "cache-control": "no-store" } });
+}
+
 async function verify(address: string, message: string, signature: string): Promise<boolean> {
   return verifyAgentSignature({ address, message, signature });
 }
@@ -84,6 +91,11 @@ async function audit(request: SignedAgentRequest, outcome: string, reason?: stri
 const FUNDED_ACTIONS: readonly AgentApiAction[] = ["createMarket", "stake", "vote"];
 
 async function register(request: SignedAgentRequest<Record<string, any>>): Promise<Response> {
+  // Pause check first: "registration is paused" is more accurate than "not enabled"
+  // when the feature is on but the capability is temporarily stopped.
+  const pauseErr = gateOrPause({ feature: "byoa_registry", capability: "agent_registration" });
+  if (pauseErr) return errorResponse(pauseErr);
+
   if (!isFeatureEnabled("byoa_registry")) {
     return json({ error: { message: "agent registration is not enabled" } }, 403);
   }
@@ -304,7 +316,10 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     await saveAgent(revoked.agent); result = { agent: revoked.agent };
   } else if (action === "publishReasoning") {
     const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
-    if (!gate.allowed) return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
+    if (!gate.allowed) {
+      await audit(request, "rejected", gate.reason);
+      return errorResponse(actionVerdictToError(gate, "researcher"));
+    }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
   } else {
     const capability: AgentCapability = action === "proposeMarket" || action === "createMarket" || action === "dryRun"
