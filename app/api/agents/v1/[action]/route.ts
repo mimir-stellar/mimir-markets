@@ -262,6 +262,18 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
       await audit(request, "rejected", "signature");
       return json({ error: { message: "signature rejected" } }, 401);
     }
+    const { authorizeRequest } = await import("@/lib/api/policy");
+    const gate = authorizeRequest("registered_agent", {
+      route: `/api/agents/v1/${action}`,
+      wallet: signer,
+      agentId: agent.agentId,
+      signatureVerified: true,
+      ip: clientIp(req),
+    });
+    if (!gate.allowed && gate.error) {
+      await audit(request, "rejected", "rate_limited");
+      return errorResponse(gate.error);
+    }
   }
   // A revoked agent keeps read access to its own records but does nothing else;
   // that is what makes revoke a usable emergency stop rather than a data loss.

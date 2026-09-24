@@ -8,6 +8,12 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
+    const { authorizeRequest } = await import("@/lib/api/policy");
+    const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
+    const gate = authorizeRequest("public_read", { route: "/api/vs", ip });
+    if (!gate.allowed && gate.error) {
+      return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
+    }
     const { searchParams } = new URL(request.url);
     const refreshValue = searchParams.get("refresh");
     if (refreshValue && refreshValue !== "1") {
