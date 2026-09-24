@@ -10,6 +10,9 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const refreshValue = searchParams.get("refresh");
+    const cursorValue = searchParams.get("cursor");
+    const limitValue = searchParams.get("limit");
+
     if (refreshValue && refreshValue !== "1") {
       return NextResponse.json(
         createApiError("invalid_parameter", "refresh must be 1 when provided"),
@@ -20,13 +23,34 @@ export async function GET(request: Request) {
     }
 
     const shouldRefresh = refreshValue === "1";
-    const { items, cache } = await getVsFeedSnapshot({ forceRefresh: shouldRefresh });
+    const cursor = cursorValue ? Number(cursorValue) : undefined;
+    const limit = limitValue ? Number(limitValue) : undefined;
+
+    if (cursor !== undefined && (isNaN(cursor) || cursor <= 0)) {
+      return NextResponse.json(
+        createApiError("invalid_parameter", "cursor must be a positive integer"),
+        { status: 400 }
+      );
+    }
+    if (limit !== undefined && (isNaN(limit) || limit <= 0 || limit > 100)) {
+      return NextResponse.json(
+        createApiError("invalid_parameter", "limit must be between 1 and 100"),
+        { status: 400 }
+      );
+    }
+
+    const { items, cache, nextCursor } = await getVsFeedSnapshot({
+      forceRefresh: shouldRefresh,
+      cursor,
+      limit,
+    });
 
     return NextResponse.json(
       {
         items,
         count: items.length,
         cache,
+        nextCursor,
       },
       {
         headers: VS_CACHE_HEADERS,

@@ -142,7 +142,9 @@ export default function ExploreClient() {
   const [allVS, setAllVS] = useState<VSData[]>([]);
   const [opportunities, setOpportunities] = useState<ChallengeOpportunity[]>([]);
   const [vsFreshness, setVsFreshness] = useState<VSCacheFreshness | null>(null);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [opportunitiesLoading, setOpportunitiesLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -182,6 +184,7 @@ export default function ExploreClient() {
           if (requestId === requestIdRef.current) {
             setAllVS(mergePendingVS(results.items));
             setVsFreshness(results.cache);
+            setNextCursor(results.nextCursor ?? null);
           }
         })
         .catch((error) => {
@@ -252,6 +255,25 @@ export default function ExploreClient() {
     },
     [locale, opportunitiesEnabled]
   );
+
+  const loadMoreVS = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const results = await getAllVSSnapshot({ cursor: nextCursor });
+      setAllVS((prev) => {
+        // Simple deduplication by id in case of overlap
+        const existingIds = new Set(prev.map((vs) => vs.id));
+        const newItems = results.items.filter((vs) => !existingIds.has(vs.id));
+        return mergePendingVS([...prev, ...newItems]);
+      });
+      setNextCursor(results.nextCursor ?? null);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore]);
 
   useEffect(() => {
     void loadExploreData({ showPageLoading: true });
@@ -1307,6 +1329,18 @@ export default function ExploreClient() {
               </motion.div>
             )}
           </AnimatePresence>
+          {nextCursor && activeView !== "ai" && (
+            <div className="mt-8 flex justify-center">
+              <button
+                type="button"
+                onClick={loadMoreVS}
+                disabled={loadingMore}
+                className="rounded border border-pv-border/25 bg-pv-surface px-6 py-3 font-display text-sm font-bold uppercase tracking-tight text-pv-text transition-colors hover:border-pv-ink/[0.15] disabled:opacity-50"
+              >
+                {loadingMore ? "Loading..." : "Load more"}
+              </button>
+            </div>
+          )}
         </section>
       </AnimatedItem>
     </PageTransition>

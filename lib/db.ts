@@ -84,6 +84,7 @@ export interface ClaimFilters {
   visibility?: string;
   isFinal?: boolean;
   limit?: number;
+  cursor?: number;
   orderBy?: "id_desc" | "updated_desc" | "deadline_asc" | "deadline_desc";
 }
 
@@ -1026,6 +1027,10 @@ export async function getClaimsByFilter(filters: ClaimFilters = {}): Promise<Cla
       break;
     case "id_desc":
     default:
+      if (typeof filters.cursor === "number") {
+        clauses.push("id < ?");
+        args.push(filters.cursor);
+      }
       orderBy = "ORDER BY id DESC";
       break;
   }
