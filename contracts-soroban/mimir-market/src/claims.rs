@@ -96,7 +96,7 @@ pub fn create_claim(env: &Env, creator: Address, params: CreateParams) -> Result
             is_private: params.is_private,
             invite_key_hash,
         },
-        fees: snapshot,
+        fees: snapshot.clone(),
     };
 
     let category = claim.category.clone();
@@ -147,7 +147,7 @@ pub fn challenge_claim(
     let mut list = storage::challengers(env, claim_id);
     for existing in list.iter() {
         if existing.address == challenger {
-            return Err(Error::AlreadyChallenged);
+            return Ok(());
         }
     }
     if claim.challenger_count >= claim.market.max_challengers {

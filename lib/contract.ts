@@ -210,7 +210,7 @@ export interface CreateClaimParams {
   counter_position: string;
   resolution_url: string;
   deadline: number;
-  stake_amount: number;         // whole USDC (e.g. 5 = 5 USDC)
+  stake_amount: number; // whole USDC (e.g. 5 = 5 USDC)
   category?: string;
   parent_id?: number;
   market_type?: string;
@@ -256,31 +256,48 @@ export type WalletArg = string | StellarSigner;
 // ── State / side mappers ──────────────────────────────────────────────────────
 function mapState(state: MimirMarket.ClaimState): ClaimData["state"] {
   switch (state) {
-    case MimirMarket.ClaimState.Open:      return "open";
-    case MimirMarket.ClaimState.Active:    return "active";
-    case MimirMarket.ClaimState.Resolved:  return "resolved";
-    case MimirMarket.ClaimState.Cancelled: return "cancelled";
-    default: return "open";
+    case MimirMarket.ClaimState.Open:
+      return "open";
+    case MimirMarket.ClaimState.Active:
+      return "active";
+    case MimirMarket.ClaimState.Resolved:
+      return "resolved";
+    case MimirMarket.ClaimState.Cancelled:
+      return "cancelled";
+    default:
+      return "open";
   }
 }
 
 function mapWinnerSide(side: MimirMarket.WinnerSide): ClaimData["winner_side"] {
   switch (side) {
-    case MimirMarket.WinnerSide.Creator:      return "creator";
-    case MimirMarket.WinnerSide.Challengers:  return "challengers";
-    case MimirMarket.WinnerSide.Draw:         return "draw";
-    case MimirMarket.WinnerSide.Unresolvable: return "unresolvable";
-    default: return "";
+    case MimirMarket.WinnerSide.Creator:
+      return "creator";
+    case MimirMarket.WinnerSide.Challengers:
+      return "challengers";
+    case MimirMarket.WinnerSide.Draw:
+      return "draw";
+    case MimirMarket.WinnerSide.Unresolvable:
+      return "unresolvable";
+    default:
+      return "";
   }
 }
 
-function toWinnerSide(verdict: ClaimData["winner_side"]): MimirMarket.WinnerSide {
+function toWinnerSide(
+  verdict: ClaimData["winner_side"],
+): MimirMarket.WinnerSide {
   switch (verdict) {
-    case "creator":      return MimirMarket.WinnerSide.Creator;
-    case "challengers":  return MimirMarket.WinnerSide.Challengers;
-    case "draw":         return MimirMarket.WinnerSide.Draw;
-    case "unresolvable": return MimirMarket.WinnerSide.Unresolvable;
-    default: throw new Error(`Cannot resolve a claim to "${verdict || "none"}"`);
+    case "creator":
+      return MimirMarket.WinnerSide.Creator;
+    case "challengers":
+      return MimirMarket.WinnerSide.Challengers;
+    case "draw":
+      return MimirMarket.WinnerSide.Draw;
+    case "unresolvable":
+      return MimirMarket.WinnerSide.Unresolvable;
+    default:
+      throw new Error(`Cannot resolve a claim to "${verdict || "none"}"`);
   }
 }
 
@@ -292,7 +309,11 @@ function toWinnerSide(verdict: ClaimData["winner_side"]): MimirMarket.WinnerSide
  */
 function unwrap<T>(label: string, result: unknown): T {
   if (result && typeof result === "object" && "isOk" in result) {
-    const rustResult = result as { isOk(): boolean; unwrap(): T; error?: unknown };
+    const rustResult = result as {
+      isOk(): boolean;
+      unwrap(): T;
+      error?: unknown;
+    };
     if (!rustResult.isOk()) {
       const error = rustResult.error;
       const message =
@@ -321,7 +342,9 @@ let _readMarket: MimirMarket.Client | null = null;
 /** Read-only market client, memoised per process. */
 function marketReader(): MimirMarket.Client {
   if (!_readMarket) {
-    _readMarket = new MimirMarket.Client(stellarClientOptions(requireMarketContractId()));
+    _readMarket = new MimirMarket.Client(
+      stellarClientOptions(requireMarketContractId()),
+    );
   }
   return _readMarket;
 }
@@ -330,7 +353,9 @@ let _readSquad: MimirSquad.Client | null = null;
 
 function squadReader(): MimirSquad.Client {
   if (!_readSquad) {
-    _readSquad = new MimirSquad.Client(stellarClientOptions(requireSquadContractId()));
+    _readSquad = new MimirSquad.Client(
+      stellarClientOptions(requireSquadContractId()),
+    );
   }
   return _readSquad;
 }
@@ -412,7 +437,10 @@ async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let cursor = 0;
-  const workerCount = Math.min(Math.max(1, concurrency), Math.max(1, items.length));
+  const workerCount = Math.min(
+    Math.max(1, concurrency),
+    Math.max(1, items.length),
+  );
   async function worker() {
     for (;;) {
       const i = cursor++;
@@ -424,7 +452,10 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function readClaimsRange(startId: number, count: number): Promise<(ClaimData | null)[]> {
+async function readClaimsRange(
+  startId: number,
+  count: number,
+): Promise<(ClaimData | null)[]> {
   const ids = Array.from({ length: count }, (_, i) => startId + i);
   return mapWithConcurrency(ids, (id) => readClaimRaw(id));
 }
@@ -433,7 +464,9 @@ async function readClaimsRange(startId: number, count: number): Promise<(ClaimDa
 const READ_CLAIM_RETRY_ATTEMPTS = 3;
 const READ_CLAIM_RETRY_BASE_MS = 200;
 
-function toHex(bytes: Buffer | Uint8Array | undefined | null): string | undefined {
+function toHex(
+  bytes: Buffer | Uint8Array | undefined | null,
+): string | undefined {
   if (!bytes || bytes.length === 0) return undefined;
   const hex = Buffer.from(bytes).toString("hex");
   return /^0+$/.test(hex) ? undefined : hex;
@@ -517,49 +550,57 @@ export function decodeClaim(
     const stake = unitsToUsdc(entry.stake);
     const payout = isFixed
       ? (stake * payBps) / BPS_DIVISOR
-      : stake + (totalChStakeUsdc > 0 ? (stake / totalChStakeUsdc) * creatorStakeUsdc : 0);
-    return { address: entry.address, stake, potential_payout: payout, claimed: entry.claimed };
+      : stake +
+        (totalChStakeUsdc > 0
+          ? (stake / totalChStakeUsdc) * creatorStakeUsdc
+          : 0);
+    return {
+      address: entry.address,
+      stake,
+      potential_payout: payout,
+      claimed: entry.claimed,
+    };
   });
 
   const addresses = challengers.map((entry) => entry.address);
   const availLiab = Math.max(0, creatorStakeUsdc - reservedUsdc);
 
   return {
-    id:                          claimId,
-    creator:                     claim.creator,
-    question:                    claim.question,
-    creator_position:            claim.creator_position,
-    counter_position:            claim.counter_position,
-    resolution_url:              claim.resolution_url,
-    creator_stake:               creatorStakeUsdc,
-    total_challenger_stake:      totalChStakeUsdc,
-    reserved_creator_liability:  reservedUsdc,
+    id: claimId,
+    creator: claim.creator,
+    question: claim.question,
+    creator_position: claim.creator_position,
+    counter_position: claim.counter_position,
+    resolution_url: claim.resolution_url,
+    creator_stake: creatorStakeUsdc,
+    total_challenger_stake: totalChStakeUsdc,
+    reserved_creator_liability: reservedUsdc,
     available_creator_liability: availLiab,
-    deadline:                    Number(claim.deadline),
-    state:                       mapState(claim.state),
-    winner_side:                 mapWinnerSide(claim.winner_side),
-    resolution_summary:          claim.resolution_summary,
-    confidence:                  Number(claim.confidence),
-    category:                    normalizeCategoryId(claim.category),
-    parent_id:                   Number(claim.parent_id),
-    challenger_count:            Number(claim.challenger_count),
-    created_at:                  Number(claim.created_at),
-    evidence_hash:               toHex(claim.evidence_hash ?? undefined),
-    context_hash:                toHex(claim.context_hash),
-    remaining_escrow:            unitsToUsdc(claim.remaining_escrow),
-    challenger_claims:           Number(claim.challenger_claims),
-    market_type:                 claim.market.market_type,
-    odds_mode:                   claim.market.odds_mode,
-    challenger_payout_bps:       payBps,
-    handicap_line:               claim.market.handicap_line,
-    settlement_rule:             claim.market.settlement_rule,
-    max_challengers:             Number(claim.market.max_challengers),
-    visibility:                  claim.market.is_private ? "private" : "public",
-    is_private:                  claim.market.is_private,
+    deadline: Number(claim.deadline),
+    state: mapState(claim.state),
+    winner_side: mapWinnerSide(claim.winner_side),
+    resolution_summary: claim.resolution_summary,
+    confidence: Number(claim.confidence),
+    category: normalizeCategoryId(claim.category),
+    parent_id: Number(claim.parent_id),
+    challenger_count: Number(claim.challenger_count),
+    created_at: Number(claim.created_at),
+    evidence_hash: toHex(claim.evidence_hash ?? undefined),
+    context_hash: toHex(claim.context_hash),
+    remaining_escrow: unitsToUsdc(claim.remaining_escrow),
+    challenger_claims: Number(claim.challenger_claims),
+    market_type: claim.market.market_type,
+    odds_mode: claim.market.odds_mode,
+    challenger_payout_bps: payBps,
+    handicap_line: claim.market.handicap_line,
+    settlement_rule: claim.market.settlement_rule,
+    max_challengers: Number(claim.market.max_challengers),
+    visibility: claim.market.is_private ? "private" : "public",
+    is_private: claim.market.is_private,
     challengers,
-    first_challenger:            addresses[0] ?? ZERO_ADDRESS,
-    challenger_addresses:        addresses,
-    total_pot:                   creatorStakeUsdc + totalChStakeUsdc,
+    first_challenger: addresses[0] ?? ZERO_ADDRESS,
+    challenger_addresses: addresses,
+    total_pot: creatorStakeUsdc + totalChStakeUsdc,
   };
 }
 
@@ -575,12 +616,17 @@ export async function getClaimCount(): Promise<number> {
 }
 
 /** The challenger roster for a claim, including who has already been paid. */
-export async function getChallengerList(claimId: number): Promise<ClaimChallenger[]> {
+export async function getChallengerList(
+  claimId: number,
+): Promise<ClaimChallenger[]> {
   const claim = await readClaimRaw(claimId);
   return claim?.challengers ?? [];
 }
 
-export async function getVSSummaries(startId: number, limit: number): Promise<VSData[]> {
+export async function getVSSummaries(
+  startId: number,
+  limit: number,
+): Promise<VSData[]> {
   const results = await readClaimsRange(startId, limit);
   return (results.filter(Boolean) as ClaimData[]).map(mapClaimToVS);
 }
@@ -591,7 +637,9 @@ export async function getUserVSSummaries(address: string): Promise<VSData[]> {
 
   const all = await readClaimsRange(1, count);
   return all
-    .filter((c): c is ClaimData => Boolean(c) && isClaimParticipant(c!, address))
+    .filter(
+      (c): c is ClaimData => Boolean(c) && isClaimParticipant(c!, address),
+    )
     .map(mapClaimToVS);
 }
 
@@ -605,7 +653,9 @@ export async function getUserVSSummaries(address: string): Promise<VSData[]> {
  * the bindings). Until the indexer derives them from events, this walks the
  * claims the address participated in, which is correct but O(claims).
  */
-export async function getUserStats(address: string): Promise<{ wins: number; losses: number }> {
+export async function getUserStats(
+  address: string,
+): Promise<{ wins: number; losses: number }> {
   const claims = await getUserClaimSummaries(address);
   let wins = 0;
   let losses = 0;
@@ -626,16 +676,25 @@ export async function getPlatformStats(): Promise<{
   fees_claimed: number;
 }> {
   if (!isMarketConfigured()) {
-    return { total_claims: 0, total_resolved: 0, total_pool: 0, fees_accrued: 0, fees_claimed: 0 };
+    return {
+      total_claims: 0,
+      total_resolved: 0,
+      total_pool: 0,
+      fees_accrued: 0,
+      fees_claimed: 0,
+    };
   }
   const tx = await marketReader().get_platform_stats();
-  const stats = unwrap<MimirMarket.PlatformStats>("get_platform_stats", tx.result);
+  const stats = unwrap<MimirMarket.PlatformStats>(
+    "get_platform_stats",
+    tx.result,
+  );
   return {
-    total_claims:   Number(stats.total_claims),
+    total_claims: Number(stats.total_claims),
     total_resolved: Number(stats.resolved),
-    total_pool:     unitsToUsdc(stats.balance),
-    fees_accrued:   unitsToUsdc(stats.fees_accrued),
-    fees_claimed:   unitsToUsdc(stats.fees_claimed),
+    total_pool: unitsToUsdc(stats.balance),
+    fees_accrued: unitsToUsdc(stats.fees_accrued),
+    fees_claimed: unitsToUsdc(stats.fees_claimed),
   };
 }
 
@@ -652,11 +711,11 @@ export async function getClaimFees(claimId: number): Promise<{
   const view = unwrapOrNull<MimirMarket.ClaimFeeView>(tx.result);
   if (!view) return null;
   return {
-    platform_fee_bps:      Number(view.platform_fee_bps),
-    agent_owner_fee_bps:   Number(view.agent_owner_fee_bps),
-    platform_recipient:    view.platform_recipient ?? null,
+    platform_fee_bps: Number(view.platform_fee_bps),
+    agent_owner_fee_bps: Number(view.agent_owner_fee_bps),
+    platform_recipient: view.platform_recipient ?? null,
     agent_owner_recipient: view.agent_owner_recipient ?? null,
-    context_hash:          toHex(view.context_hash),
+    context_hash: toHex(view.context_hash),
   };
 }
 
@@ -671,9 +730,9 @@ export async function getFeePolicy(): Promise<{
   const policy = unwrapOrNull<MimirMarket.FeePolicy>(tx.result);
   if (!policy) return null;
   return {
-    platform_fee_bps:    Number(policy.platform_fee_bps),
+    platform_fee_bps: Number(policy.platform_fee_bps),
     agent_owner_fee_bps: Number(policy.agent_owner_fee_bps),
-    platform_recipient:  policy.platform_recipient ?? null,
+    platform_recipient: policy.platform_recipient ?? null,
   };
 }
 
@@ -712,11 +771,11 @@ export async function getPendingFeePolicy(): Promise<{
   if (!pending) return null;
   const executableAt = Number(pending.executable_at);
   return {
-    platform_fee_bps:    Number(pending.platform_fee_bps),
+    platform_fee_bps: Number(pending.platform_fee_bps),
     agent_owner_fee_bps: Number(pending.agent_owner_fee_bps),
-    platform_recipient:  pending.platform_recipient ?? null,
-    executable_at:       executableAt,
-    ready:               Date.now() >= executableAt * 1000,
+    platform_recipient: pending.platform_recipient ?? null,
+    executable_at: executableAt,
+    ready: Date.now() >= executableAt * 1000,
   };
 }
 
@@ -739,9 +798,9 @@ export async function queueFeePolicy(
   const { write } = await sendCall<void>(
     "queue_fee_policy",
     await marketWriter(signer).queue_fee_policy({
-      platform_fee_bps:    params.platform_fee_bps,
+      platform_fee_bps: params.platform_fee_bps,
       agent_owner_fee_bps: params.agent_owner_fee_bps,
-      platform_recipient:  params.platform_recipient ?? undefined,
+      platform_recipient: params.platform_recipient ?? undefined,
     }),
   );
   return write;
@@ -753,7 +812,9 @@ export async function queueFeePolicy(
  * Permissionless on purpose: a lost owner key must not be able to strand a change
  * that was already announced.
  */
-export async function executeFeePolicy(wallet: WalletArg): Promise<ContractWriteResult> {
+export async function executeFeePolicy(
+  wallet: WalletArg,
+): Promise<ContractWriteResult> {
   const signer = requireSigner(wallet, "execute the queued fee policy");
   const { write } = await sendCall<void>(
     "execute_fee_policy",
@@ -763,7 +824,9 @@ export async function executeFeePolicy(wallet: WalletArg): Promise<ContractWrite
 }
 
 /** Drop a queued policy before it executes. Owner only. */
-export async function cancelFeePolicy(wallet: WalletArg): Promise<ContractWriteResult> {
+export async function cancelFeePolicy(
+  wallet: WalletArg,
+): Promise<ContractWriteResult> {
   const signer = requireSigner(wallet, "cancel the queued fee policy");
   const { write } = await sendCall<void>(
     "cancel_fee_policy",
@@ -795,7 +858,12 @@ export async function getAccruedFees(address: string): Promise<number> {
 export async function quoteChallengerPayout(
   claimId: number,
   challenger: string,
-): Promise<{ gross: number; fee: number; net: number; claimed: boolean } | null> {
+): Promise<{
+  gross: number;
+  fee: number;
+  net: number;
+  claimed: boolean;
+} | null> {
   if (!isMarketConfigured()) return null;
   const tx = await marketReader().quote_challenger_payout({
     claim_id: BigInt(claimId),
@@ -804,9 +872,9 @@ export async function quoteChallengerPayout(
   const quote = unwrapOrNull<MimirMarket.PayoutQuote>(tx.result);
   if (!quote) return null;
   return {
-    gross:   unitsToUsdc(quote.gross),
-    fee:     unitsToUsdc(quote.fee),
-    net:     unitsToUsdc(quote.net),
+    gross: unitsToUsdc(quote.gross),
+    fee: unitsToUsdc(quote.fee),
+    net: unitsToUsdc(quote.net),
     claimed: quote.claimed,
   };
 }
@@ -843,13 +911,16 @@ export async function getUserVSFast(address: string): Promise<VSFeedSnapshot> {
     return { items: data.items ?? [], cache: data.cache ?? null };
   }
   const items = await getUserVSSummaries(address);
-  return { items: items.sort((a, b) => b.id - a.id), cache: makeLiveFreshness() };
+  return {
+    items: items.sort((a, b) => b.id - a.id),
+    cache: makeLiveFreshness(),
+  };
 }
 
 /** Returns VSData | null directly (backwards compatible). */
 export async function getVS(
   vsId: number,
-  opts?: { inviteKey?: string; viewerAddress?: string }
+  opts?: { inviteKey?: string; viewerAddress?: string },
 ): Promise<VSData | null> {
   if (typeof window !== "undefined") {
     const url = opts?.inviteKey
@@ -867,7 +938,7 @@ export async function getVS(
 /** Returns VSDetailSnapshot with cache metadata. */
 export async function getVSFull(
   vsId: number,
-  opts?: { inviteKey?: string; viewerAddress?: string }
+  opts?: { inviteKey?: string; viewerAddress?: string },
 ): Promise<VSDetailSnapshot> {
   if (typeof window !== "undefined") {
     const url = opts?.inviteKey
@@ -879,21 +950,28 @@ export async function getVSFull(
     return { item: data.item ?? null, cache: data.cache ?? null };
   }
   const claim = await readClaimRaw(vsId);
-  return { item: claim ? mapClaimToVS(claim) : null, cache: makeLiveFreshness() };
+  return {
+    item: claim ? mapClaimToVS(claim) : null,
+    cache: makeLiveFreshness(),
+  };
 }
 
 // ── Public write functions ────────────────────────────────────────────────────
 export async function createClaim(
   wallet: WalletArg,
-  params: CreateClaimParams
+  params: CreateClaimParams,
 ): Promise<ClaimWriteResult> {
   // Incident kill switch. Create and stake pause independently, so a pricing bug
   // can stop new markets without freezing settlement or withdrawals.
   const gate = checkWriteAllowed({ capability: "create_market" });
-  if (!gate.allowed) throw new Error(gate.detail ?? "market creation is unavailable");
+  if (!gate.allowed)
+    throw new Error(gate.detail ?? "market creation is unavailable");
 
   if (isDemoMode()) {
-    return sendDemoTx("create_claim", params as unknown as Record<string, unknown>);
+    return sendDemoTx(
+      "create_claim",
+      params as unknown as Record<string, unknown>,
+    );
   }
 
   const signer = requireSigner(wallet, "create this market");
@@ -919,9 +997,17 @@ export async function createClaim(
 export async function assertChallengeAllowed(
   claimId: number,
   stakeAmount: number,
+  challengerAddress?: string,
 ): Promise<void> {
   const claim = await readClaimRaw(claimId);
   if (!claim) throw new Error(`Claim ${claimId} not found`);
+  if (
+    challengerAddress &&
+    (claim.challenger_addresses ?? []).some((address) =>
+      isSameAddress(address, challengerAddress),
+    )
+  )
+    return;
 
   const mode = toCanonicalMode({
     marketType: claim.market_type,
@@ -951,16 +1037,17 @@ export async function challengeClaim(
   wallet: WalletArg,
   claimId: number,
   stakeAmount: number,
-  inviteKey = ""
+  inviteKey = "",
 ): Promise<ClaimWriteResult> {
   if (isDemoMode()) {
     return sendDemoTx("challenge_claim", { claimId, stakeAmount, inviteKey });
   }
   const stakeGate = checkWriteAllowed({ capability: "stake" });
-  if (!stakeGate.allowed) throw new Error(stakeGate.detail ?? "staking is unavailable");
-  await assertChallengeAllowed(claimId, stakeAmount);
+  if (!stakeGate.allowed)
+    throw new Error(stakeGate.detail ?? "staking is unavailable");
 
   const signer = requireSigner(wallet, "join this market");
+  await assertChallengeAllowed(claimId, stakeAmount, signer.publicKey);
   const client = marketWriter(signer);
   const { write } = await sendCall<void>(
     "challenge_claim",
@@ -1017,7 +1104,7 @@ export async function resolveClaim(
 
 export async function cancelClaim(
   wallet: WalletArg,
-  claimId: number
+  claimId: number,
 ): Promise<ClaimWriteResult> {
   if (isDemoMode()) {
     return sendDemoTx("cancel_claim", { claimId });
@@ -1041,7 +1128,7 @@ export async function cancelClaim(
 export async function createRematch(
   wallet: WalletArg,
   parentId: number,
-  params: Pick<CreateClaimParams, "deadline" | "stake_amount" | "invite_key">
+  params: Pick<CreateClaimParams, "deadline" | "stake_amount" | "invite_key">,
 ): Promise<ClaimWriteResult> {
   if (isDemoMode()) {
     return sendDemoTx("create_rematch", { parentId, ...params });
@@ -1050,22 +1137,22 @@ export async function createRematch(
   if (!parent) throw new Error(`Claim ${parentId} not found`);
 
   return createClaim(wallet, {
-    question:              parent.question,
-    creator_position:      parent.creator_position,
-    counter_position:      parent.counter_position,
-    resolution_url:        parent.resolution_url,
-    category:              parent.category,
-    market_type:           parent.market_type,
-    odds_mode:             parent.odds_mode,
+    question: parent.question,
+    creator_position: parent.creator_position,
+    counter_position: parent.counter_position,
+    resolution_url: parent.resolution_url,
+    category: parent.category,
+    market_type: parent.market_type,
+    odds_mode: parent.odds_mode,
     challenger_payout_bps: parent.challenger_payout_bps,
-    handicap_line:         parent.handicap_line,
-    settlement_rule:       parent.settlement_rule,
-    max_challengers:       parent.max_challengers,
-    visibility:            parent.visibility,
-    parent_id:             parentId,
-    deadline:              params.deadline,
-    stake_amount:          params.stake_amount,
-    invite_key:            params.invite_key ?? "",
+    handicap_line: parent.handicap_line,
+    settlement_rule: parent.settlement_rule,
+    max_challengers: parent.max_challengers,
+    visibility: parent.visibility,
+    parent_id: parentId,
+    deadline: params.deadline,
+    stake_amount: params.stake_amount,
+    invite_key: params.invite_key ?? "",
   });
 }
 
@@ -1145,20 +1232,23 @@ export interface SquadMarketData {
   winner_claims: number;
 }
 
-function decodeSquadMarket(id: number, market: MimirSquad.Market): SquadMarketData {
+function decodeSquadMarket(
+  id: number,
+  market: MimirSquad.Market,
+): SquadMarketData {
   return {
     id,
-    captain:          market.captain,
-    deadline:         Number(market.deadline),
-    fee_bps:          Number(market.fee_bps),
-    pool_a:           unitsToUsdc(market.pool_a),
-    pool_b:           unitsToUsdc(market.pool_b),
-    participants_a:   Number(market.participants_a),
-    participants_b:   Number(market.participants_b),
-    resolved:         market.resolved,
-    result:           Number(market.result),
+    captain: market.captain,
+    deadline: Number(market.deadline),
+    fee_bps: Number(market.fee_bps),
+    pool_a: unitsToUsdc(market.pool_a),
+    pool_b: unitsToUsdc(market.pool_b),
+    participants_a: Number(market.participants_a),
+    participants_b: Number(market.participants_b),
+    resolved: market.resolved,
+    result: Number(market.result),
     remaining_escrow: unitsToUsdc(market.remaining_escrow),
-    winner_claims:    Number(market.winner_claims),
+    winner_claims: Number(market.winner_claims),
   };
 }
 
@@ -1167,7 +1257,9 @@ export async function getSquadMarketCount(): Promise<number> {
   return Number(tx.result ?? 0n);
 }
 
-export async function getSquadMarket(marketId: number): Promise<SquadMarketData | null> {
+export async function getSquadMarket(
+  marketId: number,
+): Promise<SquadMarketData | null> {
   const tx = await squadReader().get_market({ market_id: BigInt(marketId) });
   const market = unwrapOrNull<MimirSquad.Market>(tx.result);
   return market ? decodeSquadMarket(marketId, market) : null;
@@ -1191,7 +1283,11 @@ export async function hasSquadClaimed(
   side: number,
   who: string,
 ): Promise<boolean> {
-  const tx = await squadReader().has_claimed({ market_id: BigInt(marketId), side, who });
+  const tx = await squadReader().has_claimed({
+    market_id: BigInt(marketId),
+    side,
+    who,
+  });
   return Boolean(tx.result);
 }
 
@@ -1200,13 +1296,17 @@ export async function previewSquadClaim(
   side: number,
   who: string,
 ): Promise<{ gross: number; fee: number; net: number } | null> {
-  const tx = await squadReader().preview_claim({ market_id: BigInt(marketId), side, who });
+  const tx = await squadReader().preview_claim({
+    market_id: BigInt(marketId),
+    side,
+    who,
+  });
   const preview = unwrapOrNull<MimirSquad.ClaimResult>(tx.result);
   if (!preview) return null;
   return {
     gross: unitsToUsdc(preview.gross),
-    fee:   unitsToUsdc(preview.fee),
-    net:   unitsToUsdc(preview.net),
+    fee: unitsToUsdc(preview.fee),
+    net: unitsToUsdc(preview.net),
   };
 }
 
@@ -1286,21 +1386,21 @@ export async function squadWithdrawBeforeDeadline(
 // ── Write: demo relay (via server API) ───────────────────────────────────────
 async function sendDemoTx(
   action: string,
-  params: Record<string, unknown>
+  params: Record<string, unknown>,
 ): Promise<ContractWriteResult & { claimId: number | null }> {
   const res = await fetch("/api/demo/write", {
-    method:  "POST",
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({ action, params }),
+    body: JSON.stringify({ action, params }),
   });
   if (!res.ok) throw new Error(`Demo relay error: ${res.status}`);
   const data = await res.json();
   return {
-    txHash:      data.txHash ?? "",
+    txHash: data.txHash ?? "",
     explorerUrl: data.txHash ? getExplorerTxUrl(data.txHash) : undefined,
-    receipt:     null,
-    pending:     data.pending ?? false,
-    claimId:     data.claimId ?? null,
+    receipt: null,
+    pending: data.pending ?? false,
+    claimId: data.claimId ?? null,
   };
 }
 
@@ -1316,7 +1416,7 @@ async function sendDemoTx(
  */
 export async function executeDemoWrite(
   action: string,
-  params: Record<string, unknown>
+  params: Record<string, unknown>,
 ): Promise<ClaimWriteResult> {
   const signer = await getDemoSigner(action);
   if (!signer) throw new Error(`No demo key configured for action: ${action}`);
@@ -1326,7 +1426,11 @@ export async function executeDemoWrite(
   }
 
   if (action === "challenge_claim") {
-    const { claimId, stakeAmount, inviteKey = "" } = params as {
+    const {
+      claimId,
+      stakeAmount,
+      inviteKey = "",
+    } = params as {
       claimId: number | string;
       stakeAmount: number | string;
       inviteKey?: string;
@@ -1334,7 +1438,12 @@ export async function executeDemoWrite(
     // Same guard on the server signer path — a relay must not be able to bypass
     // the mode rules a browser caller is held to.
     await assertChallengeAllowed(Number(claimId), Number(stakeAmount));
-    return challengeClaim(signer, Number(claimId), Number(stakeAmount), inviteKey);
+    return challengeClaim(
+      signer,
+      Number(claimId),
+      Number(stakeAmount),
+      inviteKey,
+    );
   }
 
   if (action === "resolve_claim") {
@@ -1348,7 +1457,12 @@ export async function executeDemoWrite(
   }
 
   if (action === "create_rematch") {
-    const { parentId, deadline, stake_amount, invite_key = "" } = params as {
+    const {
+      parentId,
+      deadline,
+      stake_amount,
+      invite_key = "",
+    } = params as {
       parentId: number | string;
       deadline: number;
       stake_amount: number;
@@ -1367,25 +1481,25 @@ export async function executeDemoWrite(
 // ── Helper: build the CreateParams struct ─────────────────────────────────────
 function buildCreateParams(p: CreateClaimParams): MimirMarket.CreateParams {
   return {
-    question:              p.question,
-    creator_position:      p.creator_position,
-    counter_position:      p.counter_position,
-    resolution_url:        p.resolution_url,
-    deadline:              BigInt(p.deadline),
-    stake_amount:          usdcToUnits(p.stake_amount),
-    category:              p.category ?? "custom",
-    parent_id:             BigInt(p.parent_id ?? 0),
-    market_type:           p.market_type ?? "binary",
-    odds_mode:             p.odds_mode ?? "pool",
+    question: p.question,
+    creator_position: p.creator_position,
+    counter_position: p.counter_position,
+    resolution_url: p.resolution_url,
+    deadline: BigInt(p.deadline),
+    stake_amount: usdcToUnits(p.stake_amount),
+    category: p.category ?? "custom",
+    parent_id: BigInt(p.parent_id ?? 0),
+    market_type: p.market_type ?? "binary",
+    odds_mode: p.odds_mode ?? "pool",
     challenger_payout_bps: p.challenger_payout_bps ?? 0,
-    handicap_line:         p.handicap_line ?? "",
-    settlement_rule:       p.settlement_rule ?? "",
-    max_challengers:       p.max_challengers ?? 0,
-    is_private:            p.visibility === "private",
+    handicap_line: p.handicap_line ?? "",
+    settlement_rule: p.settlement_rule ?? "",
+    max_challengers: p.max_challengers ?? 0,
+    is_private: p.visibility === "private",
     // `Option<String>`: an empty invite key is `None`, not `Some("")`. Passing an
     // empty string would hash to a real key hash and lock the market to it.
-    invite_key:            p.invite_key ? p.invite_key : undefined,
-    context_hash:          fromHex32(p.context_hash),
+    invite_key: p.invite_key ? p.invite_key : undefined,
+    context_hash: fromHex32(p.context_hash),
     agent_owner_recipient: p.agent_owner_recipient ?? undefined,
   };
 }
@@ -1412,7 +1526,10 @@ function getDemoSecret(action: string): string | undefined {
       process.env.DEMO_SIGNER_PRIVATE_KEY
     );
   }
-  return process.env.DEMO_SIGNER_STELLAR_SECRET || process.env.DEMO_SIGNER_PRIVATE_KEY;
+  return (
+    process.env.DEMO_SIGNER_STELLAR_SECRET ||
+    process.env.DEMO_SIGNER_PRIVATE_KEY
+  );
 }
 
 async function getDemoSigner(action: string): Promise<StellarSigner | null> {
@@ -1433,10 +1550,10 @@ async function getDemoSigner(action: string): Promise<StellarSigner | null> {
 // ── Freshness helper ──────────────────────────────────────────────────────────
 function makeLiveFreshness(): VSCacheFreshness {
   return {
-    source:           "contract",
-    status:           "live",
-    lastUpdatedAt:    new Date().toISOString(),
-    ageMs:            0,
+    source: "contract",
+    status: "live",
+    lastUpdatedAt: new Date().toISOString(),
+    ageMs: 0,
     freshnessWindowMs: 1,
   };
 }
@@ -1455,12 +1572,15 @@ function isSameAddress(a?: string, b?: string) {
 
 function isClaimParticipant(claim: ClaimData, address: string): boolean {
   if (isSameAddress(claim.creator, address)) return true;
-  return (claim.challenger_addresses ?? []).some((a) => isSameAddress(a, address));
+  return (claim.challenger_addresses ?? []).some((a) =>
+    isSameAddress(a, address),
+  );
 }
 
 export function mapClaimToVS(claim: ClaimData): VSData {
   const firstChallenger = claim.first_challenger ?? ZERO_ADDRESS;
-  const state = claim.state === "active" ? "accepted" : (claim.state as VSData["state"]);
+  const state =
+    claim.state === "active" ? "accepted" : (claim.state as VSData["state"]);
 
   let winner = ZERO_ADDRESS;
   if (claim.winner_side === "creator") winner = claim.creator;
@@ -1470,9 +1590,9 @@ export function mapClaimToVS(claim: ClaimData): VSData {
 
   return {
     ...claim,
-    opponent:          firstChallenger,
+    opponent: firstChallenger,
     opponent_position: claim.counter_position,
-    stake_amount:      claim.creator_stake,
+    stake_amount: claim.creator_stake,
     state,
     winner,
   };
@@ -1504,8 +1624,12 @@ export function isVSMultiChallengerWin(vs: VSData) {
 }
 
 export function getVSTotalPot(vs: VSData) {
-  if (typeof vs.total_pot === "number" && Number.isFinite(vs.total_pot)) return vs.total_pot;
-  if (typeof vs.creator_stake === "number" && typeof vs.total_challenger_stake === "number") {
+  if (typeof vs.total_pot === "number" && Number.isFinite(vs.total_pot))
+    return vs.total_pot;
+  if (
+    typeof vs.creator_stake === "number" &&
+    typeof vs.total_challenger_stake === "number"
+  ) {
     return vs.creator_stake + vs.total_challenger_stake;
   }
   return vs.stake_amount * (vs.opponent === ZERO_ADDRESS ? 1 : 2);
@@ -1541,17 +1665,21 @@ export function hasVSWinner(vs: VSData) {
 export function isVSJoinable(vs: VSData, address?: string | null) {
   if (vs.state !== "open" && vs.state !== "accepted") return false;
   if (address) {
-    if (isSameAddress(vs.creator, address) || didUserChallengeVS(vs, address)) return false;
+    if (isSameAddress(vs.creator, address) || didUserChallengeVS(vs, address))
+      return false;
   }
-  if (getVSChallengerCount(vs) >= getVSConfiguredMaxChallengers(vs)) return false;
+  if (getVSChallengerCount(vs) >= getVSConfiguredMaxChallengers(vs))
+    return false;
   const nowSec = Math.floor(Date.now() / 1000);
-  if (vs.deadline > 0 && nowSec + VS_CHALLENGE_LOCK_SECONDS > vs.deadline) return false;
+  if (vs.deadline > 0 && nowSec + VS_CHALLENGE_LOCK_SECONDS > vs.deadline)
+    return false;
   return true;
 }
 
 export function didUserChallengeVS(vs: VSData, address?: string | null) {
   if (!address) return false;
-  if ((vs.challenger_addresses ?? []).some((a) => isSameAddress(a, address))) return true;
+  if ((vs.challenger_addresses ?? []).some((a) => isSameAddress(a, address)))
+    return true;
   return vs.opponent !== ZERO_ADDRESS && isSameAddress(vs.opponent, address);
 }
 
@@ -1564,15 +1692,18 @@ export function didUserWinVS(vs: VSData, address?: string | null) {
 
 export function didUserLoseVS(vs: VSData, address?: string | null) {
   if (!address || !hasVSWinner(vs)) return false;
-  const involved = isSameAddress(vs.creator, address) || didUserChallengeVS(vs, address);
+  const involved =
+    isSameAddress(vs.creator, address) || didUserChallengeVS(vs, address);
   return involved && !didUserWinVS(vs, address);
 }
 
 function getVSUserChallenger(vs: VSData, address?: string | null) {
   if (!address) return null;
-  return (vs.challengers ?? []).find((challenger) =>
-    isSameAddress(challenger.address, address)
-  ) ?? null;
+  return (
+    (vs.challengers ?? []).find((challenger) =>
+      isSameAddress(challenger.address, address),
+    ) ?? null
+  );
 }
 
 function getVSUserChallengerStake(vs: VSData, address?: string | null): number {
@@ -1585,7 +1716,10 @@ function getVSUserChallengerStake(vs: VSData, address?: string | null): number {
   return vs.stake_amount ?? 0;
 }
 
-export function getVSUserCommittedStake(vs: VSData, address?: string | null): number {
+export function getVSUserCommittedStake(
+  vs: VSData,
+  address?: string | null,
+): number {
   if (!address) return 0;
   if (isSameAddress(vs.creator, address)) {
     return vs.creator_stake ?? vs.stake_amount ?? 0;
@@ -1623,7 +1757,7 @@ export async function acceptVS(
   wallet: WalletArg,
   claimId: number,
   stakeAmount: number,
-  inviteKey = ""
+  inviteKey = "",
 ): Promise<ClaimWriteResult> {
   return challengeClaim(wallet, claimId, stakeAmount, inviteKey);
 }
@@ -1636,7 +1770,10 @@ export async function getOpenVSSummaries(): Promise<VSData[]> {
 }
 
 /** Returns paginated claims as ClaimData (for server-side indexer). */
-export async function getClaimSummaries(startId: number, limit: number): Promise<ClaimData[]> {
+export async function getClaimSummaries(
+  startId: number,
+  limit: number,
+): Promise<ClaimData[]> {
   const results = await readClaimsRange(startId, limit);
   return results.filter(Boolean) as ClaimData[];
 }
@@ -1644,7 +1781,7 @@ export async function getClaimSummaries(startId: number, limit: number): Promise
 /** Returns a single claim, optionally checking invite key. */
 export async function getClaimWithAccess(
   claimId: number,
-  _inviteKey?: string
+  _inviteKey?: string,
 ): Promise<ClaimData | null> {
   return readClaimRaw(claimId);
 }
@@ -1655,27 +1792,33 @@ export async function getOpenClaimSummaries(): Promise<ClaimData[]> {
   if (count <= 0) return [];
   const all = await readClaimsRange(1, count);
   return (all.filter(Boolean) as ClaimData[]).filter(
-    (c) => (c.state === "open" || c.state === "active") && !c.is_private
+    (c) => (c.state === "open" || c.state === "active") && !c.is_private,
   );
 }
 
 /** Returns claims for a user as ClaimData. */
-export async function getUserClaimSummaries(address: string): Promise<ClaimData[]> {
+export async function getUserClaimSummaries(
+  address: string,
+): Promise<ClaimData[]> {
   const count = await getClaimCount();
   if (count <= 0) return [];
   const all = await readClaimsRange(1, count);
-  return (all.filter(Boolean) as ClaimData[]).filter((c) => isClaimParticipant(c, address));
+  return (all.filter(Boolean) as ClaimData[]).filter((c) =>
+    isClaimParticipant(c, address),
+  );
 }
 
 /** @deprecated use getAllVSFast */
-export async function getAllVSSnapshot(
-  opts?: { forceRefresh?: boolean }
-): Promise<VSFeedSnapshot> {
+export async function getAllVSSnapshot(opts?: {
+  forceRefresh?: boolean;
+}): Promise<VSFeedSnapshot> {
   // In the browser this MUST go through /api/vs (the indexed cache): simulating
   // two invocations per claim against the public Soroban RPC trips its
   // per-client rate limit and the whole feed comes back empty.
   if (typeof window !== "undefined") {
-    const res = await fetch(opts?.forceRefresh ? "/api/vs?refresh=1" : "/api/vs");
+    const res = await fetch(
+      opts?.forceRefresh ? "/api/vs?refresh=1" : "/api/vs",
+    );
     if (!res.ok) throw new Error(`/api/vs returned ${res.status}`);
     const data = await res.json();
     return { items: data.items ?? [], cache: data.cache ?? null };
@@ -1686,7 +1829,7 @@ export async function getAllVSSnapshot(
 /** @deprecated use getUserVSFast */
 export async function getUserVSSnapshot(
   address: string,
-  opts?: { forceRefresh?: boolean }
+  opts?: { forceRefresh?: boolean },
 ): Promise<VSFeedSnapshot> {
   if (typeof window !== "undefined") {
     const suffix = opts?.forceRefresh ? "?refresh=1" : "";
@@ -1696,14 +1839,17 @@ export async function getUserVSSnapshot(
     return { items: data.items ?? [], cache: data.cache ?? null };
   }
   const items = await getUserVSSummaries(address);
-  return { items: items.sort((a, b) => b.id - a.id), cache: makeLiveFreshness() };
+  return {
+    items: items.sort((a, b) => b.id - a.id),
+    cache: makeLiveFreshness(),
+  };
 }
 
 /** Alias for cancelClaim — kept for page compatibility */
 export async function cancelVS(
   wallet: WalletArg,
   claimId: number,
-  _inviteKey = ""
+  _inviteKey = "",
 ): Promise<ClaimWriteResult> {
   return cancelClaim(wallet, claimId);
 }
@@ -1719,7 +1865,7 @@ export async function getUserVSDirect(address: string): Promise<VSData[]> {
  */
 export async function getRivalryChain(claimId: number): Promise<number[]> {
   const visited = new Set<number>();
-  const queue   = [claimId];
+  const queue = [claimId];
   const result: number[] = [];
 
   while (queue.length > 0) {
@@ -1747,10 +1893,10 @@ export async function getRivalryChain(claimId: number): Promise<number[]> {
 export async function requestResolveVS(
   _wallet: WalletArg,
   _claimId: number,
-  _inviteKey = ""
+  _inviteKey = "",
 ): Promise<ClaimWriteResult> {
   throw new Error(
-    "Resolution is handled automatically by the Mimir oracle agent after the deadline. No user action required."
+    "Resolution is handled automatically by the Mimir oracle agent after the deadline. No user action required.",
   );
 }
 
@@ -1758,7 +1904,7 @@ export async function requestResolveVS(
 export async function resetVSResolveRequest(
   _wallet: WalletArg,
   _claimId: number,
-  _inviteKey = ""
+  _inviteKey = "",
 ): Promise<ClaimWriteResult> {
   throw new Error("Not applicable — the oracle resolves automatically.");
 }
