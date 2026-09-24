@@ -205,6 +205,23 @@ pub struct PayoutQuote {
     pub claimed: bool,
 }
 
+/// A paginated window into a claim's challenger roster.
+///
+/// `items` holds up to `limit` entries starting at `offset`.  
+/// `total` is the total roster length so callers can tell when they have read
+/// the last page without fetching an extra empty one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengerPage {
+    /// The slice of challengers for this page.
+    pub items: soroban_sdk::Vec<Challenger>,
+    /// Roster position of the first item returned (mirrors the caller's
+    /// `offset` argument for safe cursor book-keeping).
+    pub offset: u32,
+    /// Total number of challengers in this claim (not just this page).
+    pub total: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlatformStats {

@@ -32,4 +32,6 @@ mod test_fees;
 #[cfg(test)]
 mod test_lifecycle;
 #[cfg(test)]
+mod test_pagination;
+#[cfg(test)]
 mod test_settlement;
