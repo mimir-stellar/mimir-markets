@@ -29,7 +29,8 @@ import {
 } from "@/lib/db";
 import {
   AUTHORITY_LEVELS, REGISTRY_SCHEMA_VERSION, authorizeAction, defaultLimits,
-  evaluateRegistrationReplay, revokeAgent, type AgentRecord, type AgentCapability,
+  evaluateRegistrationReplay, revokeAgent, type ActionRejection, type ActionVerdict,
+  type AgentRecord, type AgentCapability,
 } from "@/lib/agents/registry";
 import { auditAgentRequest, consumeNonce, loadAgent, loadIdempotentResponse, saveAgent, saveIdempotentResponse } from "@/lib/agents/store";
 import { buildAgentDryRun } from "@/lib/agents/dry-run";
@@ -37,7 +38,7 @@ import { isFeatureEnabled, checkWriteAllowed, type Pausable } from "@/lib/ops/fl
 import { getUsdcBalanceUnits, usdcToUnits, parseUsdcAtomic } from "@/lib/usdc";
 import { getAgentEarningsSummary } from "@/lib/db";
 import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
-import { apiError } from "@/lib/api/errors";
+import { apiError, type ApiErrorCode, type ApiErrorResult } from "@/lib/api/errors";
 
 export const dynamic = "force-dynamic";
 
@@ -68,8 +69,47 @@ function json(body: unknown, status = 200): Response {
 }
 
 /** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
-function errorResponse(err: import("@/lib/api/errors").ApiErrorResult): Response {
+function errorResponse(err: ApiErrorResult): Response {
   return Response.json(err.body, { status: err.status, headers: { ...err.headers, "cache-control": "no-store" } });
+}
+
+/**
+ * Every `authorizeAction` rejection, mapped to the API's stable error code.
+ *
+ * Typed as a total `Record` on purpose: adding a rejection to `ActionRejection`
+ * fails the build here until it is classified, rather than silently inheriting a
+ * code that misleads an autonomous caller.
+ *
+ * Only the rejections with an exact equivalent get a specific code. The limit and
+ * policy ones are a plain 403 — a `budget_exhausted` or `rate_limited` code would
+ * advertise a retry hint, and retrying a request whose category, mode, position or
+ * market count is over the agent's own limits cannot succeed until the agent
+ * changes the request.
+ */
+const ACTION_REJECTION_CODES: Record<ActionRejection, ApiErrorCode> = {
+  platform_paused: "agent_paused",
+  paused: "agent_paused",
+  revoked: "agent_revoked",
+  missing_capability: "capability_missing",
+  rate_limit_exceeded: "rate_limited",
+  pending: "forbidden",
+  insufficient_authority: "forbidden",
+  category_not_allowed: "forbidden",
+  mode_not_allowed: "forbidden",
+  position_too_large: "forbidden",
+  daily_exposure_exceeded: "forbidden",
+  too_many_active_markets: "forbidden",
+};
+
+/**
+ * Convert a failed `authorizeAction` verdict into a structured `ApiErrorResult`.
+ *
+ * `verdict.detail` is carried through as the message, so the specific limit or
+ * missing grant stays visible even when the code itself is generic.
+ */
+function actionVerdictToError(verdict: ActionVerdict, capability: AgentCapability): ApiErrorResult {
+  const code = verdict.reason ? ACTION_REJECTION_CODES[verdict.reason] : "forbidden";
+  return apiError(code, verdict.detail ?? `'${capability}' is not allowed for this agent`);
 }
 
 async function verify(address: string, message: string, signature: string): Promise<boolean> {

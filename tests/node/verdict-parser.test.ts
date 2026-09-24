@@ -42,18 +42,39 @@ import {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Minimal extractJson stub: returns the first {...} block found via regex.
- * Handles fenced code blocks (strips the fence first) and prose wrappers.
- * Good enough for the cases tests need to exercise; the real extractJson in
- * lib/llm.ts has full balanced-brace walking.
+ * Minimal extractJson stub: returns the FIRST balanced {...} block, the way the
+ * real extractJson in lib/llm.ts does. Handles fenced code blocks (strips the
+ * fence first) and prose wrappers.
+ *
+ * The walk matters. A greedy `/\{[\s\S]*\}/` spans from the first `{` to the
+ * LAST `}`, so a response carrying two objects came back as one unparsable blob
+ * and any test that models "a reasoning object then an answer object" could not
+ * reach the path it was written to exercise.
  */
 function stubExtract(text: string): string | null {
   // Strip ```json ... ``` fences
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenced) return fenced[1].trim();
-  // Find first { ... } block
-  const m = text.match(/\{[\s\S]*\}/);
-  return m ? m[0] : null;
+  const cleaned = fenced ? fenced[1].trim() : text;
+  const start = cleaned.search(/[{[]/);
+  if (start === -1) return null;
+  const open = cleaned[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < cleaned.length; i++) {
+    const c = cleaned[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === open) depth++;
+    else if (c === close && --depth === 0) return cleaned.slice(start, i + 1);
+  }
+  return null;
 }
 
 /** Identity extractor: text already IS the JSON string. */

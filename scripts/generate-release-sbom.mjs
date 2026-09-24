@@ -79,6 +79,24 @@ export function buildCycloneDxFromLockfile(lock, { name, version, serialNumber }
     if (seen.has(purl)) continue;
     seen.add(purl);
 
+    /**
+     * Declared rather than inferred: `hashes` / `licenses` / `externalReferences`
+     * are attached below, and TS's inference for a JS object literal does not pick
+     * up properties added after the fact, which left consumers with a component
+     * type that had no `hashes` on it.
+     *
+     * @type {{
+     *   type: string,
+     *   "bom-ref": string,
+     *   name: string,
+     *   version: string,
+     *   purl: string,
+     *   scope: string,
+     *   hashes?: Array<{ alg: string, content: string }>,
+     *   licenses?: Array<{ license: { id: string } }>,
+     *   externalReferences?: Array<{ type: string, url: string }>,
+     * }}
+     */
     const component = {
       type: "library",
       "bom-ref": purl,
@@ -144,6 +162,18 @@ export function buildCycloneDxFromLockfile(lock, { name, version, serialNumber }
   };
 }
 
+/**
+ * Stamp the timestamp onto a BOM, in place.
+ *
+ * Generic so the caller's precise BOM type survives the round-trip. Returning an
+ * untyped value made every caller's `bom.components.map((c) => ...)` callback
+ * implicitly `any` under the repo's `strict` tsconfig.
+ *
+ * @template T
+ * @param {T} bom
+ * @param {{ timestamp?: string }} [options]
+ * @returns {T}
+ */
 export function stampMetadata(bom, { timestamp } = {}) {
   bom.metadata.timestamp = timestamp || new Date().toISOString();
   return bom;
