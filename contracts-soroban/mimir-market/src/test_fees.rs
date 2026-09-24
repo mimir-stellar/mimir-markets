@@ -317,16 +317,14 @@ fn fees_are_pulled_not_pushed_and_only_once() {
     assert_eq!(stats.fees_accrued, expected);
     assert_eq!(stats.fees_claimed, expected);
 
-    let err = f.client().try_claim_fees(&f.platform).unwrap_err().unwrap();
-    assert_eq!(err, Error::NoFees);
+    assert_eq!(f.client().claim_fees(&f.platform), 0);
 }
 
 #[test]
 fn an_unrelated_address_has_no_fees_to_claim() {
     let f = Fixture::new(1_000, 0);
     let stranger = Address::generate(&f.env);
-    let err = f.client().try_claim_fees(&stranger).unwrap_err().unwrap();
-    assert_eq!(err, Error::NoFees);
+    assert_eq!(f.client().claim_fees(&stranger), 0);
 }
 
 // ── Ownership / oracle ───────────────────────────────────────────────────────

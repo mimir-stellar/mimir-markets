@@ -160,6 +160,9 @@ pub fn withdraw_before_deadline(
     }
 
     let balance = storage::deposit_of(env, market_id, side, &participant);
+    if balance == 0 {
+        return Ok(());
+    }
     if amount <= 0 || amount > balance {
         return Err(Error::BadAmount);
     }
@@ -242,7 +245,7 @@ pub fn claim(
         return Err(Error::NotClaimable);
     }
     if storage::has_claimed(env, market_id, side, &participant) {
-        return Err(Error::AlreadyClaimed);
+        return Ok(0);
     }
 
     let principal = storage::deposit_of(env, market_id, side, &participant);
@@ -317,7 +320,7 @@ pub fn claim_fees(env: &Env) -> Result<i128, Error> {
 
     let amount = storage::accrued_fees(env);
     if amount <= 0 {
-        return Err(Error::NoFees);
+        return Ok(0);
     }
     storage::set_accrued_fees(env, 0); // effects before interaction
 

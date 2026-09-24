@@ -504,12 +504,7 @@ fn a_challenger_can_only_pull_once() {
         .resolve_claim(&id, &WinnerSide::Draw, &f.str("d"), &1, &f.zero_hash());
 
     f.client().claim_challenger_payout(&c1, &id);
-    let err = f
-        .client()
-        .try_claim_challenger_payout(&c1, &id)
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, Error::AlreadyClaimedPayout);
+    assert_eq!(f.client().claim_challenger_payout(&c1, &id), 0);
 
     // The roster reports who has settled.
     let roster = f.client().get_challenger_list(&id);
@@ -773,16 +768,14 @@ fn a_failed_payout_is_parked_and_withdrawable_later() {
     assert_eq!(f.token().balance(&c1), 100 * USDC);
 
     // Nothing to withdraw for someone who was paid normally.
-    let err = f.client().try_withdraw(&c1).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(f.client().withdraw(&c1), 0);
 
     // Once unblocked, the parked amount is pullable exactly once.
     f.stub().set_blocked(&creator, &false);
     assert_eq!(f.client().withdraw(&creator), 10 * USDC);
     assert_eq!(f.token().balance(&creator), 100 * USDC);
     assert_eq!(f.client().get_withdrawable(&creator), 0);
-    let err = f.client().try_withdraw(&creator).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(f.client().withdraw(&creator), 0);
 }
 
 /// A challenger who cannot receive still has their settlement recorded: the

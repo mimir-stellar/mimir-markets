@@ -402,13 +402,8 @@ fn withdrawing_from_the_wrong_side_is_rejected() {
     let id = f.market(&captain, 0);
     f.client().deposit(&a1, &id, &SIDE_A, &(10 * USDC));
 
-    // No balance on side B.
-    let err = f
-        .client()
-        .try_withdraw_before_deadline(&a1, &id, &SIDE_B, &(1 * USDC))
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, Error::BadAmount);
+    // No balance on side B, so it returns Ok(()) idempotently.
+    f.client().withdraw_before_deadline(&a1, &id, &SIDE_B, &(1 * USDC));
 
     // And an out-of-range side is refused outright.
     let err = f
