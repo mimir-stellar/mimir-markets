@@ -8,6 +8,7 @@ import { GlassCard } from "@/components/ui";
 import { formatDeadline, normalizeResolutionSource } from "@/lib/constants";
 import { computeClaimQuality } from "@/lib/claimQuality";
 import type { VSData } from "@/lib/contract";
+import SettlementReceipt from "@/components/SettlementReceipt";
 
 type SettlementExplanationCardProps = {
   vs: VSData;
@@ -82,6 +83,7 @@ export default function SettlementExplanationCard({
 
   const summary = vs.resolution_summary?.trim() || t("noSummary");
   const settlementRule = vs.settlement_rule?.trim() || t("ruleFallback");
+  const deadlineLabel = formatDeadline(vs.deadline ?? 0, locale === "en" ? "en" : "es");
 
   return (
     <GlassCard
@@ -153,6 +155,20 @@ export default function SettlementExplanationCard({
                   {t("ruleApplied")}
                 </div>
                 <p className="text-sm leading-relaxed text-pv-text/90">{settlementRule}</p>
+                {deadlineLabel ? (
+                  <p className="mt-2 text-xs leading-relaxed text-pv-muted">
+                    <span className="font-bold uppercase tracking-[0.12em] text-pv-muted/80">
+                      {t("receiptDeadline")}
+                    </span>
+                    {": "}
+                    <time
+                      dateTime={new Date((vs.deadline ?? 0) * 1000).toISOString()}
+                      className="font-mono tabular-nums text-pv-text/80"
+                    >
+                      {deadlineLabel}
+                    </time>
+                  </p>
+                ) : null}
                 <p className="mt-2 text-xs leading-relaxed text-pv-muted">
                   {t("consensusHint")}
                 </p>
@@ -231,7 +247,7 @@ export default function SettlementExplanationCard({
             </div>
           </div>
 
-          {/* SETTLEMENT RECEIPT removed by design request */}
+          <SettlementReceipt vs={vs} />
         </div>
       </div>
     </GlassCard>

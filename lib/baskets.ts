@@ -12,6 +12,44 @@ export interface BasketSnapshot { timestamp: number; navAtomic: bigint; drawdown
 
 export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n;
 
+/**
+ * Default create/follow policy: no agent over 40%, no category (track) over 60%.
+ * Kept in the shared lib so the create UI preview matches the API gate exactly.
+ */
+export const DEFAULT_BASKET_POLICY: BasketPolicy = {
+  maxSingleAgentBps: 4_000,
+  maxCategoryBps: 6_000,
+  staleSignalAction: "skip",
+  failedCopyAction: "keep_idle",
+};
+
+export type BasketExposurePreviewStatus = "empty" | "incomplete" | "invalid" | "ready";
+
+export interface BasketExposureBar {
+  key: string;
+  bps: number;
+  /** True when this bar alone breaches the matching policy cap. */
+  overLimit: boolean;
+}
+
+/**
+ * Live exposure snapshot for the basket create form — same math as `basketExposure`
+ * + `validateBasket`, with UI-ready bars and a discrete status.
+ *
+ * Does not touch wallets, deposits, or analytics; pure allocation arithmetic.
+ */
+export interface BasketExposurePreview {
+  status: BasketExposurePreviewStatus;
+  totalBps: number;
+  categories: Record<string, number>;
+  modes: Record<string, number>;
+  categoryBars: BasketExposureBar[];
+  modeBars: BasketExposureBar[];
+  agentBars: BasketExposureBar[];
+  errors: string[];
+  policy: BasketPolicy;
+}
+
 export function validateBasket(weights: BasketAgentWeight[], policy: BasketPolicy): string[] {
   const errors: string[] = [];
   if (weights.reduce((sum, item) => sum + item.weightBps, 0) !== 10_000) errors.push("weights_must_total_10000_bps");
@@ -49,6 +87,61 @@ export function basketExposure(weights: BasketAgentWeight[]) {
   }
   return { categories, modes };
 }
+
+function barsFromRecord(
+  record: Record<string, number>,
+  limitBps: number | null,
+): BasketExposureBar[] {
+  return Object.entries(record)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([key, bps]) => ({
+      key,
+      bps,
+      overLimit: limitBps !== null && bps > limitBps,
+    }));
+}
+
+/**
+ * Preview category / mode / agent concentration before a basket is created.
+ *
+ * - empty: no positive weights
+ * - incomplete: weights present but do not total 10_000 bps (still shows bars)
+ * - invalid: totals 10_000 but fails policy (or has duplicates / non-positive)
+ * - ready: passes `validateBasket`
+ */
+export function previewBasketExposureBeforeCreate(
+  weights: BasketAgentWeight[],
+  policy: BasketPolicy = DEFAULT_BASKET_POLICY,
+): BasketExposurePreview {
+  const active = weights.filter((item) => item.weightBps > 0);
+  const exposure = basketExposure(active);
+  const totalBps = active.reduce((sum, item) => sum + item.weightBps, 0);
+  const errors = active.length === 0 ? [] : validateBasket(active, policy);
+
+  let status: BasketExposurePreviewStatus;
+  if (active.length === 0) status = "empty";
+  else if (totalBps !== 10_000) status = "incomplete";
+  else if (errors.length > 0) status = "invalid";
+  else status = "ready";
+
+  const agentRecord: Record<string, number> = {};
+  for (const item of active) {
+    agentRecord[item.agentId] = (agentRecord[item.agentId] ?? 0) + item.weightBps;
+  }
+
+  return {
+    status,
+    totalBps,
+    categories: exposure.categories,
+    modes: exposure.modes,
+    categoryBars: barsFromRecord(exposure.categories, policy.maxCategoryBps),
+    modeBars: barsFromRecord(exposure.modes, null),
+    agentBars: barsFromRecord(agentRecord, policy.maxSingleAgentBps),
+    errors,
+    policy,
+  };
+}
+
 
 /** Performance fee applies only to realized NAV above the previous high-water mark. */
 export function highWaterMarkFee(navAtomic: bigint, highWaterMarkAtomic: bigint, performanceFeeBps: bigint) {

@@ -42,6 +42,8 @@ import ExploreFilteredEmptyState from "@/components/explorer/ExploreFilteredEmpt
 import { ChevronDown, ListFilter, RefreshCw, Search, X } from "lucide-react";
 import ChallengeOpportunityCard from "@/components/explorer/ChallengeOpportunityCard";
 import { BlueprintHeading } from "@/components/BlueprintGrid";
+import CacheFreshnessPill from "@/components/CacheFreshnessPill";
+import StaleIndexWarning from "@/components/StaleIndexWarning";
 import type { VSCacheFreshness } from "@/lib/vs-freshness";
 
 const SECONDS_PER_DAY = 86_400;
@@ -684,7 +686,20 @@ export default function ExploreClient() {
     <PageTransition>
       <div className="mb-8">
         <BlueprintHeading>{t("title")}</BlueprintHeading>
+        {activeView !== "ai" ? (
+          <div className="mt-3">
+            <CacheFreshnessPill freshness={vsFreshness} />
+          </div>
+        ) : null}
       </div>
+
+      {activeView !== "ai" ? (
+        <StaleIndexWarning
+          freshness={vsFreshness}
+          refreshing={refreshing}
+          onRefresh={() => void loadExploreData({ forceRefresh: true })}
+        />
+      ) : null}
 
       {/* z-20: filter dropdowns (absolute z-40) must stack above #arena-content — Framer
           motion siblings create stacking contexts; later DOM order was painting cards on top. */}

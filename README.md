@@ -386,6 +386,10 @@ flowchart LR
 
 The gate is deterministic: given the same permission, signal and usage, it always returns the same answer, and the skip reason enum (`daily_cap`, `stale_signal`, `spend_permission_mismatch`, and the rest) says exactly which bound was hit. The ordered checks: not globally paused, permission active and unexpired, no self-copy, depth 1, no cycle, no duplicate position, fresh signal, open slots and liquidity, category and mode allowlisted, confidence and payout floors, per-position/daily/weekly/exposure caps, realized-loss limit, spend permission naming the configured USDC Stellar Asset Contract and spender with allowance left on chain, and a clean simulation against Soroban RPC. The surface is gated behind `MIMIR_FEATURE_COPY_TRADING`. See [`docs/COPY_TRADING_THREAT_MODEL.md`](docs/COPY_TRADING_THREAT_MODEL.md) for what each check is defending against.
 
+`POST /api/copy/preview` is a read-only copy-execution dry run for a draft `permission`, `signal`, and `context` (usage, existing claim IDs, ancestry, configured token/spender, and remaining allowance). Atomic amounts in the request are decimal strings; displayed USDC amounts are numbers with at most seven decimal places. The route validates and rate-limits the input, then returns `policyEligible`, the first skip reason, `stakeAtomic`, and the funded feature/pause status. It remains available when funded copy trading is disabled. The response always says `stateSource: "supplied_snapshot"`, `simulation: "not_run"`, `executionReady: false`, and `transactionSubmitted: false`: caller-supplied state is hypothetical, not a Soroban read or a spend authorization. No signer, live secret, database write, or transaction is used. A future executor must re-read the claim and allowance on chain, check usage and duplication, and simulate the exact signed invocation before submitting; a positive preview cannot be replayed as an approval.
+
+Operational rollback is to stop exposing the preview route in the deployed web app; the funded `MIMIR_FEATURE_COPY_TRADING=0` and `MIMIR_PAUSE_COPY_EXECUTION=1` controls remain independent and continue to block funded copy execution. Preview responses are not audit or accounting records, so rollback needs no ledger or database reversal.
+
 ---
 
 ## Agents as economic actors
@@ -705,6 +709,15 @@ npm run smoke:x402        # scheme verify/settle vs. a real on-chain payment
 npm run smoke:x402:http   # full HTTP round trip against a running dev server
 ```
 
+Prove the safety limits without touching the network (fully offline, deterministic):
+
+```bash
+npm run load:x402         # thousands of fixture verifications + settle/replay checks
+npm run load:rate-limit   # the API limiter under sustained, mixed traffic
+```
+
+Both loaders synthesize their own payments, signatures and Horizon reads on an in-memory fixture ledger, so they run in CI with no funding and no secrets (`scripts/load-x402-verify.ts`, `scripts/load-rate-limit.ts`). They assert the load envelope — every proof verified, settled exactly once and refused on replay; exact rate-limit enforcement with refusals that never move the window and a bucket map bounded by `MAX_BUCKETS` — and exit non-zero when it breaks. The same fixtures drive the node suites `tests/node/x402-scheme.test.ts`, `tests/node/x402-load.test.ts` and `tests/node/rate-limit-load.test.ts`.
+
 ---
 
 ## Tech stack
@@ -771,7 +784,8 @@ mimir-markets/
 │   ├── mimir-market/                     # claim escrow, settlement, fee policy (Rust)
 │   └── mimir-squad/                      # two-sided squad pools (Rust)
 ├── deploy/
-│   └── deploy.ts                         # build + deploy + initialize on Stellar Testnet
+│   ├── deploy.ts                         # build + deploy + initialize on Stellar Testnet
+│   └── contract-artifacts.manifest.json  # Wasm digest pins for provenance checks
 ├── lib/
 │   ├── stellar.ts                        # network config, Soroban RPC + Horizon, explorer, getEvents
 │   ├── usdc.ts                           # USDC Stellar Asset Contract + 7dp helpers
@@ -801,12 +815,18 @@ mimir-markets/
 │   ├── create-agent-wallets.ts           # generate 12 keypairs (oracle + creator + council)
 │   ├── fund-agents.ts                    # fund agents from a master seed
 │   ├── verify-deployment.ts              # assert the deployed contracts match this repo
+│   ├── verify-artifact-provenance.ts     # fail-closed Wasm digest / manifest checks
 │   ├── onchain-smoke.ts                  # end-to-end on-chain smoke
 │   ├── x402-stellar-smoke.ts             # payment-scheme smoke against live Testnet
 │   ├── demo-full-cycle.ts                # full create -> challenge -> settle in 90s
 │   ├── seed-claims.ts                    # bulk-seed demo markets
+│   ├── run-browser-smoke.mjs             # browser smoke orchestrator (build + serve + test + teardown)
+│   ├── lib/browser-smoke-env.mjs         # secret-free env allowlist for the smoke build
 │   └── warm-vs-index.ts                  # rebuild Neon cache from on-chain
-└── tests/node/                           # node:test unit + integration suites
+├── playwright.config.ts                  # browser-smoke config (system Chrome, no browser download)
+└── tests/
+    ├── node/                             # node:test unit + integration suites
+    └── browser/                          # Playwright browser smoke suite (npm run smoke:browser)
 ```
 
 ---
@@ -857,6 +877,7 @@ npm run agents:balances
 
 ```bash
 npm run deploy:contract        # build, deploy and initialize
+npm run verify:artifacts       # fail-closed Wasm digest check (no secrets)
 npm run verify:deployment      # assert the deployment matches this repo's config
 npm run smoke:onchain          # end-to-end: create -> challenge -> read back
 ```
@@ -881,6 +902,24 @@ AUTO_CHALLENGE=1 npm run oracle  # also Kelly-stake on mispriced claims
 npm run market-creator         # opens new markets every 6h
 npm run council                # the ten-persona jury
 ```
+
+### Browser smoke flow
+
+`npm run smoke:browser` builds the app, serves it on `http://127.0.0.1:3111`, drives the Playwright suite in `tests/browser/` with a real browser, and tears everything down. It runs in CI as the `browser-smoke` job and is what lets Mimir ship funded features with predictable safety.
+
+**What it runs:** boot + locale routing + security headers (`boot.spec.ts`), every public page rendering (`pages.spec.ts`), the fail-closed health/feed/analytics endpoints (`health.spec.ts`), wallet-gated money paths (`wallet-mock.spec.ts`), and the `?demo=1` mock create-to-success flow (`demo-create.spec.ts`).
+
+**Environment contract.** The smoke flow is deterministic and secret-free. `scripts/run-browser-smoke.mjs` moves every `.env*` file Next.js reads (`.env`, `.env.local`, `.env.production*`) aside for the duration of the run and restores them afterwards, then builds and serves with `buildSmokeEnv()` (`scripts/lib/browser-smoke-env.mjs`): a strict allowlist (PATH/HOME/CI markers…), no server secrets, no contract ids, and only the pinned `NEXT_PUBLIC_STELLAR_NETWORK*` values. The app therefore boots in its **chain-not-configured** state, and the suite asserts it *fails closed*: health is `503 critical` with a `db.unconfigured` alarm, the arena feed returns `[]`, and money paths are gated behind a connect control. A served page matching a secret pattern fails the run.
+
+**Browser.** The flow uses the system Chrome/Chromium (Playwright channel `"chrome"`) and never downloads a Playwright browser. Point it at a specific binary with `SMOKE_CHROME_PATH=/path/to/chrome`.
+
+```bash
+npm run smoke:browser                        # full cycle build + serve + test + teardown
+npm run smoke:browser -- --skip-build        # reuse an existing .next build (fast iteration)
+npm run smoke:browser -- --filter boot       # run only the boot spec
+```
+
+**Failure, rollback and artifacts.** On failure the run prints where to look, restores the moved `.env*` files and kills the server, and CI uploads `playwright-report/` + `test-results/` for 7 days. Every mode of the runner tears down cleanly, so a developer can always rerun exactly what CI ran with one command: `npm run smoke:browser`.
 
 ---
 
@@ -1005,6 +1044,7 @@ Every env var lives in `.env.example`. Quick reference:
 
 | Variable                          | Required by              | Notes                                                                              |
 | --------------------------------- | ------------------------ | ---------------------------------------------------------------------------------- |
+| `MIMIR_REQUIRE_ARTIFACT_PROVENANCE` | deploy / CI            | `1` forces release-mode Wasm digest pins before deploy |
 | `STELLAR_DEPLOYER_SECRET`         | deploy                   | Deploys and initializes the contracts; becomes the `owner` role                     |
 | `STELLAR_ORACLE_SECRET`           | oracle (worker)          | The oracle's local `S…` seed; its `G…` address is the contract's `oracle` role      |
 | `CREATOR_SECRET`                  | market-creator (worker)  | The market-creator's local `S…` seed                                                |
@@ -1066,9 +1106,12 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run agents:balances`                    | Print oracle + creator + council USDC and XLM balances                             |
 | `npm run deploy:contract`                    | Build, deploy and initialize the Soroban contracts on Stellar Testnet              |
 | `npm run verify:deployment`                  | Check the deployed contract ids, WASM hash and initialized config                  |
+| `npm run verify:artifacts`                   | Verify / pin Soroban Wasm digests against `deploy/contract-artifacts.manifest.json` (no secrets) |
 | `npm run verify:analytics`                   | Check the analytics gates the launch gate requires                                 |
 | `npm run smoke:onchain`                      | On-chain smoke test against the live deployment (`:full` adds resolve + squad)     |
 | `npm run smoke:x402` / `:http`               | Payment-scheme smoke against live Testnet / a full HTTP round trip                 |
+| `npm run load:x402`                          | Offline load test: fixture verification + settle/replay limits                      |
+| `npm run load:rate-limit`                    | Offline load test: the API rate limiter under mixed traffic                         |
 | `npm run test:smoke`                         | Node-native smoke tests (API validation, XMTP, db-index, etc.)                     |
 | `npm run test:research`                      | Research adapters, categories, SSRF guard, x402 discovery suites                   |
 | `npm run test:baskets`                       | Basket validation, virtual NAV and high-water fee suites                           |
