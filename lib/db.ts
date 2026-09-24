@@ -2203,15 +2203,17 @@ export async function getAgentTradeRows(address: string): Promise<AgentTradeRow[
   // it also discarded the index on those columns.
   const [created, challenged] = await Promise.all([
     execute(pool, {
-      sql: `SELECT id, creator_stake, total_challenger_stake, state, winner_side,
-        updated_at, category, question
-        FROM claims WHERE creator = ? ORDER BY id DESC`,
+      sql: `SELECT c.id, c.creator_stake, c.total_challenger_stake, c.state, c.winner_side,
+        COALESCE(ms.settled_at * 1000, c.updated_at) AS settled_at, c.category, c.question
+        FROM claims c LEFT JOIN market_settlements ms ON ms.claim_id = c.id
+        WHERE c.creator = ? ORDER BY c.id DESC`,
       args: [address],
     }),
     execute(pool, {
       sql: `SELECT c.id, ch.stake, ch.potential_payout, c.state, c.winner_side,
-        c.updated_at, c.category, c.question
+        COALESCE(ms.settled_at * 1000, c.updated_at) AS settled_at, c.category, c.question
         FROM challengers ch JOIN claims c ON c.id = ch.claim_id
+        LEFT JOIN market_settlements ms ON ms.claim_id = c.id
         WHERE ch.address = ? ORDER BY c.id DESC`,
       args: [address],
     }),
@@ -2226,7 +2228,7 @@ export async function getAgentTradeRows(address: string): Promise<AgentTradeRow[
       opposingStake: getNumber(row.total_challenger_stake),
       potentialPayout: 0,
       state: getString(row.state), winnerSide: getString(row.winner_side),
-      settledAt: getNumber(row.updated_at),
+      settledAt: getNumber(row.settled_at),
       category: getString(row.category), question: getString(row.question),
     });
   }
@@ -2237,7 +2239,7 @@ export async function getAgentTradeRows(address: string): Promise<AgentTradeRow[
       stake: getNumber(row.stake), opposingStake: 0,
       potentialPayout: getNumber(row.potential_payout),
       state: getString(row.state), winnerSide: getString(row.winner_side),
-      settledAt: getNumber(row.updated_at),
+      settledAt: getNumber(row.settled_at),
       category: getString(row.category), question: getString(row.question),
     });
   }

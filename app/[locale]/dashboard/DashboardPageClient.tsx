@@ -26,6 +26,7 @@ import DashboardPortfolioSection, {
 import DashboardWalletGate from "@/components/dashboard/DashboardWalletGate";
 import AccountBalances from "@/components/wallet/AccountBalances";
 import DashboardKpiSkeletonRow from "@/components/dashboard/DashboardKpiSkeletonRow";
+import PortfolioPerformancePanel from "@/components/dashboard/PortfolioPerformancePanel";
 import DashboardVSFilterBar from "@/components/dashboard/DashboardVSFilterBar";
 import { useDashboardFilterUrlState } from "@/hooks/useDashboardFilterUrlState";
 import {
@@ -411,6 +412,12 @@ export default function DashboardPageClient() {
             </>
             )}
           </section>
+        </AnimatedItem>
+      ) : null}
+
+      {address ? (
+        <AnimatedItem>
+          <PortfolioPerformancePanel address={address} />
         </AnimatedItem>
       ) : null}
 
