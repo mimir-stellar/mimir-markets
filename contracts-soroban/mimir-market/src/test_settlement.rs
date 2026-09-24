@@ -504,12 +504,7 @@ fn a_challenger_can_only_pull_once() {
         .resolve_claim(&id, &WinnerSide::Draw, &f.str("d"), &1, &f.zero_hash());
 
     f.client().claim_challenger_payout(&c1, &id);
-    let err = f
-        .client()
-        .try_claim_challenger_payout(&c1, &id)
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, Error::AlreadyClaimedPayout);
+    assert_eq!(f.client().claim_challenger_payout(&c1, &id), 0);
 
     // The roster reports who has settled.
     let roster = f.client().get_challenger_list(&id);
@@ -773,16 +768,14 @@ fn a_failed_payout_is_parked_and_withdrawable_later() {
     assert_eq!(f.token().balance(&c1), 100 * USDC);
 
     // Nothing to withdraw for someone who was paid normally.
-    let err = f.client().try_withdraw(&c1).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(f.client().withdraw(&c1), 0);
 
     // Once unblocked, the parked amount is pullable exactly once.
     f.stub().set_blocked(&creator, &false);
     assert_eq!(f.client().withdraw(&creator), 10 * USDC);
     assert_eq!(f.token().balance(&creator), 100 * USDC);
     assert_eq!(f.client().get_withdrawable(&creator), 0);
-    let err = f.client().try_withdraw(&creator).unwrap_err().unwrap();
-    assert_eq!(err, Error::NothingToWithdraw);
+    assert_eq!(f.client().withdraw(&creator), 0);
 }
 
 /// A challenger who cannot receive still has their settlement recorded: the
@@ -867,4 +860,159 @@ fn a_challenge_inside_the_lock_window_is_rejected() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, Error::ChallengeWindowClosed);
+}
+
+// ── Confidence validation ─────────────────────────────────────────────────────
+
+/// Confidence of exactly 100 is the maximum valid value and must be accepted.
+#[test]
+fn confidence_100_is_accepted() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+
+    let id = f.client().create_claim(&creator, &f.params(5 * USDC));
+    f.client().challenge_claim(&c1, &id, &(5 * USDC), &None);
+    f.advance_by(3_600);
+
+    // Should not error.
+    f.client()
+        .resolve_claim(&id, &WinnerSide::Creator, &f.str("sure"), &100, &f.zero_hash());
+    assert_eq!(f.client().get_claim(&id).confidence, 100);
+}
+
+/// Confidence of 0 is the minimum valid value and must be accepted.
+#[test]
+fn confidence_0_is_accepted() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+
+    let id = f.client().create_claim(&creator, &f.params(5 * USDC));
+    f.client().challenge_claim(&c1, &id, &(5 * USDC), &None);
+    f.advance_by(3_600);
+
+    f.client()
+        .resolve_claim(&id, &WinnerSide::Unresolvable, &f.str("none"), &0, &f.zero_hash());
+    assert_eq!(f.client().get_claim(&id).confidence, 0);
+}
+
+/// Confidence of 101 is the first out-of-range value and must be rejected.
+#[test]
+fn confidence_101_is_rejected() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+
+    let id = f.client().create_claim(&creator, &f.params(5 * USDC));
+    f.client().challenge_claim(&c1, &id, &(5 * USDC), &None);
+    f.advance_by(3_600);
+
+    let err = f
+        .client()
+        .try_resolve_claim(&id, &WinnerSide::Creator, &f.str("nope"), &101, &f.zero_hash())
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InvalidConfidence);
+
+    // The claim must remain Active: no state change on a rejected call.
+    assert_eq!(f.client().get_claim(&id).state, crate::types::ClaimState::Active);
+}
+
+/// Very large confidence values (u32::MAX) are also rejected.
+#[test]
+fn confidence_u32_max_is_rejected() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+
+    let id = f.client().create_claim(&creator, &f.params(5 * USDC));
+    f.client().challenge_claim(&c1, &id, &(5 * USDC), &None);
+    f.advance_by(3_600);
+
+    let err = f
+        .client()
+        .try_resolve_claim(&id, &WinnerSide::Creator, &f.str("overflow"), &u32::MAX, &f.zero_hash())
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InvalidConfidence);
+}
+
+/// Boundary value 99: last value strictly below 100, must be accepted.
+#[test]
+fn confidence_99_is_accepted() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+
+    let id = f.client().create_claim(&creator, &f.params(5 * USDC));
+    f.client().challenge_claim(&c1, &id, &(5 * USDC), &None);
+    f.advance_by(3_600);
+
+    f.client()
+        .resolve_claim(&id, &WinnerSide::Creator, &f.str("almost"), &99, &f.zero_hash());
+    assert_eq!(f.client().get_claim(&id).confidence, 99);
+}
+
+/// An out-of-range confidence leaves the escrow completely untouched:
+/// conservation is preserved even when the call is rejected.
+#[test]
+fn invalid_confidence_does_not_disturb_escrow() {
+    let f = Fixture::new(500, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+
+    let id = f.client().create_claim(&creator, &f.params(10 * USDC));
+    f.client().challenge_claim(&c1, &id, &(10 * USDC), &None);
+    let inflow = f.escrow_balance();
+    f.advance_by(3_600);
+
+    // Attempt with invalid confidence; must fail.
+    let _ = f
+        .client()
+        .try_resolve_claim(&id, &WinnerSide::Creator, &f.str("bad"), &200, &f.zero_hash());
+
+    // Escrow must be untouched.
+    assert_eq!(f.escrow_balance(), inflow);
+    // No fees accrued.
+    assert_eq!(f.client().get_accrued_fees(&f.platform), 0);
+}
+
+/// Regression: the existing InvalidVerdict check is ordered before the new
+/// confidence check. A WinnerSide::None with an out-of-range confidence returns
+/// InvalidVerdict, not InvalidConfidence.
+#[test]
+fn invalid_verdict_takes_precedence_over_invalid_confidence() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+
+    let id = f.client().create_claim(&creator, &f.params(5 * USDC));
+    f.client().challenge_claim(&c1, &id, &(5 * USDC), &None);
+    f.advance_by(3_600);
+
+    let err = f
+        .client()
+        .try_resolve_claim(&id, &WinnerSide::None, &f.str("?"), &200, &f.zero_hash())
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InvalidVerdict);
+}
+
+/// Confidence is stored on the claim and retrievable after resolution.
+#[test]
+fn resolved_confidence_is_stored_and_readable() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+
+    let id = f.client().create_claim(&creator, &f.params(5 * USDC));
+    f.client().challenge_claim(&c1, &id, &(5 * USDC), &None);
+    f.advance_by(3_600);
+
+    f.client()
+        .resolve_claim(&id, &WinnerSide::Draw, &f.str("draw"), &42, &f.zero_hash());
+
+    let claim = f.client().get_claim(&id);
+    assert_eq!(claim.confidence, 42);
 }

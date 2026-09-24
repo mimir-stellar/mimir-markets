@@ -47,6 +47,9 @@ pub fn resolve_claim(
     if winner_side == WinnerSide::None {
         return Err(Error::InvalidVerdict);
     }
+    if confidence > 100 {
+        return Err(Error::InvalidConfidence);
+    }
 
     claim.state = ClaimState::Resolved;
     claim.winner_side = winner_side;
@@ -200,7 +203,7 @@ pub fn claim_challenger_payout(
     let (index, mut entry) =
         find_challenger(&roster, &challenger).ok_or(Error::NotAChallenger)?;
     if entry.claimed {
-        return Err(Error::AlreadyClaimedPayout);
+        return Ok(0);
     }
 
     let is_last_claimant = claim.challenger_claims + 1 == claim.challenger_count;
@@ -286,7 +289,7 @@ pub fn withdraw(env: &Env, who: Address) -> Result<i128, Error> {
     who.require_auth();
     let amount = storage::withdrawable(env, &who);
     if amount <= 0 {
-        return Err(Error::NothingToWithdraw);
+        return Ok(0);
     }
     storage::clear_withdrawable(env, &who);
     let usdc = storage::usdc(env)?;
@@ -301,7 +304,7 @@ pub fn claim_fees(env: &Env, who: Address) -> Result<i128, Error> {
     who.require_auth();
     let amount = storage::accrued_fees(env, &who);
     if amount <= 0 {
-        return Err(Error::NoFees);
+        return Ok(0);
     }
     storage::clear_accrued_fees(env, &who); // effects before interaction
     storage::add_lifetime_fees_claimed(env, amount);

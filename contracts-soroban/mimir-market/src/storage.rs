@@ -183,6 +183,47 @@ pub fn challengers(env: &Env, id: u64) -> Vec<Challenger> {
     }
 }
 
+/// Return a page of the challenger roster starting at `offset`, up to `limit`
+/// entries. `limit = 0` is treated as "return all remaining entries from
+/// `offset`". Callers should use a non-zero limit in production to bound
+/// ledger-entry footprint.
+///
+/// Never panics: if `offset` is beyond the end of the roster the returned
+/// `items` slice is empty and `total` carries the actual roster length.
+pub fn challengers_page(
+    env: &Env,
+    id: u64,
+    offset: u32,
+    limit: u32,
+) -> crate::types::ChallengerPage {
+    let list = challengers(env, id);
+    let total = list.len();
+
+    // Clamp offset to [0, total] so arithmetic below is always valid.
+    let start = offset.min(total);
+
+    // How many items remain from `start` to the end of the roster.
+    let remaining = total - start;
+
+    // Effective limit: 0 means "everything remaining".
+    let take = if limit == 0 {
+        remaining
+    } else {
+        limit.min(remaining)
+    };
+
+    let mut items = Vec::new(env);
+    for i in start..start + take {
+        items.push_back(list.get(i).unwrap());
+    }
+
+    crate::types::ChallengerPage {
+        items,
+        offset: start,
+        total,
+    }
+}
+
 pub fn set_challengers(env: &Env, id: u64, list: &Vec<Challenger>) {
     let key = DataKey::Challengers(id);
     env.storage().persistent().set(&key, list);

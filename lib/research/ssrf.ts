@@ -43,7 +43,9 @@ export type SsrfReason =
   | "private_ip"
   | "credentials"
   | "port"
-  | "malformed";
+  | "malformed"
+  | "protocol_downgrade"
+  | "cross_domain";
 
 export interface UrlVerdict {
   allowed: boolean;
@@ -168,6 +170,12 @@ export interface DomainPolicy {
   allow: string[];
   /** Always refused, even if the allowlist would permit them. */
   deny: string[];
+  /** When false, redirect hops cannot change origins/domains. Defaults to true. */
+  allowCrossDomainRedirects?: boolean;
+  /** When true (default), redirects cannot downgrade from https to http. */
+  disallowProtocolDowngrade?: boolean;
+  /** Maximum redirect hops allowed. Defaults to 3. */
+  maxRedirects?: number;
 }
 
 function hostMatches(host: string, pattern: string): boolean {
@@ -196,6 +204,99 @@ export function checkDomainPolicy(raw: string, policy: DomainPolicy): UrlVerdict
   return ALLOW;
 }
 
+/**
+ * Validate a redirect transition from currentUrl to targetUrl according to policy rules:
+ * 1. Target URL format & scheme validity.
+ * 2. Insecure protocol downgrade prevention (https -> http).
+ * 3. Cross-domain redirect boundary checks.
+ * 4. Target domain allowlist/denylist policy.
+ */
+export function checkRedirectHopPolicy(
+  currentUrl: string,
+  targetUrl: string,
+  policy: DomainPolicy = { allow: [], deny: [] },
+): UrlVerdict {
+  let curr: URL;
+  let target: URL;
+  try {
+    curr = new URL(currentUrl);
+    target = new URL(targetUrl, currentUrl);
+  } catch {
+    return deny("malformed", "not a parseable redirect URL");
+  }
+
+  // Static checks on target URL first (SSRF, blocked hosts, private IPs, credentials, ports)
+  const staticVerdict = checkUrl(target.toString());
+  if (!staticVerdict.allowed) {
+    return staticVerdict;
+  }
+
+  // Protocol downgrade check (e.g., https: -> http:)
+  const disallowDowngrade = policy.disallowProtocolDowngrade ?? true;
+  if (disallowDowngrade && curr.protocol === "https:" && target.protocol === "http:") {
+    return deny("protocol_downgrade", "redirect downgrades protocol from https to http");
+  }
+
+  // Cross-domain redirect constraint
+  const allowCrossDomain = policy.allowCrossDomainRedirects ?? true;
+  if (!allowCrossDomain) {
+    const currHost = curr.hostname.toLowerCase();
+    const targetHost = target.hostname.toLowerCase();
+    if (currHost !== targetHost && !targetHost.endsWith(`.${currHost}`)) {
+      return deny("cross_domain", `cross-domain redirect from '${currHost}' to '${targetHost}' is not allowed`);
+    }
+  }
+
+  // Domain policy check on target URL
+  return checkDomainPolicy(target.toString(), policy);
+}
+
+const SENSITIVE_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "set-cookie",
+  "proxy-authorization",
+  "x-api-key",
+  "x-auth-token",
+  "x-cg-demo-api-key",
+  "x-stellar-account",
+  "x-wallet-address",
+  "x-agent-signature",
+  "x-spend-permission",
+]);
+
+/**
+ * Sanitize request headers across redirect hops. When crossing origin boundaries,
+ * sensitive credentials, cookies, and tokens are scrubbed to prevent leaking
+ * private authentication or wallet context to third parties.
+ */
+export function sanitizeHeadersForRedirect(
+  headers: Record<string, string>,
+  currentUrl: string,
+  targetUrl: string,
+): Record<string, string> {
+  let currOrigin: string;
+  let targetOrigin: string;
+  try {
+    currOrigin = new URL(currentUrl).origin;
+    targetOrigin = new URL(targetUrl, currentUrl).origin;
+  } catch {
+    return {};
+  }
+
+  const result: Record<string, string> = {};
+  const isSameOrigin = currOrigin.toLowerCase() === targetOrigin.toLowerCase();
+
+  for (const [key, value] of Object.entries(headers)) {
+    const lowerKey = key.toLowerCase();
+    if (!isSameOrigin && SENSITIVE_HEADERS.has(lowerKey)) {
+      continue;
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
 /** Parse a comma-separated env value into a domain list. */
 export function parseDomainList(raw: string | undefined): string[] {
   return (raw ?? "")
@@ -206,13 +307,25 @@ export function parseDomainList(raw: string | undefined): string[] {
 
 /**
  * Reads the operator policy. The parameter is a plain record rather than
- * NodeJS.ProcessEnv so tests can pass just the two keys that matter.
+ * NodeJS.ProcessEnv so tests can pass just the keys that matter.
  */
 export function domainPolicyFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): DomainPolicy {
+  const allowCrossDomain = env.RESEARCH_ALLOW_CROSS_DOMAIN_REDIRECTS !== undefined
+    ? env.RESEARCH_ALLOW_CROSS_DOMAIN_REDIRECTS !== "0" && env.RESEARCH_ALLOW_CROSS_DOMAIN_REDIRECTS.toLowerCase() !== "false"
+    : true;
+  const disallowProtocolDowngrade = env.RESEARCH_ALLOW_PROTOCOL_DOWNGRADE !== undefined
+    ? env.RESEARCH_ALLOW_PROTOCOL_DOWNGRADE === "0" || env.RESEARCH_ALLOW_PROTOCOL_DOWNGRADE.toLowerCase() === "false"
+    : true;
+  const parsedMax = env.RESEARCH_MAX_REDIRECTS ? Number.parseInt(env.RESEARCH_MAX_REDIRECTS, 10) : undefined;
+  const maxRedirects = parsedMax !== undefined && !Number.isNaN(parsedMax) && parsedMax >= 0 ? Math.min(parsedMax, 10) : undefined;
+
   return {
     allow: parseDomainList(env.RESEARCH_ALLOWED_DOMAINS),
     deny: parseDomainList(env.RESEARCH_DENIED_DOMAINS),
+    allowCrossDomainRedirects: allowCrossDomain,
+    disallowProtocolDowngrade,
+    maxRedirects,
   };
 }

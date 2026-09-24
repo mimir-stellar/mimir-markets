@@ -30,6 +30,9 @@ See `docs/STELLAR_NETWORK.md` for the one-page architecture reference.
 | `agents/market-creator/index.ts` | Autonomous market creator (LLM + local keypair) |
 | `agents/council/` | Ten AI personas that stake as economic actors |
 | `deploy/deploy.ts` | Soroban build/deploy/initialize script |
+| `deploy/contract-artifacts.manifest.json` | Pinned Wasm digests for fail-closed provenance checks |
+| `lib/ops/artifact-provenance.ts` | Offline SHA-256 artifact provenance verifier |
+| `scripts/verify-artifact-provenance.ts` | CLI: verify or `--write-pins` contract artifacts |
 | `scripts/stellar-keys.ts` | Keypairs + Friendbot funding + USDC trustline |
 | `scripts/create-agent-wallets.ts` | Generate 12 keypairs (oracle + creator + 10 personas) |
 | `scripts/fund-agents.ts` | Fund agent accounts from a master seed |
@@ -103,7 +106,8 @@ npm run agents:fund
 # 3. Deploy and initialize the contracts
 npm run deploy:contract
 
-# 4. Verify the deployment, then smoke-test it end to end
+# 4. Verify artifact provenance (no secrets), then the live deployment
+npm run verify:artifacts
 npm run verify:deployment
 npm run smoke:onchain
 
