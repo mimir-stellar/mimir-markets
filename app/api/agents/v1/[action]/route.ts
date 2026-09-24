@@ -16,7 +16,7 @@ import {
 } from "@/lib/agents/api";
 import { authenticateAgentRequest, requiresOwnerSignature } from "@/lib/agents/authenticate";
 import {
-  apiKeyPrefix, generateApiKey, hashApiKey, type AgentApiKeyRecord,
+  apiKeyPrefix, generateApiKey, hashApiKey, parseOverlapMs, type AgentApiKeyRecord,
 } from "@/lib/agents/api-keys";
 import {
   configuredSpender, currentPeriodStart, evaluateSpend, parseSpendPermissionGrant,
@@ -24,7 +24,7 @@ import {
 } from "@/lib/agents/spend-permissions";
 import {
   getActiveSpendPermission, getSpentInPeriod, insertAgentApiKey, listAgentApiKeys,
-  revokeAgentApiKey, revokeSpendPermission, upsertSpendPermission,
+  revokeAgentApiKey, revokeSpendPermission, setAgentApiKeyExpiry, upsertSpendPermission,
 } from "@/lib/db";
 import {
   AUTHORITY_LEVELS, REGISTRY_SCHEMA_VERSION, authorizeAction, defaultLimits,
@@ -215,14 +215,24 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     // Returned once. There is no endpoint that can show it again, which is the
     // point: a key readable from the API is a key readable from a stolen session.
     const key = generateApiKey(body.environment === "test" ? "test" : "live");
+    // Optional TTL in seconds. Absent means permanent (no expiry set).
+    let expiresAt: number | undefined;
+    if (body.ttl_seconds !== undefined && body.ttl_seconds !== null) {
+      const ttl = Number(body.ttl_seconds);
+      if (!Number.isFinite(ttl) || ttl <= 0) {
+        return json({ error: { message: "ttl_seconds must be a positive number" } }, 400);
+      }
+      expiresAt = Date.now() + Math.floor(ttl) * 1000;
+    }
     const record: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(key),
       keyPrefix: apiKeyPrefix(key), label: String(body.label ?? "").slice(0, 80),
-      createdAt: Date.now(),
+      createdAt: Date.now(), expiresAt,
     };
     await insertAgentApiKey(record);
     result = {
       apiKey: key, keyId: record.keyId, prefix: record.keyPrefix, label: record.label,
+      expiresAt: record.expiresAt ?? null,
       note: "Store this now — it is not recoverable.",
       usage: `Authorization: Bearer ${record.keyPrefix}...`,
     };
@@ -231,7 +241,8 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     result = {
       keys: keys.map((k) => ({
         keyId: k.keyId, prefix: k.keyPrefix, label: k.label, createdAt: k.createdAt,
-        lastUsedAt: k.lastUsedAt ?? null, revokedAt: k.revokedAt ?? null,
+        lastUsedAt: k.lastUsedAt ?? null, expiresAt: k.expiresAt ?? null,
+        revokedAt: k.revokedAt ?? null,
       })),
     };
   } else if (action === "revokeKey") {
@@ -240,6 +251,59 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     const revoked = await revokeAgentApiKey(agent.agentId, keyId, Date.now(), String(body.reason ?? "owner revoked"));
     if (!revoked) return json({ error: { message: "key not found or already revoked" } }, 404);
     result = { keyId, revoked: true };
+  } else if (action === "rotateKey") {
+    // rotateKey is OWNER_SIGNED (same as issueKey/revokeKey): a key cannot
+    // authorize the rotation that retires it or mints its successor.
+    //
+    // Flow:
+    //   1. Validate the old keyId and overlap window.
+    //   2. Issue a fresh key and persist it.
+    //   3. Schedule the old key's expiry at now + overlap_ms.
+    //
+    // The old key keeps working through the overlap window so any running
+    // service that already has it can keep authenticating while the operator
+    // distributes the new credential. After the window closes, the old key
+    // silently returns "expired" from checkApiKeyRecord.
+    const keyId = String(body.keyId ?? "");
+    if (!keyId) return json({ error: { message: "keyId is required" } }, 400);
+
+    const overlapResult = parseOverlapMs(body.overlap_ms);
+    if (!overlapResult.ok) {
+      return json({ error: { message: overlapResult.error } }, 400);
+    }
+    const { overlapMs } = overlapResult;
+
+    // Issue the new key first — if the DB is unavailable we do nothing rather
+    // than scheduling an expiry on the old key without a replacement.
+    const newKey = generateApiKey(body.environment === "test" ? "test" : "live");
+    const newRecord: AgentApiKeyRecord = {
+      keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(newKey),
+      keyPrefix: apiKeyPrefix(newKey), label: String(body.label ?? "").slice(0, 80),
+      createdAt: Date.now(),
+    };
+    await insertAgentApiKey(newRecord);
+
+    // Schedule the outgoing key's expiry. If the old keyId is not found (already
+    // revoked or belongs to a different agent), treat it as a non-fatal warning:
+    // the caller still gets a new key, and revocation already provides a stronger
+    // stop than expiry would have.
+    const now = Date.now();
+    const expiresAt = now + overlapMs;
+    const scheduled = await setAgentApiKeyExpiry(agent.agentId, keyId, expiresAt);
+
+    result = {
+      // New credential — store it now, it is not recoverable.
+      apiKey: newKey, keyId: newRecord.keyId, prefix: newRecord.keyPrefix, label: newRecord.label,
+      note: "Store this now — it is not recoverable.",
+      usage: `Authorization: Bearer ${newRecord.keyPrefix}...`,
+      // Outgoing key status.
+      rotated: {
+        keyId,
+        expiresAt: scheduled ? expiresAt : null,
+        overlapMs,
+        warning: scheduled ? undefined : "old key not found or already revoked; no expiry scheduled",
+      },
+    };
   } else if (action === "grantSpend") {
     const parsed = parseSpendPermissionGrant({
       agentId: agent.agentId, grant: body as SpendPermissionGrant,
