@@ -101,3 +101,6 @@ artifacts/
 graphify-out/
 artifacts/
 mimir-logo-preview.png
+
+# Generated release SBOM (published via Actions, not committed)
+sbom/

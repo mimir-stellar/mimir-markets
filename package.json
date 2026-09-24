@@ -13,6 +13,7 @@
     "build": "next build",
     "typecheck": "tsc --noEmit",
     "check:terms": "node scripts/check-forbidden-terms.mjs",
+    "sbom:release": "node scripts/generate-release-sbom.mjs",
     "test:contracts": "cargo test --manifest-path contracts-soroban/Cargo.toml --release",
     "start": "next start",
     "oracle": "tsx --env-file-if-exists=.env.local agents/oracle/index.ts",
