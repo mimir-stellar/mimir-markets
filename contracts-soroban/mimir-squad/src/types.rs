@@ -80,4 +80,5 @@ pub enum Error {
     Overflow = 24,
     UnsupportedDecimals = 25,
     ConservationViolation = 26,
+    AlreadyResolved = 27,
 }

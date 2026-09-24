@@ -68,3 +68,14 @@ pub struct FeesClaimed {
     pub recipient: Address,
     pub amount: i128,
 }
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketCancelled {
+    #[topic]
+    pub market_id: u64,
+    #[topic]
+    pub captain: Address,
+    pub pool_a: i128,
+    pub pool_b: i128,
+}
