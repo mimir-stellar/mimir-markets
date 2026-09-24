@@ -275,4 +275,12 @@ pub enum Error {
     ChallengersDidNotWin = 35,
     UnsupportedDecimals = 36,
     InvalidConfidence = 37,
+    /// `cancel_claim` refused because the claim still holds counterparty funds
+    /// or a reserved creator liability: challengers have funded this market, so
+    /// it belongs to settlement, not to a creator refund.
+    ClaimHasActiveClaims = 38,
+    /// Escrow could not back the cancellation refund at the moment of the call.
+    /// The refund is never minted; the claim stays untouched and the creator
+    /// can retry once the contract is solvent again.
+    RefundNotEscrowed = 39,
 }
