@@ -67,9 +67,12 @@ function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
+import { withRequestId } from "@/lib/api/errors";
+
 /** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
-function errorResponse(err: import("@/lib/api/errors").ApiErrorResult): Response {
-  return Response.json(err.body, { status: err.status, headers: { ...err.headers, "cache-control": "no-store" } });
+function errorResponse(err: import("@/lib/api/errors").ApiErrorResult, requestId?: string): Response {
+  const result = requestId ? withRequestId(err, requestId) : err;
+  return Response.json(result.body, { status: result.status, headers: { ...result.headers, "cache-control": "no-store" } });
 }
 
 async function verify(address: string, message: string, signature: string): Promise<boolean> {
@@ -189,15 +192,16 @@ function clientIp(req: Request): string | undefined {
 }
 
 export async function POST(req: Request, context: { params: Promise<{ action: string }> }): Promise<Response> {
+  const requestId = req.headers.get("x-request-id") || randomUUID();
   const { action: rawAction } = await context.params;
-  if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action" } }, 404);
+  if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action", requestId } }, 404);
   const action = rawAction as AgentApiAction;
   // Cap before parse: Content-Length is a cheap fail-closed gate; the body byte
   // check below still applies when the header is absent or wrong.
   const declared = Number(req.headers.get("content-length") ?? NaN);
   if (Number.isFinite(declared) && declared > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
     return json({
-      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes` },
+      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes`, requestId },
     }, 413);
   }
   let raw: string;
