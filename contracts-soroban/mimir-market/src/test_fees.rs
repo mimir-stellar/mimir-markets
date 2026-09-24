@@ -249,6 +249,7 @@ fn changing_the_platform_recipient_cannot_redirect_an_existing_claim() {
         f.client().get_claim_fees(&id).platform_recipient,
         Some(f.platform.clone())
     );
+    f.client().challenge_claim(&c1, &id, &(10 * USDC), &None);
 
     let new_platform = Address::generate(&f.env);
     f.client()
@@ -265,7 +266,6 @@ fn changing_the_platform_recipient_cannot_redirect_an_existing_claim() {
         Some(f.platform.clone())
     );
 
-    f.client().challenge_claim(&c1, &id, &(10 * USDC), &None);
     f.advance_by(3_600);
     f.client().resolve_claim(
         &id,
