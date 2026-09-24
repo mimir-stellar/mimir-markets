@@ -7,6 +7,13 @@ use soroban_sdk::{contracterror, contracttype, Address, BytesN, String};
 
 pub const MAX_CHALLENGERS: u32 = 100;
 
+/// Maximum number of claim IDs accepted by a single `batch_get_claims` call.
+///
+/// Keeps the Soroban ledger-entry footprint bounded. Each claim is one
+/// persistent storage read; 50 claims fits comfortably within the per-
+/// transaction footprint budget while still being useful for bulk polling.
+pub const MAX_BATCH_CLAIMS: u32 = 50;
+
 /// Decimals of the escrow token. A Stellar Asset Contract exposes every classic
 /// asset, Circle's USDC included, with exactly 7.
 ///
@@ -275,12 +282,6 @@ pub enum Error {
     ChallengersDidNotWin = 35,
     UnsupportedDecimals = 36,
     InvalidConfidence = 37,
-    /// `cancel_claim` refused because the claim still holds counterparty funds
-    /// or a reserved creator liability: challengers have funded this market, so
-    /// it belongs to settlement, not to a creator refund.
-    ClaimHasActiveClaims = 38,
-    /// Escrow could not back the cancellation refund at the moment of the call.
-    /// The refund is never minted; the claim stays untouched and the creator
-    /// can retry once the contract is solvent again.
-    RefundNotEscrowed = 39,
+    /// `batch_get_claims` was called with more IDs than [`MAX_BATCH_CLAIMS`].
+    ClaimBatchTooLarge = 38,
 }
