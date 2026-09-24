@@ -1032,6 +1032,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `ORACLE_LLM_MODEL`                | optional                 | Optional model name override                                                       |
 | `ORACLE_LLM_THROTTLE_MS`          | oracle                   | Min delay between oracle LLM calls; default `8000`                                 |
 | `ORACLE_SETTLEMENT_DELAY_MS`      | oracle                   | Delay between multiple expired settlements in one poll; default `900000` (15 min)  |
+| `ORACLE_SETTLEMENT_TX_MAX_ATTEMPTS` / `_RETRY_BASE_MS` / `_RETRY_MAX_MS` | oracle | Bounded retries for dependency failures only; defaults `3` / `1000` / `15000` ms. Every attempt re-reads Soroban state |
 | `AUTO_CHALLENGE`                  | oracle (worker)          | `1` to enable Kelly auto-stake                                                     |
 | `CHALLENGE_STAKE_USDC`            | oracle (worker)          | Min stake per auto-challenge, in USDC (default 2)                                   |
 | `CHALLENGE_CONFIDENCE`            | oracle (worker)          | Min LLM confidence % to auto-stake (default 80)                                    |

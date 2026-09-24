@@ -57,6 +57,7 @@ import { MIN_STAKE_USDC, unitsToUsdc, usdcToUnits } from "./usdc";
 import { normalizeCategoryId, ZERO_ADDRESS } from "./constants";
 import { guardChallenge, toCanonicalMode } from "./market-modes";
 import { checkWriteAllowed } from "./ops/flags";
+import { wrapStellarTransactionError } from "./settlement-retry";
 import { availableCreatorLiquidityUnits } from "./payout";
 import type { VSCacheFreshness } from "./vs-freshness";
 
@@ -385,10 +386,37 @@ async function sendCall<T>(
     }>;
   },
 ): Promise<{ value: T; write: ContractWriteResult }> {
-  const sent = await assembled.signAndSend();
+  let sent: {
+    result: unknown;
+    sendTransactionResponse?: { hash: string } | undefined;
+    getTransactionResponse?: unknown;
+  };
+  try {
+    sent = await assembled.signAndSend();
+  } catch (error) {
+    // The submission may have reached Soroban before the client observed the
+    // response. Preserve the original error class and fail closed; the oracle
+    // will re-read the claim before deciding whether a bounded retry is safe.
+    throw wrapStellarTransactionError(error, { label, phase: "submit" });
+  }
+
   const txHash = sent.sendTransactionResponse?.hash ?? "";
   const explorerUrl = txHash ? getExplorerTxUrl(txHash) : undefined;
-  const value = unwrap<T>(label, sent.result);
+  let value: T;
+  try {
+    value = unwrap<T>(label, sent.result);
+  } catch (error) {
+    // A failed Soroban result can still carry a transaction hash. Keeping it on
+    // the thrown error is required for reconciliation and prevents an operator
+    // from treating an unknown outcome as an invitation to blindly resubmit.
+    throw wrapStellarTransactionError(error, {
+      label,
+      phase: "result",
+      txHash: txHash || undefined,
+      response: sent.getTransactionResponse,
+    });
+  }
+
   return {
     value,
     write: {
