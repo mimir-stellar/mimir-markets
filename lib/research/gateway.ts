@@ -22,9 +22,11 @@ import { lookup } from "node:dns/promises";
 import { sha256Hex } from "@/lib/content-hash";
 import {
   checkDomainPolicy,
+  checkRedirectHopPolicy,
   checkResolvedAddresses,
   checkUrl,
   domainPolicyFromEnv,
+  sanitizeHeadersForRedirect,
   type DomainPolicy,
   type SsrfReason,
 } from "./ssrf";
@@ -51,6 +53,11 @@ export type FetchFailure =
   | { kind: "blocked"; reason: SsrfReason; detail: string }
   | { kind: "budget"; detail: string }
   | { kind: "too_many_redirects"; detail: string }
+  | { kind: "redirect_loop"; detail: string }
+  | { kind: "invalid_redirect"; detail: string }
+  | { kind: "protocol_downgrade"; detail: string }
+  | { kind: "cancelled"; detail: string }
+  | { kind: "dependency_failure"; detail: string }
   | { kind: "content_type"; detail: string }
   | { kind: "too_large"; detail: string }
   | { kind: "http_error"; status: number; detail: string }
@@ -69,6 +76,8 @@ export interface FetchSuccess {
   bytes: number;
   fromCache: boolean;
   redirects: number;
+  /** Complete chain of URLs visited during this fetch. */
+  redirectChain: string[];
 }
 
 export type FetchResult =
@@ -140,6 +149,10 @@ export function resetResearchCache(): void {
   cache.clear();
 }
 
+export function invalidateResearchCache(url: string): boolean {
+  return cache.delete(url);
+}
+
 function cacheGet(url: string, now: number): FetchSuccess | null {
   const entry = cache.get(url);
   if (!entry) return null;
@@ -206,6 +219,11 @@ export interface GatewayFetchArgs {
   agentId: string;
   policy?: DomainPolicy;
   budget?: AgentBudget;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  maxRedirects?: number;
+  allowCrossDomainRedirects?: boolean;
+  allowProtocolDowngrade?: boolean;
   /** Test seams. */
   resolve?: (host: string) => Promise<string[]>;
   fetchImpl?: typeof globalThis.fetch;
@@ -215,6 +233,15 @@ export interface GatewayFetchArgs {
 function contentTypeAllowed(contentType: string): boolean {
   const base = contentType.split(";")[0]!.trim().toLowerCase();
   return ALLOWED_CONTENT_TYPES.includes(base);
+}
+
+function normalizeUrlForLoopCheck(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host.toLowerCase()}${u.pathname}${u.search}`;
+  } catch {
+    return raw.trim().toLowerCase();
+  }
 }
 
 /**
@@ -262,9 +289,19 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
     recordSourceFailure(failure.kind);
     return { ok: false, ...failure };
   };
-  const policy = args.policy ?? domainPolicyFromEnv();
+  const envPolicy = domainPolicyFromEnv();
+  const policy: DomainPolicy = {
+    ...envPolicy,
+    ...(args.policy ?? {}),
+    ...(args.allowCrossDomainRedirects !== undefined ? { allowCrossDomainRedirects: args.allowCrossDomainRedirects } : {}),
+    ...(args.allowProtocolDowngrade !== undefined ? { disallowProtocolDowngrade: !args.allowProtocolDowngrade } : {}),
+  };
   const budget = args.budget ?? defaultAgentBudget();
   const doFetch = args.fetchImpl ?? fetch;
+
+  if (args.signal?.aborted) {
+    return fail({ kind: "cancelled", detail: "request was cancelled" });
+  }
 
   const pausedAgents = new Set((process.env.RESEARCH_PAUSED_AGENT_IDS ?? "").split(",").map((id) => id.trim().toLowerCase()).filter(Boolean));
   if (process.env.MIMIR_PAUSE_RESEARCH === "1" || pausedAgents.has(args.agentId.trim().toLowerCase())) {
@@ -292,10 +329,29 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
 
   let current = args.url;
   let redirects = 0;
+  const redirectChain: string[] = [current];
+  const visitedUrls = new Set<string>([normalizeUrlForLoopCheck(current)]);
+  let requestHeaders: Record<string, string> = {
+    accept: ALLOWED_CONTENT_TYPES.join(", "),
+    "user-agent": "Mimir-ResearchGateway/1.0 (+https://mimir.app)",
+    ...(args.headers ?? {}),
+  };
+
+  const effectiveMaxRedirects = Math.max(
+    0,
+    Math.min(args.maxRedirects ?? policy.maxRedirects ?? MAX_REDIRECTS, 10),
+  );
 
   for (;;) {
+    if (args.signal?.aborted) {
+      return fail({ kind: "cancelled", detail: "request was cancelled" });
+    }
+
     const hop = await validateHop(current, policy, args.resolve);
     if (!hop.allowed) {
+      if (hop.reason === "protocol_downgrade") {
+        return fail({ kind: "protocol_downgrade", detail: hop.detail });
+      }
       return fail({ kind: "blocked", reason: hop.reason, detail: hop.detail });
     }
 
@@ -303,18 +359,22 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
 
     let response: Response;
     try {
+      const fetchSignal = args.signal
+        ? AbortSignal.any([args.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
+        : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+
       response = await doFetch(current, {
         // Manual, so every hop is re-validated. Automatic following would let a
         // public page redirect us into the metadata service unchecked.
         redirect: "manual",
-        headers: {
-          accept: ALLOWED_CONTENT_TYPES.join(", "),
-          "user-agent": "Mimir-ResearchGateway/1.0 (+https://mimir.app)",
-        },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        headers: requestHeaders,
+        signal: fetchSignal,
         cache: "no-store",
       });
     } catch (err) {
+      if (args.signal?.aborted || (err instanceof Error && err.name === "AbortError" && args.signal?.aborted)) {
+        return fail({ kind: "cancelled", detail: "request was cancelled" });
+      }
       return fail({
         kind: "transport",
         detail: err instanceof Error ? err.message : "fetch failed",
@@ -323,18 +383,41 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
-      if (!location) {
-        return fail({ kind: "http_error", status: response.status, detail: "redirect without a location" });
+      if (!location || location.trim() === "") {
+        return fail({ kind: "invalid_redirect", detail: `redirect response (${response.status}) without a location header` });
       }
-      redirects += 1;
-      if (redirects > MAX_REDIRECTS) {
-        return fail({ kind: "too_many_redirects", detail: `more than ${MAX_REDIRECTS} redirects` });
-      }
+
+      let nextUrl: string;
       try {
-        current = new URL(location, current).toString();
+        nextUrl = new URL(location.trim(), current).toString();
       } catch {
-        return fail({ kind: "http_error", status: response.status, detail: "unparseable redirect target" });
+        return fail({ kind: "invalid_redirect", detail: `unparseable redirect target '${location}'` });
       }
+
+      // Check redirect hop policy (protocol downgrade, cross-domain rules)
+      const redirectHopVerdict = checkRedirectHopPolicy(current, nextUrl, policy);
+      if (!redirectHopVerdict.allowed) {
+        if (redirectHopVerdict.reason === "protocol_downgrade") {
+          return fail({ kind: "protocol_downgrade", detail: redirectHopVerdict.detail ?? "insecure protocol downgrade" });
+        }
+        return fail({ kind: "blocked", reason: redirectHopVerdict.reason!, detail: redirectHopVerdict.detail! });
+      }
+
+      // Check for redirect cycles / duplicate targets
+      const normNext = normalizeUrlForLoopCheck(nextUrl);
+      if (visitedUrls.has(normNext)) {
+        return fail({ kind: "redirect_loop", detail: `redirect cycle or duplicate target detected for '${nextUrl}'` });
+      }
+
+      redirects += 1;
+      if (redirects > effectiveMaxRedirects) {
+        return fail({ kind: "too_many_redirects", detail: `more than ${effectiveMaxRedirects} redirects` });
+      }
+
+      visitedUrls.add(normNext);
+      redirectChain.push(nextUrl);
+      requestHeaders = sanitizeHeadersForRedirect(requestHeaders, current, nextUrl);
+      current = nextUrl;
       continue;
     }
 
@@ -366,8 +449,10 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       bytes,
       fromCache: false,
       redirects,
+      redirectChain,
     };
     cacheSet(args.url, success, now);
     return { ok: true, ...success };
   }
 }
+
