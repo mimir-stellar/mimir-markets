@@ -42,6 +42,7 @@ import {
 import { unitsToUsdc, usdcToUnits } from "@/lib/usdc";
 import { toCanonicalMode } from "@/lib/market-modes";
 import { MarketAnalytics } from "@/components/MarketAnalytics";
+import { MarketPanelSkeleton, RivalryPanelSkeleton } from "@/components/ui/AsyncPanelSkeleton";
 import { track } from "@/lib/analytics/client";
 import { idempotencyKey } from "@/lib/analytics/events";
 import { stakeBucket } from "@/lib/analytics/useMarketAnalytics";
@@ -1038,9 +1039,9 @@ export default function VSDetailPage() {
 
   if (loading) {
     return (
-      <div className="text-center py-20">
-        <div className="w-10 h-10 border-2 border-transparent border-t-pv-emerald rounded-full animate-spin mx-auto mb-4" />
-        <p className="text-pv-muted text-sm">
+      <div>
+        <MarketPanelSkeleton />
+        <p className="sr-only">
           {fetchAttempts > 1 ? t("submittedPending") : tc("loading")}
         </p>
       </div>
@@ -2427,9 +2428,7 @@ export default function VSDetailPage() {
                         </div>
 
                         {!isRivalryDataReady || rivalryLoading ? (
-                          <div className="rounded-xl border border-pv-ink/[0.08] bg-pv-bg/30 p-4 sm:p-5">
-                            <p className="text-sm text-pv-muted">{tc("loading")}</p>
-                          </div>
+                          <RivalryPanelSkeleton />
                         ) : seriesView.rows.length > 1 ? (
                           <div className="rounded-xl border border-pv-ink/[0.08] bg-pv-bg/30 p-4 sm:p-5">
                             <div className="space-y-3">

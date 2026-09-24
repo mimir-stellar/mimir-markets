@@ -11,9 +11,17 @@
  * shows up as a real ClaimChallenged event.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getExplorerTxUrl } from "@/lib/stellar";
 import { openPeepsAvatar } from "@/lib/avatars";
+import { CouncilPanelSkeleton } from "@/components/ui/AsyncPanelSkeleton";
+import {
+  beginAsyncPanelLoad,
+  canCommitAsyncPanelPayload,
+  createAsyncPanelState,
+  settleAsyncPanelLoad,
+  shouldShowAsyncPanelSkeleton,
+} from "@/lib/asyncPanelLoading";
 
 interface PersonaVote {
   slug:        string;
@@ -42,13 +50,27 @@ interface CouncilResponse {
 
 export default function CouncilVoteWidget({ claimId }: { claimId: number }) {
   const [data, setData] = useState<CouncilResponse | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [panel, setPanel] = useState(() => createAsyncPanelState("council"));
+  const generationRef = useRef(0);
 
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
+    const requestKey = `council:${claimId}`;
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+
+    setPanel((prev) =>
+      beginAsyncPanelLoad(prev, {
+        key: requestKey,
+        generation,
+        dependencyKey: Number.isFinite(claimId) ? String(claimId) : null,
+      }),
+    );
     setError(null);
+    setData(null);
+
+    let cancelled = false;
+
     fetch(`/api/vs/${claimId}/council`)
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -56,28 +78,51 @@ export default function CouncilVoteWidget({ claimId }: { claimId: number }) {
       })
       .then((body) => {
         if (cancelled) return;
-        setData(body);
+        const invalid = !body || typeof body.total !== "number";
+        setPanel((prev) => {
+          if (!canCommitAsyncPanelPayload(prev, requestKey, generation)) {
+            return prev;
+          }
+          const next = settleAsyncPanelLoad(prev, {
+            requestKey,
+            generation,
+            atMs: Date.now(),
+            invalid,
+          });
+          if (next.phase === "ready" && !invalid) {
+            setData(body);
+          }
+          return next;
+        });
       })
       .catch((err: Error) => {
         if (cancelled) return;
+        setPanel((prev) =>
+          settleAsyncPanelLoad(prev, {
+            requestKey,
+            generation,
+            atMs: Date.now(),
+            dependencyFailed: true,
+          }),
+        );
         setError(err.message);
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setLoading(false);
       });
+
     return () => {
       cancelled = true;
+      setPanel((prev) =>
+        settleAsyncPanelLoad(prev, {
+          requestKey,
+          generation,
+          atMs: Date.now(),
+          cancelled: true,
+        }),
+      );
     };
   }, [claimId]);
 
-  if (loading) {
-    return (
-      <section className="rounded-2xl border border-pv-border/30 bg-pv-surface/70 p-5 lg:min-h-[20rem]">
-        <div className="text-[11px] font-mono uppercase tracking-[0.18em] text-pv-muted">Council verdict</div>
-        <div className="mt-2 text-sm text-pv-muted">Reading on-chain stakes…</div>
-      </section>
-    );
+  if (shouldShowAsyncPanelSkeleton(panel)) {
+    return <CouncilPanelSkeleton />;
   }
 
   if (error || !data) {

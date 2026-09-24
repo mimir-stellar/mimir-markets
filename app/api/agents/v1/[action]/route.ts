@@ -11,7 +11,8 @@ import {
 } from "@/lib/stellar";
 import { publishReasoning } from "@/lib/reasoning/publish";
 import {
-  AGENT_API_ACTIONS, AGENT_API_VERSION, agentRequestMessage, validateAgentRequestEnvelope,
+  AGENT_API_ACTIONS, AGENT_API_VERSION, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
+  agentRequestMessage, validateAgentRequestEnvelope,
   type AgentApiAction, type SignedAgentRequest,
 } from "@/lib/agents/api";
 import { authenticateAgentRequest, requiresOwnerSignature } from "@/lib/agents/authenticate";
@@ -28,13 +29,15 @@ import {
 } from "@/lib/db";
 import {
   AUTHORITY_LEVELS, REGISTRY_SCHEMA_VERSION, authorizeAction, defaultLimits,
-  revokeAgent, type AgentRecord, type AgentCapability,
+  evaluateRegistrationReplay, revokeAgent, type AgentRecord, type AgentCapability,
 } from "@/lib/agents/registry";
 import { auditAgentRequest, consumeNonce, loadAgent, loadIdempotentResponse, saveAgent, saveIdempotentResponse } from "@/lib/agents/store";
 import { buildAgentDryRun } from "@/lib/agents/dry-run";
-import { isFeatureEnabled } from "@/lib/ops/flags";
+import { isFeatureEnabled, checkWriteAllowed, type Pausable } from "@/lib/ops/flags";
 import { getUsdcBalanceUnits, usdcToUnits, parseUsdcAtomic } from "@/lib/usdc";
 import { getAgentEarningsSummary } from "@/lib/db";
+import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
+import { apiError } from "@/lib/api/errors";
 
 export const dynamic = "force-dynamic";
 
@@ -64,6 +67,11 @@ function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
+/** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
+function errorResponse(err: import("@/lib/api/errors").ApiErrorResult): Response {
+  return Response.json(err.body, { status: err.status, headers: { ...err.headers, "cache-control": "no-store" } });
+}
+
 async function verify(address: string, message: string, signature: string): Promise<boolean> {
   return verifyAgentSignature({ address, message, signature });
 }
@@ -84,6 +92,11 @@ async function audit(request: SignedAgentRequest, outcome: string, reason?: stri
 const FUNDED_ACTIONS: readonly AgentApiAction[] = ["createMarket", "stake", "vote"];
 
 async function register(request: SignedAgentRequest<Record<string, any>>): Promise<Response> {
+  // Pause check first: "registration is paused" is more accurate than "not enabled"
+  // when the feature is on but the capability is temporarily stopped.
+  const pauseErr = gateOrPause({ feature: "byoa_registry", capability: "agent_registration" });
+  if (pauseErr) return errorResponse(pauseErr);
+
   if (!isFeatureEnabled("byoa_registry")) {
     return json({ error: { message: "agent registration is not enabled" } }, 403);
   }
@@ -101,8 +114,45 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   if (!(await verify(operator, operatorProofMessage, String(body.operatorSignature ?? "")))) {
     return json({ error: { message: "operator signature rejected" } }, 401);
   }
-  if (!(await consumeNonce(request.agentId, request.nonce, Date.now()))) return json({ error: { message: "nonce replay" } }, 409);
-  if (await loadAgent(request.agentId)) return json({ error: { message: "agent already registered" } }, 409);
+
+  // Safe client retries: same idempotency key returns the prior accepted body.
+  if (request.idempotencyKey) {
+    const prior = await loadIdempotentResponse(request.agentId, "register", request.idempotencyKey);
+    if (prior) return json(prior.body, prior.status);
+  }
+
+  const payoutWallet = isWalletAddress(normalizeWallet(String(body.payoutWallet ?? "")))
+    ? normalizeWallet(String(body.payoutWallet)) : owner;
+
+  // Duplicate register with the same wallets is success, not conflict — check
+  // identity BEFORE consuming the nonce so a retry of a successful admission is
+  // not rejected as "nonce replay".
+  const existing = await loadAgent(request.agentId);
+  if (existing) {
+    const replay = evaluateRegistrationReplay(existing, {
+      ownerWallet: owner, operatorWallet: operator, payoutWallet,
+    });
+    if (replay.ok) {
+      const payload = { agent: existing };
+      if (request.idempotencyKey) {
+        await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200);
+      }
+      await audit(request, "registered_idempotent");
+      return json(payload);
+    }
+    await audit(request, "rejected", replay.reason);
+    return json({
+      error: {
+        message: "agent already registered",
+        reason: replay.reason,
+        detail: "a different owner, operator, or payout wallet claimed this agentId",
+      },
+    }, 409);
+  }
+
+  if (!(await consumeNonce(request.agentId, request.nonce, Date.now()))) {
+    return json({ error: { message: "nonce replay" } }, 409);
+  }
   const now = Date.now();
   const authority = Math.max(0, Math.min(4, Math.floor(Number(body.authorityLevel ?? 0)))) as AgentRecord["authorityLevel"];
   const requestedCapabilities = Array.isArray(body.capabilities) ? body.capabilities : [];
@@ -111,8 +161,7 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   const agent: AgentRecord = {
     schemaVersion: REGISTRY_SCHEMA_VERSION, agentId: request.agentId, ownerWallet: owner,
     operatorWallet: operator,
-    payoutWallet: isWalletAddress(normalizeWallet(String(body.payoutWallet ?? "")))
-      ? normalizeWallet(String(body.payoutWallet)) : owner,
+    payoutWallet,
     displayName: String(body.displayName ?? request.agentId).slice(0, 80),
     description: String(body.description ?? "").slice(0, 500),
     metadataUri: body.metadataUri ? String(body.metadataUri) : undefined,
@@ -126,8 +175,12 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
     authorizeAction(agent, { capability, positionUsdc: 0 }).allowed ||
     (capability === "market_creator" && authority >= AUTHORITY_LEVELS.PROPOSE));
   await saveAgent(agent);
+  const payload = { agent };
+  if (request.idempotencyKey) {
+    await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200);
+  }
   await audit(request, "registered");
-  return json({ agent });
+  return json(payload);
 }
 
 function clientIp(req: Request): string | undefined {
@@ -139,8 +192,24 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
   const { action: rawAction } = await context.params;
   if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action" } }, 404);
   const action = rawAction as AgentApiAction;
+  // Cap before parse: Content-Length is a cheap fail-closed gate; the body byte
+  // check below still applies when the header is absent or wrong.
+  const declared = Number(req.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
+    return json({
+      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes` },
+    }, 413);
+  }
+  let raw: string;
+  try { raw = await req.text(); }
+  catch { return json({ error: { message: "invalid body" } }, 400); }
+  if (new TextEncoder().encode(raw).length > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
+    return json({
+      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes` },
+    }, 413);
+  }
   let request: SignedAgentRequest;
-  try { request = (await req.json()) as SignedAgentRequest; }
+  try { request = JSON.parse(raw) as SignedAgentRequest; }
   catch { return json({ error: { message: "invalid JSON" } }, 400); }
 
   // An API-key caller writes plain HTTP: `{ "body": {...} }` with the action in the
@@ -304,7 +373,10 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     await saveAgent(revoked.agent); result = { agent: revoked.agent };
   } else if (action === "publishReasoning") {
     const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
-    if (!gate.allowed) return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
+    if (!gate.allowed) {
+      await audit(request, "rejected", gate.reason);
+      return errorResponse(actionVerdictToError(gate, "researcher"));
+    }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
   } else {
     const capability: AgentCapability = action === "proposeMarket" || action === "createMarket" || action === "dryRun"

@@ -146,6 +146,7 @@ The mechanism lives in `agents/oracle/council-vote.ts` (pure scoring math is uni
 | Variable | Default | Effect |
 |---|---|---|
 | `COUNCIL_SELF_RESOLVING` | off | `1` enables the mechanism (requires `COUNCIL_SETTLEMENT=1`) |
+| `COUNCIL_QUORUM` | `3` | Min decisive votes before council settles; invalid values normalize to 3 (see `lib/council/quorum.ts`) |
 | `COUNCIL_ALPHA` | `0.25` | Per-vote stop probability after quorum |
 | `COUNCIL_BONUS_USDC` | `0.01` | Total cross-entropy bonus pool per settlement |
 

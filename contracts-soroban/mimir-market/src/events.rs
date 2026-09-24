@@ -106,6 +106,20 @@ pub struct AgentAttributed {
     pub agent_owner_recipient: Address,
 }
 
+/// Frozen fee terms written onto a claim at creation. Indexers can treat this as
+/// the authoritative economics for the market; a later `FeePolicyUpdated` must
+/// not rewrite them.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeePolicySnapshotted {
+    #[topic]
+    pub id: u64,
+    pub platform_fee_bps: u32,
+    pub agent_owner_fee_bps: u32,
+    pub platform_recipient: Option<Address>,
+    pub agent_owner_recipient: Option<Address>,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeeAccrued {
