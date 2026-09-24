@@ -988,7 +988,7 @@ fn transition_deadline_cancels_underfunded_open_claim() {
 }
 
 #[test]
-fn transition_deadline_rejected_if_active() {
+fn transition_deadline_preserves_active_state_to_extend_ttl() {
     let f = Fixture::new(0, 0);
     let creator = f.user(100 * USDC);
     let id = f.client().create_claim(&creator, &f.params(10 * USDC));
@@ -997,6 +997,7 @@ fn transition_deadline_rejected_if_active() {
     f.client().challenge_claim(&challenger, &id, &(10 * USDC), &None);
     f.advance_to(f.client().get_claim(&id).deadline + 1);
 
-    let err = f.client().try_transition_deadline(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::ClaimNotOpen);
+    // Should succeed now to persist TTL bumps instead of failing
+    f.client().transition_deadline(&id);
+    assert_eq!(f.client().get_claim(&id).state, ClaimState::Active);
 }

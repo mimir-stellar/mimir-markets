@@ -247,10 +247,10 @@ pub fn transition_deadline(env: &Env, market_id: u64) -> Result<(), Error> {
     if market.resolved {
         return Err(Error::Locked);
     }
-    if env.ledger().timestamp() < market.deadline {
-        return Err(Error::Locked);
-    }
     if market.pool_a > 0 && market.pool_b > 0 {
+        return Ok(());
+    }
+    if env.ledger().timestamp() < market.deadline {
         return Err(Error::Locked);
     }
 
