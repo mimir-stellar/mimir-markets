@@ -89,4 +89,5 @@ pub enum Error {
     UnsupportedToken = 23,
     Overflow = 24,
     UnsupportedDecimals = 25,
+    ConservationViolation = 26,
 }
