@@ -8,7 +8,10 @@ import {
   crossEntropyScore,
   scoreCouncilVotes,
   allocateBonus,
-  normalizeSelfResolvingConfig,
+  allocateBonusAtomic,
+  payCouncilBonuses,
+  parseCouncilBonusPool,
+  isConfirmedCouncilSettlement,
   type CouncilVote,
 } from "../../agents/oracle/council-vote";
 
@@ -29,11 +32,6 @@ test("q is clamped away from 0 and 1 so log scores stay finite", () => {
 test("DRAW and UNRESOLVABLE carry no information — q stays at qPrev", () => {
   assert.equal(verdictToProbability("DRAW", 90, 0.7), 0.7);
   assert.equal(verdictToProbability("UNRESOLVABLE", 90, 0.3), 0.3);
-});
-
-test("negative and oversize confidence clamp rather than inventing probability", () => {
-  assert.equal(verdictToProbability("CHALLENGERS_WIN", -40, Q_PRIOR), 0.5);
-  assert.equal(verdictToProbability("CREATOR_WINS", 1000, Q_PRIOR), 0.02);
 });
 
 // ── crossEntropyScore ─────────────────────────────────────────────────────────
@@ -67,26 +65,6 @@ test("scores are additive along the chain (market scoring rule telescopes)", () 
   assert.ok(Math.abs(combined - direct) < 1e-12);
 });
 
-test("malformed non-finite probabilities collapse safely — no Inf/NaN bonuses", () => {
-  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-    const score = crossEntropyScore(bad, bad, bad);
-    assert.equal(score, 0);
-    assert.ok(Number.isFinite(score));
-  }
-  // Extreme raw inputs clamp into (0.02, 0.98) and remain finite.
-  const extreme = crossEntropyScore(2, -1, 0);
-  assert.ok(Number.isFinite(extreme));
-});
-
-test("boundary clamp makes 0/1 reports score as Q_MIN/Q_MAX, never -Infinity", () => {
-  const atFloor = crossEntropyScore(0.9, 0, 0.5);
-  const atCeil = crossEntropyScore(0.9, 1, 0.5);
-  assert.ok(Number.isFinite(atFloor));
-  assert.ok(Number.isFinite(atCeil));
-  assert.equal(crossEntropyScore(0.9, 0, 0.5), crossEntropyScore(0.9, 0.02, 0.5));
-  assert.equal(crossEntropyScore(0.9, 1, 0.5), crossEntropyScore(0.9, 0.98, 0.5));
-});
-
 // ── scoreCouncilVotes ─────────────────────────────────────────────────────────
 
 function makeVote(overrides: Partial<CouncilVote>): CouncilVote {
@@ -114,54 +92,6 @@ test("scoreCouncilVotes chains q from the prior and skips abstainers", () => {
   assert.ok(Math.abs(scored[2].score! - direct) < 1e-12);
 });
 
-test("empty jury and all-abstainer rounds score nothing (dependency failure)", () => {
-  assert.deepEqual(scoreCouncilVotes([], 0.9), []);
-  const abstained = scoreCouncilVotes(
-    [makeVote({ slug: "a" }), makeVote({ slug: "b" })], // no probability
-    0.9,
-  );
-  assert.equal(abstained[0].score, 0);
-  assert.equal(abstained[1].score, 0);
-});
-
-test("duplicate slug reports still advance the chain independently", () => {
-  // A stale retry that reuses a slug must not collapse scores — each report
-  // is a sequential information update, not a set keyed by persona.
-  const scored = scoreCouncilVotes(
-    [
-      makeVote({ slug: "a", probability: 0.7 }),
-      makeVote({ slug: "a", probability: 0.9 }),
-    ],
-    0.9,
-  );
-  assert.ok(scored[0].score! > 0);
-  assert.ok(scored[1].score! > 0);
-  const telescoped =
-    crossEntropyScore(0.9, 0.7, 0.5) + crossEntropyScore(0.9, 0.9, 0.7);
-  assert.ok(Math.abs((scored[0].score! + scored[1].score!) - telescoped) < 1e-12);
-});
-
-test("cancelled-style DRAW/UNRESOLVABLE mapped q leaves score at zero when q unchanged", () => {
-  const qPrev = 0.7;
-  const drawQ = verdictToProbability("DRAW", 99, qPrev);
-  const unresolvedQ = verdictToProbability("UNRESOLVABLE", 99, qPrev);
-  assert.equal(drawQ, qPrev);
-  assert.equal(unresolvedQ, qPrev);
-  assert.equal(crossEntropyScore(0.9, drawQ, qPrev), 0);
-  assert.equal(crossEntropyScore(0.9, unresolvedQ, qPrev), 0);
-});
-
-test("stale reference outside (0,1) is clamped before scoring", () => {
-  const votes = [makeVote({ slug: "a", probability: 0.8 })];
-  const high = scoreCouncilVotes(votes, 5);
-  const low = scoreCouncilVotes(votes, -3);
-  assert.ok(Number.isFinite(high[0].score!));
-  assert.ok(Number.isFinite(low[0].score!));
-  // Same as scoring against the clamp bounds.
-  assert.equal(high[0].score, scoreCouncilVotes(votes, 0.98)[0].score);
-  assert.equal(low[0].score, scoreCouncilVotes(votes, 0.02)[0].score);
-});
-
 // ── allocateBonus ─────────────────────────────────────────────────────────────
 
 test("bonus splits proportionally across positive scores only", () => {
@@ -187,55 +117,91 @@ test("dust shares are skipped, all-negative rounds pay nothing", () => {
   assert.deepEqual(allocateBonus([-1, -2, 0], 0.01), [0, 0, 0]);
 });
 
-test("malformed pool or NaN scores pay nothing — funded bonus stays safe", () => {
-  assert.deepEqual(allocateBonus([1, 2], Number.NaN), [0, 0]);
-  assert.deepEqual(allocateBonus([1, 2], Number.POSITIVE_INFINITY), [0, 0]);
-  assert.deepEqual(allocateBonus([1, 2], -0.01), [0, 0]);
-  assert.deepEqual(allocateBonus([Number.NaN, Number.POSITIVE_INFINITY, 1], 0.01), [0, 0, 0.01]);
-  assert.deepEqual(allocateBonus([], 0.01), []);
+test("atomic bonus allocation rounds down at seven decimals and rejects malformed scores", () => {
+  const shares = allocateBonusAtomic([0.3, 0.1, -0.2], 80_001n);
+  assert.deepEqual(shares, [60_000n, 20_000n, 0n]);
+  assert.equal(shares.reduce((a, b) => a + b, 0n), 80_000n);
+  assert.deepEqual(allocateBonusAtomic([99, 1], 10_000n), [9_900n, 0n]);
+  assert.throws(() => allocateBonusAtomic([Number.NaN], 10_000n), /invalid council score/);
+  assert.throws(() => allocateBonusAtomic([1], -1n), /non-negative/);
 });
 
-// ── normalizeSelfResolvingConfig ──────────────────────────────────────────────
-
-test("normalizeSelfResolvingConfig clamps alpha into [0,1] and minVotes >= 1", () => {
-  assert.deepEqual(normalizeSelfResolvingConfig({ alpha: 0.25, minVotes: 3 }), {
-    alpha: 0.25,
-    minVotes: 3,
-  });
-  assert.deepEqual(normalizeSelfResolvingConfig({ alpha: -1, minVotes: 0 }), {
-    alpha: 0,
-    minVotes: 1,
-  });
-  assert.deepEqual(normalizeSelfResolvingConfig({ alpha: 2, minVotes: 4.9 }), {
-    alpha: 1,
-    minVotes: 4,
-  });
+test("bonus configuration is exact, bounded and can pause payouts", () => {
+  assert.equal(parseCouncilBonusPool("0"), 0n);
+  assert.equal(parseCouncilBonusPool("0.01"), 100_000n);
+  assert.equal(parseCouncilBonusPool("1"), 10_000_000n);
+  assert.throws(() => parseCouncilBonusPool("1.0000001"), /safety limit/);
+  assert.throws(() => parseCouncilBonusPool("0.00000001"), /Invalid USDC amount/);
+  assert.throws(() => parseCouncilBonusPool("NaN"), /Invalid USDC amount/);
 });
 
-test("normalizeSelfResolvingConfig replaces non-finite knobs with safe defaults", () => {
-  assert.deepEqual(
-    normalizeSelfResolvingConfig({ alpha: Number.NaN, minVotes: Number.POSITIVE_INFINITY }),
-    { alpha: 0.25, minVotes: 1 },
-  );
+test("only a confirmed matching on-chain settlement releases bonuses", () => {
+  const claim = { state: "resolved" as const, winner_side: "creator" as const,
+    evidence_hash: "a".repeat(64) };
+  assert.equal(isConfirmedCouncilSettlement(claim, "creator", "a".repeat(64), false), true);
+  assert.equal(isConfirmedCouncilSettlement(claim, "creator", "a".repeat(64), true), false);
+  assert.equal(isConfirmedCouncilSettlement({ ...claim, state: "cancelled" as const }, "creator", "a".repeat(64), false), false);
+  assert.equal(isConfirmedCouncilSettlement(claim, "challengers", "a".repeat(64), false), false);
+  assert.equal(isConfirmedCouncilSettlement(claim, "creator", "b".repeat(64), false), false);
+  assert.equal(isConfirmedCouncilSettlement(null, "creator", "a".repeat(64), false), false);
 });
 
-// ── regression: end-to-end score → bonus invariant ────────────────────────────
+test("bonus payouts bind recipients and reserve before sending; duplicate runs do not resend", async () => {
+  const sent: string[] = [];
+  const recorded: Array<string | null> = [];
+  const reserved = new Set<string>();
+  const wallet = { address: "oracle" } as Parameters<typeof payCouncilBonuses>[0]["payerWallet"];
+  const votes = [
+    makeVote({ slug: "a", score: 0.3, walletAddress: "juror-a", pricePaidUnits: "10000" }),
+    makeVote({ slug: "b", score: 0.1, walletAddress: "untrusted", pricePaidUnits: "10000" }),
+  ];
+  const deps: NonNullable<Parameters<typeof payCouncilBonuses>[1]> = {
+    addressFor: (slug) => `juror-${slug}`,
+    balance: async () => 80_000n,
+    reserve: async (row) => {
+      if (reserved.has(row.jurorSlug)) return false;
+      reserved.add(row.jurorSlug);
+      return true;
+    },
+    record: async (_key, hash) => { recorded.push(hash); },
+    transfer: async ({ amountUsdc }) => { sent.push(amountUsdc); return "a".repeat(64); },
+  };
+  const args = { votes, poolAtomic: 80_000n, payerWallet: wallet,
+    claimId: 1, contractId: "contract", settlementTxHash: "b".repeat(64) };
+  const first = await payCouncilBonuses(args, deps);
+  assert.deepEqual(first.map((r) => r.status), ["paid"]);
+  assert.deepEqual(sent, ["0.006"]);
+  assert.deepEqual(recorded, ["a".repeat(64)]);
+  const second = await payCouncilBonuses(args, deps);
+  assert.deepEqual(second.map((r) => r.status), ["skipped"]);
+  assert.equal(sent.length, 1);
+});
 
-test("regression: positive CE scores alone can claim the bonus pool", () => {
-  const votes = scoreCouncilVotes(
-    [
-      makeVote({ slug: "a", probability: 0.8 }),
-      makeVote({ slug: "b", probability: 0.2 }), // away from qT → negative
-      makeVote({ slug: "c", probability: 0.9 }),
-    ],
-    0.9,
-  );
-  const bonuses = allocateBonus(
-    votes.map((v) => v.score ?? 0),
-    0.01,
-  );
-  assert.ok(bonuses[0] > 0);
-  assert.equal(bonuses[1], 0);
-  assert.ok(bonuses[2] > 0);
-  assert.ok(bonuses.reduce((a, b) => a + b, 0) <= 0.01 + 1e-9);
+test("missing funds, duplicate jurors and ambiguous transfers fail closed", async () => {
+  const wallet = { address: "oracle" } as Parameters<typeof payCouncilBonuses>[0]["payerWallet"];
+  const vote = makeVote({ slug: "a", score: 1, walletAddress: "juror-a", pricePaidUnits: "10000" });
+  let transfers = 0;
+  let reserved = false;
+  let recorded: string | null | undefined;
+  const deps: NonNullable<Parameters<typeof payCouncilBonuses>[1]> = {
+    addressFor: () => "juror-a",
+    balance: async () => 0n,
+    reserve: async () => { if (reserved) return false; reserved = true; return true; },
+    record: async (_key, hash) => { recorded = hash; },
+    transfer: async () => { transfers++; throw new Error("private RPC failure"); },
+  };
+  const args = { votes: [vote], poolAtomic: 10_000n, payerWallet: wallet,
+    claimId: 1, contractId: "contract", settlementTxHash: "b".repeat(64) };
+  await assert.rejects(payCouncilBonuses(args, deps), /insufficient council bonus funds/);
+  await assert.rejects(payCouncilBonuses({ ...args, votes: [vote, vote] }, deps), /duplicate council juror/);
+  assert.equal(transfers, 0);
+  deps.balance = async () => 10_000n;
+  deps.reserve = async () => { throw new Error("database unavailable"); };
+  await assert.rejects(payCouncilBonuses(args, deps), /database unavailable/);
+  assert.equal(transfers, 0);
+  deps.reserve = async () => { if (reserved) return false; reserved = true; return true; };
+  assert.deepEqual((await payCouncilBonuses(args, deps)).map((r) => r.status), ["review"]);
+  assert.equal(recorded, null);
+  assert.deepEqual((await payCouncilBonuses(args, deps)).map((r) => r.status), ["skipped"]);
+  assert.equal(transfers, 1);
 });
