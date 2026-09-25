@@ -94,6 +94,10 @@ export async function authenticateAgentRequest(args: {
     return { error: apiError("forbidden", "key does not belong to this agent") };
   }
 
+  if (checked.record.scopes && checked.record.scopes.length > 0 && !checked.record.scopes.includes(args.action)) {
+    return { error: apiError("forbidden", `API key is not scoped for action: ${args.action}`) };
+  }
+
   if (requiresOwnerSignature(args.action)) {
     return {
       error: apiError(
