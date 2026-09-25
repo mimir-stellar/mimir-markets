@@ -904,6 +904,9 @@ async function sweepAndCount(): Promise<{ cancelled: number; joinable: number; j
  * Never throws: a worker must not stop creating markets because the proposal log is
  * unreachable. A missing proposal costs precision measurement; a crashed worker
  * costs the whole run.
+ *
+ * Proposals enter the review queue with status 'queued' — human review (or an
+ * automated policy) must approve before publish when not in autonomous mode.
  */
 async function recordProposal(
   candidate: ClaimCandidate,
@@ -952,6 +955,12 @@ async function recordProposal(
       disposition,
       blocked_by: null,
       claim_id: null,
+      review_status: "queued",
+      queued_at: Date.now(),
+      claimed_at: null,
+      reviewed_at: null,
+      reviewer: null,
+      failure_reason: null,
     });
     return proposalId;
   } catch (err) {
