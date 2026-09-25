@@ -31,7 +31,23 @@ jobs:
         with:
           targets: wasm32v1-none
       - run: npm ci
-      - run: npm audit --omit=dev --audit-level=high
+      - name: Audit production dependencies
+        run: |
+          set -uo pipefail
+          # npm audit exits 1 when any advisory exists; the checker is the
+          # fail-closed source of truth for high/critical/unknown findings.
+          npm audit --omit=dev --json > npm-audit.json || true
+          node --import tsx scripts/check-npm-audit.ts --json npm-audit.json --out npm-audit-report.md
+      - name: Upload dependency audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-${{ github.run_id }}
+          path: |
+            npm-audit.json
+            npm-audit-report.md
+          if-no-files-found: error
+          retention-days: 14
       - run: npm run check:terms
       - run: npm run typecheck
       - run: npm run test:contracts
