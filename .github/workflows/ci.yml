@@ -27,18 +27,33 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: .cache/node-tests
+          key: node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('scripts/run-node-tests.mjs') }}
+          restore-keys: |
+            node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
-      - run: npm run check:terms
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm run test:contracts
       - run: cargo build --manifest-path contracts-soroban/Cargo.toml --release --target wasm32v1-none
       - run: npm run verify:artifacts -- --require-built
       - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
-      - run: npm run test:smoke
+      - run: npm run test:node:coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-test-coverage
+          path: |
+            coverage/node/node-tests.lcov
+            coverage/node/node-tests.failed.lcov
+          if-no-files-found: ignore
+          retention-days: 7
       - run: npm run build
 
   browser-smoke:
@@ -56,10 +71,16 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: .cache/node-tests
+          key: node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('scripts/run-node-tests.mjs') }}
+          restore-keys: |
+            node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-
       - run: npm ci
-      - run: npm run check:terms
+      - run: npm run lint
       - run: npm run typecheck
-      - run: npm run test:smoke
+      - run: npm run test:node
       - run: npm run smoke:browser
         env:
           CI: "true"

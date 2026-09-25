@@ -52,7 +52,7 @@ function stubExtract(text: string): string | null {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenced) return fenced[1].trim();
   // Find first { ... } block
-  const m = text.match(/\{[\s\S]*\}/);
+  const m = text.match(/\{[\s\S]*?\}/);
   return m ? m[0] : null;
 }
 
