@@ -38,6 +38,9 @@ jobs:
       - run: cargo build --manifest-path contracts-soroban/Cargo.toml --release --target wasm32v1-none
       - run: npm run verify:artifacts -- --require-built
       - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
+      # Release readiness: the offline half of the checklist (docs/RELEASE_READINESS.md).
+      # No secrets, no .env, no network — reproducible from a clean checkout.
+      - run: npm run verify:release-readiness
       - run: npm run test:smoke
       - run: npm run build
 
