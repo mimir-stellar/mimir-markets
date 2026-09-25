@@ -38,6 +38,14 @@ The agents that run Mimir each sign with their own locally held Stellar seed, pr
 
 ---
 
+## Read-index ledger replay
+
+Run `npm run check:ledger-fixture` to replay the funded-market fixture without
+a database, RPC endpoint, wallet seed, or production secret. It emits a JSON
+reconciliation artifact and fails closed on partial history, conflicting
+positions, unsafe money values, or fingerprint drift. Release and rollback
+guidance is in [`docs/LEDGER_REPLAY.md`](docs/LEDGER_REPLAY.md).
+
 ## Table of contents
 
 - [What it does](#what-it-does)
@@ -152,6 +160,16 @@ The diagram shows three independent runtime tiers:
 1. **Frontend tier (Vercel).** Next.js App Router with API routes. Pure read paths talk to Soroban RPC and Horizon directly; writes are user-signed through Stellar Wallets Kit. The BYOA endpoint `/api/agents/v1/{action}` lives here.
 2. **Worker tier (Railway).** Long-lived Node processes that poll the ledger, evaluate claims with an LLM, and submit settlement transactions. Each agent signs with its own locally held Stellar seed.
 3. **Data tier (Neon Postgres).** A denormalised read-index of the on-chain state. Optional; the app boots without it and the contract remains the source of truth.
+
+### Read-index cache backups
+
+The read-index is a cache, so its backup workflow is built to be verifiable *offline* — no Soroban RPC, no Stellar seeds, just the archive itself:
+
+1. `npm run backup:read-index -- --out backups/read-index.json` — `DATABASE_URL` only; dumps the projection tables (`claims`, `challengers`, `sync_meta`, settlement/fee projection) into a self-checked archive. The dump refuses to write a byte unless its own checksum and privacy invariants pass.
+2. `npm run verify:cache-backup -- backups/read-index.json` — pure SHA-256 checksum verification, byte-reproducible on a clean checkout (also the CI gate). Fails closed on tampering, unsupported schema, unknown tables, empty snapshots, and any private-claim content leak.
+3. `npm run restore:read-index -- backups/read-index.json --dry-run` then without `--dry-run` — an unverified archive is refused *before* any write; writes run in one transaction; the cache is re-read afterwards and fingerprint-compared to the archive's checksum.
+
+Rollback is two-layered: restore any verified archive, or — because the chain is the source of truth — re-warm from chain (`npm run warm:vs-index`, or the `sync` worker) to rebuild a cache that drifted. Restoration never writes to the chain.
 
 ---
 
@@ -800,12 +818,17 @@ mimir-markets/
 │   ├── x402/                             # config.ts (prices) · stellar-scheme.ts · server.ts · buyer.ts
 │   ├── paid-revenue.ts                   # atomic USDC settlement ledger
 │   ├── contract.ts                       # high-level TypeScript contract client
+│   ├── ops/                              # offline verifiers & gates (projection, artifact provenance, cache backup)
+│   │   ├── projection.ts                 # pure chain-events → read-index fold
+│   │   ├── artifact-provenance.ts        # fail-closed Wasm digest verification
+│   │   └── cache-backup.ts               # offline cache-backup verification (checksum + privacy, no network)
+│   ├── series.ts / scoring.ts / etc.     # read-index-derived product logic (pure where possible)
 │   ├── db.ts                             # Neon read-index
 │   ├── llm.ts                            # model-routed LLM call
 │   ├── wallet.tsx                        # frontend wallet context (Stellar Wallets Kit)
 │   ├── wallet-connectors.ts              # connector list + per-wallet capability matrix
 │   ├── xmtp/                             # optional encrypted chat (see docs/xmtp-integration.md)
-│   └── server/                           # server-only modules (DB writers, etc.)
+│   └── server/                           # server-only modules (DB writers, read-index backup/restore, etc.)
 ├── schemas/
 │   └── agent-api-v1.schema.json          # BYOA request schema
 ├── scripts/
@@ -816,12 +839,20 @@ mimir-markets/
 │   ├── fund-agents.ts                    # fund agents from a master seed
 │   ├── verify-deployment.ts              # assert the deployed contracts match this repo
 │   ├── verify-artifact-provenance.ts     # fail-closed Wasm digest / manifest checks
+│   ├── verify-cache-backup.ts            # offline cache-backup verification (no DATABASE_URL)
+│   ├── backup-read-index.ts              # dump the Neon read-index to a verified archive
+│   ├── restore-read-index.ts             # restore a verified archive (dry-run capable)
 │   ├── onchain-smoke.ts                  # end-to-end on-chain smoke
 │   ├── x402-stellar-smoke.ts             # payment-scheme smoke against live Testnet
 │   ├── demo-full-cycle.ts                # full create -> challenge -> settle in 90s
 │   ├── seed-claims.ts                    # bulk-seed demo markets
+│   ├── run-browser-smoke.mjs             # browser smoke orchestrator (build + serve + test + teardown)
+│   ├── lib/browser-smoke-env.mjs         # secret-free env allowlist for the smoke build
 │   └── warm-vs-index.ts                  # rebuild Neon cache from on-chain
-└── tests/node/                           # node:test unit + integration suites
+├── playwright.config.ts                  # browser-smoke config (system Chrome, no browser download)
+└── tests/
+    ├── node/                             # node:test unit + integration suites
+    └── browser/                          # Playwright browser smoke suite (npm run smoke:browser)
 ```
 
 ---
@@ -897,6 +928,24 @@ AUTO_CHALLENGE=1 npm run oracle  # also Kelly-stake on mispriced claims
 npm run market-creator         # opens new markets every 6h
 npm run council                # the ten-persona jury
 ```
+
+### Browser smoke flow
+
+`npm run smoke:browser` builds the app, serves it on `http://127.0.0.1:3111`, drives the Playwright suite in `tests/browser/` with a real browser, and tears everything down. It runs in CI as the `browser-smoke` job and is what lets Mimir ship funded features with predictable safety.
+
+**What it runs:** boot + locale routing + security headers (`boot.spec.ts`), every public page rendering (`pages.spec.ts`), the fail-closed health/feed/analytics endpoints (`health.spec.ts`), wallet-gated money paths (`wallet-mock.spec.ts`), and the `?demo=1` mock create-to-success flow (`demo-create.spec.ts`).
+
+**Environment contract.** The smoke flow is deterministic and secret-free. `scripts/run-browser-smoke.mjs` moves every `.env*` file Next.js reads (`.env`, `.env.local`, `.env.production*`) aside for the duration of the run and restores them afterwards, then builds and serves with `buildSmokeEnv()` (`scripts/lib/browser-smoke-env.mjs`): a strict allowlist (PATH/HOME/CI markers…), no server secrets, no contract ids, and only the pinned `NEXT_PUBLIC_STELLAR_NETWORK*` values. The app therefore boots in its **chain-not-configured** state, and the suite asserts it *fails closed*: health is `503 critical` with a `db.unconfigured` alarm, the arena feed returns `[]`, and money paths are gated behind a connect control. A served page matching a secret pattern fails the run.
+
+**Browser.** The flow uses the system Chrome/Chromium (Playwright channel `"chrome"`) and never downloads a Playwright browser. Point it at a specific binary with `SMOKE_CHROME_PATH=/path/to/chrome`.
+
+```bash
+npm run smoke:browser                        # full cycle build + serve + test + teardown
+npm run smoke:browser -- --skip-build        # reuse an existing .next build (fast iteration)
+npm run smoke:browser -- --filter boot       # run only the boot spec
+```
+
+**Failure, rollback and artifacts.** On failure the run prints where to look, restores the moved `.env*` files and kills the server, and CI uploads `playwright-report/` + `test-results/` for 7 days. Every mode of the runner tears down cleanly, so a developer can always rerun exactly what CI ran with one command: `npm run smoke:browser`.
 
 ---
 
@@ -1085,6 +1134,9 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run verify:deployment`                  | Check the deployed contract ids, WASM hash and initialized config                  |
 | `npm run verify:artifacts`                   | Verify / pin Soroban Wasm digests against `deploy/contract-artifacts.manifest.json` (no secrets) |
 | `npm run verify:analytics`                   | Check the analytics gates the launch gate requires                                 |
+| `npm run backup:read-index`                  | Dump the Neon read-index cache to a self-verified checksummed archive (`--out <path>` or stdout; needs `DATABASE_URL`, no seeds) |
+| `npm run verify:cache-backup`                | Verify a cache-backup archive offline — no `DATABASE_URL`, no network, byte-reproducible |
+| `npm run restore:read-index`                 | Restore a *verified* archive into the Neon read-index and fingerprint-check the result (`--dry-run` to preview) |
 | `npm run smoke:onchain`                      | On-chain smoke test against the live deployment (`:full` adds resolve + squad)     |
 | `npm run smoke:x402` / `:http`               | Payment-scheme smoke against live Testnet / a full HTTP round trip                 |
 | `npm run load:x402`                          | Offline load test: fixture verification + settle/replay limits                      |
@@ -1143,3 +1195,4 @@ Mimir is source-available. You can use, study, modify, and share it freely.
 The catch (the *A* in AGPL): if you run a modified version as a hosted
 service, you must publish your changes under the same license. That keeps
 oracle-side modifications visible to users staking USDC against the agent.
+- **Malformed evidence fails closed.** A supplied `evidence_hash` must be exactly 32 bytes (64 hexadecimal characters, with an optional `0x` prefix) or the client rejects it before signing and submission. Omission keeps the existing zero-hash sentinel for compatible callers, while the Soroban ABI independently enforces `BytesN<32>`. This is a client validation-only rollout: it changes no storage, fees, escrow, payouts, permissions, or secrets; requires no migration or redeployment; and can be rolled back with the client change alone.

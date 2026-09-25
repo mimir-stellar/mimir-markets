@@ -15,6 +15,7 @@ import { StrKey } from "@stellar/stellar-sdk";
 import { useLocale, useMessages, useTranslations } from "next-intl";
 import { usePathname, useRouter } from "@/i18n/navigation";
 import { useWallet } from "@/lib/wallet";
+import { evaluateUsdcTrustlineGate } from "@/lib/usdcTrustlineGate";
 import {
   createClaim,
   createRematch,
@@ -82,8 +83,19 @@ import {
 import { toast } from "sonner";
 import PageTransition, { AnimatedItem } from "@/components/PageTransition";
 import { GlassCard, Button, Input, ListboxField } from "@/components/ui";
+import {
+  UsdcTrustlineGate,
+  useUsdcTrustline,
+} from "@/components/wallet/UsdcTrustlineGate";
 import ClaimStrengthCard from "@/components/ClaimStrengthCard";
 import CreateChallengeTicket from "@/components/vs/CreateChallengeTicket";
+import {
+  CREATE_DESKTOP_CTA_WRAP_CLASS,
+  CREATE_MOBILE_CTA_BAR_CLASS,
+  CREATE_PAGE_SHELL_CLASS,
+  CREATE_STAKE_CUSTOM_CELL_CLASS,
+  CREATE_STAKE_PRESET_GRID_CLASS,
+} from "@/lib/createFormResponsive";
 import { BlueprintHeading } from "@/components/BlueprintGrid";
 import CreateMockFundingOverlay, {
   type CreateMockOverlayPhase,
@@ -185,7 +197,9 @@ export default function CreatePage() {
   const router = useRouter();
   const pathname = usePathname();
   const { address, isConnected, connect, signer } = useWallet();
+  const trustline = useUsdcTrustline();
   const t = useTranslations("create");
+  const tWallet = useTranslations("wallet");
   const tc = useTranslations("common");
   const tQuality = useTranslations("quality");
   const tCat = useTranslations("categories");
@@ -274,6 +288,15 @@ export default function CreatePage() {
   const mockFlowTimersRef = useRef<number[]>([]);
   /** `/vs/create?demo=1`: flujo sin wallet ni contrato (no compatible con rematch). */
   const isCreateDemoSession = isCreateDemoUrl && rematchId === null;
+  const createTrustlineGate = evaluateUsdcTrustlineGate({
+    action: rematchId === null ? "create" : "rematch",
+    status: trustline.status,
+    loading: trustline.loading,
+    stale: trustline.stale,
+    isConnected,
+    hasSigner: Boolean(signer),
+  });
+  const createTrustlineBlocked = !isCreateDemoSession && !createTrustlineGate.allowed;
   const ticketWalletAddress =
     isCreateDemoSession && !address ? MOCK_DEMO_CREATOR_ADDRESS : address;
   /** Evita mismatch de hidratación: fechas relativas y `min` del input dependen de zona horaria y del reloj del cliente. */
@@ -1107,6 +1130,11 @@ export default function CreatePage() {
       return;
     }
 
+    if (!isDemoCreate && !createTrustlineGate.allowed) {
+      toast.error(tWallet(createTrustlineGate.messageKey));
+      return;
+    }
+
     const {
       question: parsedQuestion,
       creatorPosition: parsedCreatorPos,
@@ -1150,6 +1178,11 @@ export default function CreatePage() {
       if (!moderationOk) {
         return;
       }
+    }
+
+    if (!isDemoCreate && !createTrustlineGate.allowed) {
+      toast.error(tWallet(createTrustlineGate.messageKey));
+      return;
     }
 
     let releaseLock: (() => void) | undefined;
@@ -1352,7 +1385,7 @@ export default function CreatePage() {
         subtitleSuccess={t("mockOverlaySuccessHint")}
       />
       <PageTransition>
-      <div className="mx-auto w-full max-w-[1280px] px-4 pb-12 sm:px-6">
+      <div className={CREATE_PAGE_SHELL_CLASS}>
         <AnimatedItem>
           <div className="mb-8 w-full sm:mb-10">
           {rematchId && (
@@ -1814,7 +1847,7 @@ export default function CreatePage() {
                 </span>
                 {t("stakeSectionTitle")}
               </h3>
-              <div className="grid grid-cols-5 gap-2">
+              <div className={CREATE_STAKE_PRESET_GRID_CLASS}>
                 {STAKE_PRESET_AMOUNTS.map((amount) => (
                   <motion.button
                     key={amount}
@@ -1834,7 +1867,7 @@ export default function CreatePage() {
                   </motion.button>
                 ))}
                 <div
-                  className={`flex min-h-[2.75rem] w-full min-w-0 items-center justify-center rounded-lg border px-1.5 py-1.5 transition-[border-color,background-color,color,box-shadow] sm:min-h-[3.25rem] sm:px-2 sm:py-2 ${
+                  className={`flex ${CREATE_STAKE_CUSTOM_CELL_CLASS} items-center justify-center rounded-lg border px-1.5 py-1.5 transition-[border-color,background-color,color,box-shadow] sm:min-h-[3.25rem] sm:px-2 sm:py-2 ${
                     customStakeFocused || !isPresetStakeAmount(stake)
                       ? "border-pv-emerald bg-pv-emerald/[0.12] text-pv-emerald shadow-[0_0_16px_-8px_rgba(51,79,169,0.3)]"
                       : "border border-pv-ink/[0.12] bg-pv-surface text-pv-muted"
@@ -2407,6 +2440,10 @@ export default function CreatePage() {
                     </div>
                   </div>
                 ) : null}
+                {!isCreateDemoSession && isConnected && (
+                  <UsdcTrustlineGate trustline={trustline} className="mb-3" />
+                )}
+                <div className={CREATE_DESKTOP_CTA_WRAP_CLASS}>
                 {isConnected || isCreateDemoSession ? (
                   <Button
                     variant="primary"
@@ -2416,7 +2453,7 @@ export default function CreatePage() {
                       mockOverlayPhase === "loading" ||
                       moderationLoading
                     }
-                    disabled={isFormMockBusy || moderationLoading}
+                    disabled={isFormMockBusy || moderationLoading || createTrustlineBlocked}
                     className="rounded-2xl py-5 font-display text-sm font-bold uppercase tracking-widest"
                   >
                     {mockOverlayPhase === "loading" || loading ? (
@@ -2445,9 +2482,53 @@ export default function CreatePage() {
                 <p className="text-center text-[9px] font-bold uppercase tracking-widest text-pv-muted/55 leading-snug">
                   {t("ticketSignatureNote")}
                 </p>
+                </div>
               </div>
             </AnimatedItem>
           </aside>
+        </div>
+
+        <div className={CREATE_MOBILE_CTA_BAR_CLASS} data-testid="create-mobile-cta">
+          <div className="mx-auto flex w-full max-w-[1280px] flex-col gap-2">
+            {isConnected || isCreateDemoSession ? (
+              <Button
+                variant="primary"
+                onClick={handleSubmit}
+                loading={
+                  loading ||
+                  mockOverlayPhase === "loading" ||
+                  moderationLoading
+                }
+                disabled={isFormMockBusy || moderationLoading || createTrustlineBlocked}
+                className="min-h-[44px] rounded-2xl py-4 font-display text-sm font-bold uppercase tracking-widest"
+              >
+                {mockOverlayPhase === "loading" || loading ? (
+                  mockOverlayPhase === "loading"
+                    ? t("mockOverlayFunding")
+                    : t("funding")
+                ) : (
+                  <>
+                    <span>
+                      {rematchId
+                        ? t("createRematchAndFund", { amount: stake })
+                        : t("createAndFund", { amount: stake })}
+                    </span>
+                    <Zap className="size-5 shrink-0" aria-hidden />
+                  </>
+                )}
+              </Button>
+            ) : (
+              <Button
+                onClick={connect}
+                className="min-h-[44px] rounded-2xl py-4 font-display text-sm font-bold uppercase tracking-widest"
+              >
+                {t("connectWallet")}
+              </Button>
+            )}
+            <p className="text-center text-[9px] font-bold uppercase tracking-widest text-pv-muted/55 leading-snug">
+              {t("ticketSignatureNote")}
+            </p>
+          </div>
         </div>
       </div>
     </PageTransition>

@@ -71,7 +71,10 @@ import {
   type ClaimData,
 } from "../../lib/contract";
 import { getOracleWallet, readAgentBalances } from "../../lib/agent-wallets";
-import { sha256Hex } from "../../lib/content-hash";
+import {
+  evidenceCommitmentHash,
+  type CouncilCommitment,
+} from "../../lib/evidence-commitment";
 import {
   STELLAR_NETWORK,
   getExplorerTxUrl,
@@ -79,7 +82,7 @@ import {
 } from "../../lib/stellar";
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll } from "../../lib/ops/heartbeat";
-import { unitsToUsdc, usdcToUnits } from "../../lib/usdc";
+import { unitsToUsdc, usdcToUnits, formatAtomicUsdc } from "../../lib/usdc";
 import {
   fetchEvidence as fetchEvidenceShared,
   EvidenceFetchError,
@@ -90,6 +93,8 @@ import {
   gatherCouncilVerdict,
   scoreCouncilVotes,
   payCouncilBonuses,
+  parseCouncilBonusPool,
+  isConfirmedCouncilSettlement,
   verdictToProbability,
   Q_PRIOR,
   type CouncilVote,
@@ -130,7 +135,7 @@ const COUNCIL_VOTE_CAP    = Number(process.env.COUNCIL_VOTE_CAP_USDC ?? "0.005")
 // oracle's terminal, history-informed assessment) split a bonus pool.
 const COUNCIL_SELF_RESOLVING = COUNCIL_SETTLEMENT && process.env.COUNCIL_SELF_RESOLVING === "1";
 const COUNCIL_ALPHA          = Number(process.env.COUNCIL_ALPHA ?? "0.25");
-const COUNCIL_BONUS_USDC     = Number(process.env.COUNCIL_BONUS_USDC ?? "0.01");
+const COUNCIL_BONUS_ATOMIC   = parseCouncilBonusPool(process.env.COUNCIL_BONUS_USDC ?? "0.01");
 const SETTLEMENT_DELAY_MS = Number(process.env.ORACLE_SETTLEMENT_DELAY_MS ?? "900000");
 
 // Free-tier Gemini is 5 RPM on new accounts and the oracle has no other rate
@@ -178,6 +183,10 @@ async function fetchClaim(claimId: number): Promise<ClaimOnChain | null> {
 interface EvidenceResult {
   text: string;
   fetcher: EvidenceFetcherKind | "none";
+  /** Normalized source URL the snapshot came from, when one was fetched. */
+  sourceUrl?: string;
+  /** Epoch ms the fetch completed, when one was fetched. */
+  fetchedAt?: number;
   payment?: EvidencePayment;
 }
 
@@ -227,7 +236,13 @@ async function fetchEvidence(claim: ClaimOnChain): Promise<EvidenceResult> {
       userAgent: "Mimir-Oracle/1.0",
       paidFetch,
     });
-    return { text: snap.text, fetcher: snap.fetcher, payment: snap.payment };
+    return {
+      text: snap.text,
+      fetcher: snap.fetcher,
+      sourceUrl: snap.sourceUrl,
+      fetchedAt: snap.fetchedAt,
+      payment: snap.payment,
+    };
   } catch (err: any) {
     const msg = err instanceof EvidenceFetchError
       ? err.message
@@ -342,18 +357,6 @@ function verdictToSide(
 
 // Oracle plays few, high-conviction markets — cap Kelly at 25% of bankroll.
 const KELLY_CAP = 0.25;
-
-/**
- * Hash evidence content for on-chain verification.
- *
- * SHA-256, which is what `env.crypto().sha256()` computes inside a Soroban
- * contract — so the digest stored in `evidence_hash` is one the chain itself could
- * recompute. keccak256 has no host-function counterpart on Soroban and would have
- * been unverifiable.
- */
-function hashEvidence(evidence: string): string {
-  return sha256Hex(evidence);
-}
 
 // Confidence tiers govern how the oracle commits a verdict.
 // HIGH      → settle as the LLM said.
@@ -472,7 +475,9 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   // and the oracle's terminal, history-informed assessment both settles the
   // claim and serves as the reference report jurors are scored against.
   let rawVerdict: OracleVerdict;
-  let commit = evidence.text;
+  // Council work committed alongside the evidence, as a canonical record rather
+  // than a `JSON.stringify` concatenation (see lib/evidence-commitment.ts).
+  let councilCommitment: CouncilCommitment | null = null;
   let bonusVotes: CouncilVote[] | null = null;
   if (COUNCIL_SETTLEMENT) {
     const council = await gatherCouncilVerdict({
@@ -497,16 +502,25 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
       const reference  = await evaluateClaim(claim, evidence.text, council.reports ?? []);
       const referenceQ = verdictToProbability(reference.verdict, reference.confidence, Q_PRIOR);
       council.votes = scoreCouncilVotes(council.votes, referenceQ);
-      const scores = council.votes.map((v) => Number((v.score ?? 0).toFixed(4)));
       console.log(`[settle] 🏛️  Reference q_T=${referenceQ.toFixed(2)} · CE scores: ${council.votes.map((v) => `${v.slug}=${(v.score ?? 0).toFixed(3)}`).join(" ")}`);
       rawVerdict = reference;
-      commit = `${evidence.text}\n[council]${JSON.stringify({ tally: council.tally, q: council.qHistory, refQ: Number(referenceQ.toFixed(4)), scores })}`;
+      councilCommitment = {
+        tally: council.tally,
+        qChain: council.qHistory ?? [],
+        referenceQ: Number(referenceQ.toFixed(4)),
+        // Aligned with the q-chain: only reports that moved q were scored against
+        // the reference (abstainers score zero and carry no q), and the commitment
+        // rejects misaligned arrays rather than committing a corrupt ballot.
+        scores: council.votes
+          .filter((v) => v.probability !== undefined)
+          .map((v) => Number((v.score ?? 0).toFixed(4))),
+      };
       bonusVotes = council.votes;
     } else if (council) {
       const paidUsdc = unitsToUsdc(council.totalPaidUnits);
       console.log(`[settle] 🏛️  Council ${council.tally.creator}–${council.tally.challengers} (${council.tally.draw + council.tally.unresolvable} abstain) · paid ${paidUsdc.toFixed(6)} USDC to jurors`);
       rawVerdict = { verdict: council.verdict, confidence: council.confidence, explanation: council.explanation };
-      commit = `${evidence.text}\n[council]${JSON.stringify(council.tally)}`;
+      councilCommitment = { tally: council.tally };
     } else {
       console.log(`[settle] Council quorum/fallback gate — settling solo.`);
       rawVerdict = await evaluateClaim(claim, evidence.text);
@@ -515,7 +529,19 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
     rawVerdict = await evaluateClaim(claim, evidence.text);
   }
 
-  const evidenceHash = hashEvidence(commit);
+  // Commit the canonical evidence bytes, not an ad-hoc string. The body is
+  // length-framed so untrusted page content cannot forge a boundary, the council
+  // record is canonical, and prompts/wallets/analytics cannot enter the digest.
+  // A malformed or stale snapshot throws here and the poll loop retries next
+  // round — no on-chain write is attempted for evidence we cannot commit.
+  const evidenceHash = evidenceCommitmentHash({
+    evidence:        evidence.text,
+    fetcher:         evidence.fetcher,
+    sourceUrl:       evidence.sourceUrl,
+    fetchedAt:       evidence.fetchedAt,
+    now:             Date.now(),
+    council:         councilCommitment,
+  });
   const trusted      = applyFetcherTrust(rawVerdict, evidence.fetcher);
   const verdict      = tierVerdict(trusted);
 
@@ -544,13 +570,27 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   // Cross-entropy bonuses AFTER the on-chain settle: informative jurors split
   // the pool, parrots and dissenters-from-evidence get nothing. Best-effort —
   // a failed transfer never affects the already-final settlement.
-  if (bonusVotes && COUNCIL_BONUS_USDC > 0) {
-    const receipts = await payCouncilBonuses(bonusVotes, COUNCIL_BONUS_USDC, ORACLE);
-    for (const r of receipts) {
-      console.log(`[settle] 🏆 Bonus ${r.bonusUsdc.toFixed(7)} USDC → ${r.slug}${r.txHash ? ` — ${getExplorerTxUrl(r.txHash)}` : " (transfer failed)"}`);
-    }
-    if (receipts.length === 0) {
-      console.log(`[settle] No positive-score jurors this round — bonus pool untouched.`);
+  if (bonusVotes && COUNCIL_BONUS_ATOMIC > 0n) {
+    try {
+      // The send response may be pending. Soroban, not the worker or DB, is the
+      // authority on whether this claim really resolved to this evidence hash.
+      const confirmed = settled.pending ? null : await fetchClaim(claim.id);
+      if (!isConfirmedCouncilSettlement(confirmed, verdictToSide(verdict.verdict), evidenceHash, Boolean(settled.pending))) {
+        console.warn(`[settle] Bonus for claim #${claim.id} withheld: resolution not confirmed on chain`);
+      } else {
+        const receipts = await payCouncilBonuses({
+          votes: bonusVotes, poolAtomic: COUNCIL_BONUS_ATOMIC, payerWallet: ORACLE,
+          claimId: claim.id, contractId: CONTRACT_ID, settlementTxHash: settled.txHash,
+        });
+        for (const r of receipts) {
+          console.log(`[settle] Bonus ${formatAtomicUsdc(r.amountAtomic)} USDC to ${r.slug}: ${r.status}${r.txHash ? ` (${getExplorerTxUrl(r.txHash)})` : ""}`);
+        }
+        if (receipts.length === 0) console.log(`[settle] No eligible positive-score jurors for claim #${claim.id}`);
+      }
+    } catch {
+      // Already-resolved market payouts are not rolled back by a bonus failure.
+      // Do not retry an uncertain classic payment automatically.
+      console.warn(`[settle] Bonus for claim #${claim.id} withheld for manual reconciliation`);
     }
   }
   return true;
