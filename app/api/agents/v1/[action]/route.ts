@@ -69,6 +69,27 @@ function json(body: unknown, status = 200): Response {
 }
 
 /** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
+/** Map an authorizeAction() rejection to the typed agent API error envelope. */
+function actionVerdictToError(
+  gate: { reason?: string; detail?: string },
+  capability: string,
+): import("@/lib/api/errors").ApiErrorResult {
+  switch (gate.reason) {
+    case "platform_paused":
+    case "paused":
+      return apiError("agent_paused", gate.detail ?? "Agent or platform is paused");
+    case "revoked":
+      return apiError("agent_revoked", gate.detail ?? "Agent has been revoked");
+    case "rate_limit_exceeded":
+      return apiError("rate_limited", gate.detail ?? "Rate limit exceeded");
+    case "missing_capability":
+    case "insufficient_authority":
+      return apiError("capability_missing", gate.detail ?? `Missing capability ${capability}`);
+    default:
+      return apiError("forbidden", gate.detail ?? gate.reason ?? "Action not authorized");
+  }
+}
+
 function errorResponse(err: import("@/lib/api/errors").ApiErrorResult): Response {
   return Response.json(err.body, { status: err.status, headers: { ...err.headers, "cache-control": "no-store" } });
 }
