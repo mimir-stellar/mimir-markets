@@ -50,10 +50,30 @@ import {
 function stubExtract(text: string): string | null {
   // Strip ```json ... ``` fences
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenced) return fenced[1].trim();
-  // Find first { ... } block
-  const m = text.match(/\{[\s\S]*\}/);
-  return m ? m[0] : null;
+  const cleaned = fenced ? fenced[1].trim() : text;
+  // Balanced-brace walk, mirroring extractJson in lib/llm.ts: a model that
+  // emits two objects must yield the FIRST one, not the greedy span between
+  // the first "{" and the last "}".
+  const start = cleaned.search(/[{[]/);
+  if (start === -1) return null;
+  const open = cleaned[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < cleaned.length; i++) {
+    const c = cleaned[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === open) depth++;
+    else if (c === close && --depth === 0) return cleaned.slice(start, i + 1);
+  }
+  return null;
 }
 
 /** Identity extractor: text already IS the JSON string. */
@@ -68,26 +88,28 @@ function nullExtract(_: string): string | null {
 
 function validPayload(overrides: Partial<VerdictPayload> = {}): VerdictPayload {
   return {
-    verdict:     "CREATOR_WINS",
-    confidence:  85,
+    verdict: "CREATOR_WINS",
+    confidence: 85,
     explanation: "The evidence clearly supports Side A.",
     ...overrides,
   };
 }
 
 /** Serialise a VerdictPayload to the JSON string the LLM might emit. */
-function asLLMText(p: Partial<VerdictPayload> & { verdict?: unknown } = {}): string {
+function asLLMText(
+  p: Partial<VerdictPayload> & { verdict?: unknown } = {},
+): string {
   return JSON.stringify({ ...validPayload(), ...p });
 }
 
-const PAST   = 1_000_000;  // fixed "now" for guard tests
+const PAST = 1_000_000; // fixed "now" for guard tests
 const FUTURE = 2_000_000;
 
 function ctx(overrides: Partial<VerdictGuardContext>): VerdictGuardContext {
   return {
     claimState: "active",
-    deadline:   PAST - 3600,  // 1 hour in the past
-    nowSecs:    PAST,
+    deadline: PAST - 3600, // 1 hour in the past
+    nowSecs: PAST,
     ...overrides,
   };
 }
@@ -101,14 +123,14 @@ test("isVerdict accepts all four canonical strings", () => {
 });
 
 test("isVerdict rejects near-misses and non-strings", () => {
-  assert.equal(isVerdict("creator_wins"), false);    // wrong case
-  assert.equal(isVerdict("CREATOR WINS"), false);    // space not underscore
+  assert.equal(isVerdict("creator_wins"), false); // wrong case
+  assert.equal(isVerdict("CREATOR WINS"), false); // space not underscore
   assert.equal(isVerdict(""), false);
   assert.equal(isVerdict(null), false);
   assert.equal(isVerdict(undefined), false);
   assert.equal(isVerdict(42), false);
   assert.equal(isVerdict({}), false);
-  assert.equal(isVerdict("DRAW "), false);            // trailing space
+  assert.equal(isVerdict("DRAW "), false); // trailing space
 });
 
 test("isDecisiveVerdict is true only for the two money-moving sides", () => {
@@ -134,7 +156,14 @@ test("validateVerdictFields returns a normalised payload for a clean object", ()
 });
 
 test("validateVerdictFields returns null for an unknown verdict string", () => {
-  assert.equal(validateVerdictFields({ verdict: "SIDE_A", confidence: 80, explanation: "x" }), null);
+  assert.equal(
+    validateVerdictFields({
+      verdict: "SIDE_A",
+      confidence: 80,
+      explanation: "x",
+    }),
+    null,
+  );
 });
 
 test("validateVerdictFields returns null for a non-object input", () => {
@@ -145,29 +174,52 @@ test("validateVerdictFields returns null for a non-object input", () => {
 });
 
 test("validateVerdictFields clamps confidence to [0, 100]", () => {
-  const lo = validateVerdictFields({ verdict: "DRAW", confidence: -50, explanation: "" });
+  const lo = validateVerdictFields({
+    verdict: "DRAW",
+    confidence: -50,
+    explanation: "",
+  });
   assert.equal(lo!.confidence, 0);
-  const hi = validateVerdictFields({ verdict: "DRAW", confidence: 999, explanation: "" });
+  const hi = validateVerdictFields({
+    verdict: "DRAW",
+    confidence: 999,
+    explanation: "",
+  });
   assert.equal(hi!.confidence, 100);
 });
 
 test("validateVerdictFields rounds non-integer confidence", () => {
-  const r = validateVerdictFields({ verdict: "DRAW", confidence: 77.8, explanation: "" });
+  const r = validateVerdictFields({
+    verdict: "DRAW",
+    confidence: 77.8,
+    explanation: "",
+  });
   assert.equal(r!.confidence, 78);
 });
 
 test("validateVerdictFields coerces numeric string confidence", () => {
-  const r = validateVerdictFields({ verdict: "DRAW", confidence: "80", explanation: "" });
+  const r = validateVerdictFields({
+    verdict: "DRAW",
+    confidence: "80",
+    explanation: "",
+  });
   assert.equal(r!.confidence, 80);
 });
 
 test("validateVerdictFields defaults confidence to 50 when missing", () => {
-  const r = validateVerdictFields({ verdict: "UNRESOLVABLE", explanation: "no data" });
+  const r = validateVerdictFields({
+    verdict: "UNRESOLVABLE",
+    explanation: "no data",
+  });
   assert.equal(r!.confidence, 50);
 });
 
 test("validateVerdictFields defaults confidence to 50 when non-numeric", () => {
-  const r = validateVerdictFields({ verdict: "UNRESOLVABLE", confidence: "high", explanation: "" });
+  const r = validateVerdictFields({
+    verdict: "UNRESOLVABLE",
+    confidence: "high",
+    explanation: "",
+  });
   assert.equal(r!.confidence, 50);
 });
 
@@ -178,7 +230,11 @@ test("validateVerdictFields defaults explanation to empty string when absent", (
 
 test("validateVerdictFields truncates explanation to 500 chars", () => {
   const long = "x".repeat(600);
-  const r = validateVerdictFields({ verdict: "DRAW", confidence: 50, explanation: long });
+  const r = validateVerdictFields({
+    verdict: "DRAW",
+    confidence: 50,
+    explanation: long,
+  });
   assert.equal(r!.explanation.length, 500);
 });
 
@@ -187,11 +243,14 @@ test("validateVerdictFields ignores extra unknown fields", () => {
     verdict: "CREATOR_WINS",
     confidence: 90,
     explanation: "ok",
-    wallet: "G123",         // money field — must be silently ignored
+    wallet: "G123", // money field — must be silently ignored
     analytics: { foo: 1 },
   });
   assert.ok(r !== null);
-  assert.equal(Object.keys(r!).sort().join(","), "confidence,explanation,verdict");
+  assert.equal(
+    Object.keys(r!).sort().join(","),
+    "confidence,explanation,verdict",
+  );
 });
 
 // ── C. checkSettlementGuards ──────────────────────────────────────────────────
@@ -231,7 +290,9 @@ test("checkSettlementGuards: open state with past deadline is settleable", () =>
 });
 
 test("checkSettlementGuards: cancelled takes priority over stale", () => {
-  const err = checkSettlementGuards(ctx({ claimState: "cancelled", deadline: FUTURE }));
+  const err = checkSettlementGuards(
+    ctx({ claimState: "cancelled", deadline: FUTURE }),
+  );
   assert.equal(err!.reason, "cancelled");
 });
 
@@ -247,7 +308,11 @@ test("parseVerdictPayload: happy path returns ok=true with normalised payload", 
 
 test("parseVerdictPayload: all four verdicts parse successfully", () => {
   for (const v of VERDICTS) {
-    const text = JSON.stringify({ verdict: v, confidence: 75, explanation: "ok" });
+    const text = JSON.stringify({
+      verdict: v,
+      confidence: 75,
+      explanation: "ok",
+    });
     const r = parseVerdictPayload(text, identityExtract);
     assert.ok(r.ok, `verdict "${v}" should parse`);
     assert.equal(r.payload.verdict, v);
@@ -255,7 +320,10 @@ test("parseVerdictPayload: all four verdicts parse successfully", () => {
 });
 
 test("parseVerdictPayload: no JSON => reason=invalid-json", () => {
-  const r = parseVerdictPayload("The creator clearly wins based on the evidence.", nullExtract);
+  const r = parseVerdictPayload(
+    "The creator clearly wins based on the evidence.",
+    nullExtract,
+  );
   assert.equal(r.ok, false);
   assert.equal(r.reason, "invalid-json");
 });
@@ -279,32 +347,47 @@ test("parseVerdictPayload: null JSON value => reason=invalid-json", () => {
 });
 
 test("parseVerdictPayload: verdict field absent => reason=missing-verdict", () => {
-  const r = parseVerdictPayload('{"confidence":80,"explanation":"ok"}', identityExtract);
+  const r = parseVerdictPayload(
+    '{"confidence":80,"explanation":"ok"}',
+    identityExtract,
+  );
   assert.equal(r.ok, false);
   assert.equal(r.reason, "missing-verdict");
 });
 
 test("parseVerdictPayload: verdict field is a number => reason=missing-verdict", () => {
-  const r = parseVerdictPayload('{"verdict":1,"confidence":80,"explanation":"ok"}', identityExtract);
+  const r = parseVerdictPayload(
+    '{"verdict":1,"confidence":80,"explanation":"ok"}',
+    identityExtract,
+  );
   assert.equal(r.ok, false);
   assert.equal(r.reason, "missing-verdict");
 });
 
 test("parseVerdictPayload: verdict field is null => reason=missing-verdict", () => {
-  const r = parseVerdictPayload('{"verdict":null,"confidence":80}', identityExtract);
+  const r = parseVerdictPayload(
+    '{"verdict":null,"confidence":80}',
+    identityExtract,
+  );
   assert.equal(r.ok, false);
   assert.equal(r.reason, "missing-verdict");
 });
 
 test("parseVerdictPayload: unknown verdict string => reason=invalid-verdict", () => {
-  const r = parseVerdictPayload('{"verdict":"SIDE_A","confidence":80,"explanation":"x"}', identityExtract);
+  const r = parseVerdictPayload(
+    '{"verdict":"SIDE_A","confidence":80,"explanation":"x"}',
+    identityExtract,
+  );
   assert.equal(r.ok, false);
   assert.equal(r.reason, "invalid-verdict");
   assert.ok(r.detail.includes("SIDE_A"));
 });
 
 test("parseVerdictPayload: wrong-case verdict => reason=invalid-verdict", () => {
-  const r = parseVerdictPayload('{"verdict":"creator_wins","confidence":80,"explanation":"x"}', identityExtract);
+  const r = parseVerdictPayload(
+    '{"verdict":"creator_wins","confidence":80,"explanation":"x"}',
+    identityExtract,
+  );
   assert.equal(r.ok, false);
   assert.equal(r.reason, "invalid-verdict");
 });
@@ -362,20 +445,27 @@ test("parseVerdictText: happy path with prose wrapper via stubExtract", () => {
 });
 
 test("parseVerdictText: fenced JSON block parses correctly", () => {
-  const llmOutput = "```json\n{\"verdict\":\"DRAW\",\"confidence\":55,\"explanation\":\"Tie.\"}\n```";
+  const llmOutput =
+    '```json\n{"verdict":"DRAW","confidence":55,"explanation":"Tie."}\n```';
   const r = parseVerdictText(llmOutput, stubExtract);
   assert.ok(r.ok);
   assert.equal(r.payload.verdict, "DRAW");
 });
 
 test("parseVerdictText: bare JSON with no wrappers parses correctly", () => {
-  const r = parseVerdictText('{"verdict":"UNRESOLVABLE","confidence":0,"explanation":"No data."}', identityExtract);
+  const r = parseVerdictText(
+    '{"verdict":"UNRESOLVABLE","confidence":0,"explanation":"No data."}',
+    identityExtract,
+  );
   assert.ok(r.ok);
   assert.equal(r.payload.verdict, "UNRESOLVABLE");
 });
 
 test("parseVerdictText: pure prose returns invalid-json", () => {
-  const r = parseVerdictText("Based on the evidence, the creator wins.", nullExtract);
+  const r = parseVerdictText(
+    "Based on the evidence, the creator wins.",
+    nullExtract,
+  );
   assert.equal(r.ok, false);
   assert.equal(r.reason, "invalid-json");
 });
@@ -413,7 +503,10 @@ test("parseVerdictText: JSON with extra top-level fields ignores them", () => {
   );
   assert.ok(r.ok);
   // wallet and price must NOT appear in the payload
-  assert.equal(Object.keys(r.payload).sort().join(","), "confidence,explanation,verdict");
+  assert.equal(
+    Object.keys(r.payload).sort().join(","),
+    "confidence,explanation,verdict",
+  );
 });
 
 test("parseVerdictText with guard: cancelled claim short-circuits before parse", () => {
@@ -448,11 +541,12 @@ test("parseLLMVerdictWithRetry: retries once on invalid-json and succeeds on att
   let calls = 0;
   const { result, attempts } = await parseLLMVerdictWithRetry({
     extractor: identityExtract,
-    buildPrompt: (attempt) => attempt === 2 ? "evaluate + JSON only" : "evaluate",
+    buildPrompt: (attempt) =>
+      attempt === 2 ? "evaluate + JSON only" : "evaluate",
     callLLMFn: async (_) => {
       calls++;
       return calls === 1
-        ? "The creator wins based on the evidence."   // no JSON
+        ? "The creator wins based on the evidence." // no JSON
         : asLLMText({ verdict: "CREATOR_WINS", confidence: 82 });
     },
   });
@@ -470,7 +564,7 @@ test("parseLLMVerdictWithRetry: retries once on missing-verdict", async () => {
     callLLMFn: async (_) => {
       calls++;
       return calls === 1
-        ? '{"confidence":80,"explanation":"ok"}'         // missing verdict
+        ? '{"confidence":80,"explanation":"ok"}' // missing verdict
         : asLLMText({ verdict: "DRAW", confidence: 60 });
     },
   });
@@ -487,7 +581,7 @@ test("parseLLMVerdictWithRetry: retries once on invalid-verdict string", async (
     callLLMFn: async (_) => {
       calls++;
       return calls === 1
-        ? '{"verdict":"WINNER_IS_CREATOR","confidence":80,"explanation":"x"}'  // invalid
+        ? '{"verdict":"WINNER_IS_CREATOR","confidence":80,"explanation":"x"}' // invalid
         : asLLMText({ verdict: "CREATOR_WINS", confidence: 80 });
     },
   });
@@ -513,12 +607,15 @@ test("parseLLMVerdictWithRetry: does NOT retry on guard-blocked (cancelled) clai
   const { result, attempts } = await parseLLMVerdictWithRetry({
     extractor: identityExtract,
     buildPrompt: (_) => "p",
-    callLLMFn: async (_) => { calls++; return asLLMText(); },
+    callLLMFn: async (_) => {
+      calls++;
+      return asLLMText();
+    },
     guardContext: ctx({ claimState: "cancelled" }),
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "cancelled");
-  assert.equal(calls, 0);    // guard fires before any LLM call
+  assert.equal(calls, 0); // guard fires before any LLM call
   assert.equal(attempts, 1);
 });
 
@@ -527,7 +624,10 @@ test("parseLLMVerdictWithRetry: does NOT retry on duplicate (resolved) claim", a
   const { result } = await parseLLMVerdictWithRetry({
     extractor: identityExtract,
     buildPrompt: (_) => "p",
-    callLLMFn: async (_) => { calls++; return asLLMText(); },
+    callLLMFn: async (_) => {
+      calls++;
+      return asLLMText();
+    },
     guardContext: ctx({ claimState: "resolved" }),
   });
   assert.equal(result.ok, false);
@@ -540,7 +640,10 @@ test("parseLLMVerdictWithRetry: does NOT retry on stale claim", async () => {
   const { result } = await parseLLMVerdictWithRetry({
     extractor: identityExtract,
     buildPrompt: (_) => "p",
-    callLLMFn: async (_) => { calls++; return asLLMText(); },
+    callLLMFn: async (_) => {
+      calls++;
+      return asLLMText();
+    },
     guardContext: ctx({ deadline: FUTURE }),
   });
   assert.equal(result.ok, false);
@@ -561,7 +664,7 @@ test("parseLLMVerdictWithRetry: LLM throws => dependency-failure, no retry", asy
   assert.equal(result.ok, false);
   assert.equal(result.reason, "dependency-failure");
   assert.ok(result.detail.includes("API_KEY_INVALID"));
-  assert.equal(calls, 1);    // no retry after network/auth failure
+  assert.equal(calls, 1); // no retry after network/auth failure
   assert.equal(attempts, 1);
 });
 
@@ -569,7 +672,10 @@ test("parseLLMVerdictWithRetry: passes attempt number 1 and 2 to buildPrompt", a
   const seen: number[] = [];
   await parseLLMVerdictWithRetry({
     extractor: nullExtract,
-    buildPrompt: (attempt) => { seen.push(attempt); return "p"; },
+    buildPrompt: (attempt) => {
+      seen.push(attempt);
+      return "p";
+    },
     callLLMFn: async (_) => "no json",
   });
   assert.deepEqual(seen, [1, 2]);
@@ -580,8 +686,12 @@ test("parseLLMVerdictWithRetry: VERDICT_RETRY_SUFFIX is appended on attempt 2", 
   const BASE = "base-prompt";
   await parseLLMVerdictWithRetry({
     extractor: nullExtract,
-    buildPrompt: (attempt) => attempt === 1 ? BASE : `${BASE}${VERDICT_RETRY_SUFFIX}`,
-    callLLMFn: async (p) => { prompts.push(p); return "no json"; },
+    buildPrompt: (attempt) =>
+      attempt === 1 ? BASE : `${BASE}${VERDICT_RETRY_SUFFIX}`,
+    callLLMFn: async (p) => {
+      prompts.push(p);
+      return "no json";
+    },
   });
   assert.equal(prompts.length, 2);
   assert.equal(prompts[0], BASE);
@@ -635,13 +745,19 @@ test("regression: 512-token cap truncates explanation mid-string", () => {
 
 test("regression: confidence sent as string '80' by some model variants", () => {
   // Some Anthropic responses stringify numbers inside JSON.
-  const r = parseVerdictText('{"verdict":"DRAW","confidence":"80","explanation":"Equal evidence."}', identityExtract);
+  const r = parseVerdictText(
+    '{"verdict":"DRAW","confidence":"80","explanation":"Equal evidence."}',
+    identityExtract,
+  );
   assert.ok(r.ok);
-  assert.equal(r.payload.confidence, 80);   // coerced to number
+  assert.equal(r.payload.confidence, 80); // coerced to number
 });
 
 test("regression: confidence is 0 for UNRESOLVABLE (valid edge case)", () => {
-  const r = parseVerdictText('{"verdict":"UNRESOLVABLE","confidence":0,"explanation":"No data available."}', identityExtract);
+  const r = parseVerdictText(
+    '{"verdict":"UNRESOLVABLE","confidence":0,"explanation":"No data available."}',
+    identityExtract,
+  );
   assert.ok(r.ok);
   assert.equal(r.payload.verdict, "UNRESOLVABLE");
   assert.equal(r.payload.confidence, 0);
@@ -677,14 +793,21 @@ test("regression: money fields (wallet, price) in LLM response are stripped", ()
     identityExtract,
   );
   assert.ok(r.ok);
-  assert.equal(Object.keys(r.payload).sort().join(","), "confidence,explanation,verdict");
+  assert.equal(
+    Object.keys(r.payload).sort().join(","),
+    "confidence,explanation,verdict",
+  );
 });
 
 // ── I. VERDICT_LLM_SCHEMA shape ───────────────────────────────────────────────
 
 test("VERDICT_LLM_SCHEMA has required fields for Gemini structured output", () => {
   assert.equal(VERDICT_LLM_SCHEMA.type, "object");
-  assert.deepEqual([...VERDICT_LLM_SCHEMA.required].sort(), ["confidence", "explanation", "verdict"]);
+  assert.deepEqual([...VERDICT_LLM_SCHEMA.required].sort(), [
+    "confidence",
+    "explanation",
+    "verdict",
+  ]);
   assert.deepEqual(
     [...VERDICT_LLM_SCHEMA.properties.verdict.enum],
     ["CREATOR_WINS", "CHALLENGERS_WIN", "DRAW", "UNRESOLVABLE"],
