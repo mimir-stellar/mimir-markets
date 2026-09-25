@@ -1116,7 +1116,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run dev`                                | Next.js dev server                                                                 |
 | `npm run build` / `npm start`                | Production build / serve                                                           |
 | `npm run typecheck`                          | `tsc --noEmit` across app, workers and scripts                                     |
-| `npm run check:terms`                        | Forbidden-terms lint (keeps pre-Stellar chain names and bespoke-402 residue out)   |
+| `npm run lint` / `npm run check:terms`       | Forbidden-terms lint (keeps pre-Stellar chain names and bespoke-402 residue out)   |
 | `npm run test:contracts`                     | `cargo test --release` over `contracts-soroban`                                     |
 | `npm run workers`                            | Run all agent workers in parallel (Railway entry point: oracle + market-creator + council + sync + traders) |
 | `npm run oracle`                             | Run only the oracle (settler; optionally `AUTO_CHALLENGE=1`)                       |
@@ -1141,7 +1141,9 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run smoke:x402` / `:http`               | Payment-scheme smoke against live Testnet / a full HTTP round trip                 |
 | `npm run load:x402`                          | Offline load test: fixture verification + settle/replay limits                      |
 | `npm run load:rate-limit`                    | Offline load test: the API rate limiter under mixed traffic                         |
-| `npm run test:smoke`                         | Node-native smoke tests (API validation, XMTP, db-index, etc.)                     |
+| `npm run test:node`                          | Full Node test suite with a versioned compile cache and process isolation           |
+| `npm run test:node:coverage`                 | Full Node suite plus a fresh LCOV report at `coverage/node/node-tests.lcov`         |
+| `npm run test:smoke`                         | Backwards-compatible alias for the Node test runner                                |
 | `npm run test:research`                      | Research adapters, categories, SSRF guard, x402 discovery suites                   |
 | `npm run test:baskets`                       | Basket validation, virtual NAV and high-water fee suites                           |
 | `npm run test:squad`                         | Squad view and pool suites                                                         |
@@ -1150,6 +1152,33 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run)                                                  |
 | `npx tsx scripts/demo-full-cycle.ts`         | Full create -> challenge -> settle demo in ~90s                                    |
 | `npx tsx scripts/check-claim.ts <id>`        | Print a claim's state and deadline                                                 |
+
+### Node test workflow
+
+`npm run test:node` is the release-safe full Node suite. It discovers every
+`tests/node/*.test.ts` file, keeps Node's process-per-file isolation, and uses a
+compile-only cache under `.cache/node-tests`. The cache is keyed by Node,
+`package-lock.json`, `tsx`, and the runner; test outcomes are never cached. Use
+`npm run test:node -- --no-cache` to force a clean compilation or
+`-- --clear-cache` to remove the selected cache before a run.
+
+The child test environment is an explicit allowlist. It does not load
+`.env.local` or pass production seeds, RPC credentials, LLM keys, or other
+secrets. Database-backed tests remain skipped by default; use
+`npm run test:node -- --with-db` only with an isolated test database and local
+credentials. This workflow does not write to Stellar, Neon, or any deployment.
+
+`npm run test:node:coverage` runs the same complete suite with fresh spec and
+LCOV reporters. A passing run publishes `coverage/node/node-tests.lcov`; a
+failing run publishes `coverage/node/node-tests.failed.lcov` and exits nonzero.
+CI uploads the report on success or failure, including on a cache miss. The
+report contains source paths and coverage data, not environment values or test
+secrets. Neither `--test-isolation=none` nor result reruns are part of the
+release command.
+
+For a local cache reset, remove `.cache/node-tests`. A rollback is limited to
+reverting the runner, package scripts, and CI cache/artifact steps; it does not
+require a contract migration, chain action, or deployment rollback.
 
 ---
 
