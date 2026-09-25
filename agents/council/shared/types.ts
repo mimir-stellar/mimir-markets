@@ -94,11 +94,24 @@ export interface PersonaRunnerContext {
   peerReasoning?:   Map<string, string[]>;
 }
 
+/**
+ * Represents a cached piece of evidence associated with a claim.
+ *
+ * Includes an integrity check mechanism via SHA-256 hashing to ensure
+ * the cached text has not been tampered with or corrupted since caching.
+ * This supports the "evidence-cache integrity check" feature requirement,
+ * ensuring contract-first, privacy-safe behavior at this boundary.
+ */
 export interface EvidenceCacheEntry {
   text:    string;
   fetcher: string;
-  /** SHA-256 of the text, bare hex. */
+  /** SHA-256 of the text, bare hex. Used for integrity verification. */
   hash:    string;
+  /**
+   * Optional timestamp of when this evidence was cached.
+   * Used to determine staleness if needed in future iterations.
+   */
+  cachedAt?: number;
 }
 
 /**

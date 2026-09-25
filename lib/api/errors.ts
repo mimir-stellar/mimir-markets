@@ -37,7 +37,13 @@ export type ApiErrorCode =
   | "budget_exhausted"
   // ── 5xx and upstream ──
   | "upstream_unavailable"
-  | "internal_error";
+  | "internal_error"
+  // ── Evidence Cache Integrity ──
+  | "evidence_cache_integrity_violation"
+  | "evidence_cache_stale"
+  | "evidence_cache_duplicate"
+  | "evidence_cache_cancelled"
+  | "evidence_cache_dependency_failure";
 
 interface ErrorSpec {
   status: number;
@@ -78,6 +84,24 @@ const SPECS: Record<ApiErrorCode, ErrorSpec> = {
 
   upstream_unavailable: { status: 503, retryable: true, retryAfterSeconds: 30 },
   internal_error: { status: 500, retryable: true, retryAfterSeconds: 5 },
+
+  // Evidence Cache Integrity Checks
+  // Integrity violations are critical data consistency errors. Retrying the
+  // exact same payload will not fix the underlying state corruption or mismatch.
+  evidence_cache_integrity_violation: { status: 400, retryable: false },
+  // Stale evidence indicates the cache entry is older than the allowed window.
+  // The agent must fetch fresh data. Retrying with the same stale data is useless.
+  evidence_cache_stale: { status: 400, retryable: false },
+  // Duplicate evidence suggests a replay attack or logic error in the agent.
+  // This is a hard failure for the current operation.
+  evidence_cache_duplicate: { status: 409, retryable: false },
+  // Cancelled evidence means the underlying contract or request was cancelled.
+  // No amount of retrying will revive a cancelled operation.
+  evidence_cache_cancelled: { status: 400, retryable: false },
+  // Dependency failure means a prerequisite check failed (e.g. wallet balance).
+  // This is a transient state that might resolve, but usually requires external
+  // action. We mark it retryable with a backoff to allow for async resolution.
+  evidence_cache_dependency_failure: { status: 400, retryable: true, retryAfterSeconds: 10 },
 };
 
 export interface ApiError extends ApiErrorShape {

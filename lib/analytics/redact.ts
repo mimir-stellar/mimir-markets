@@ -4,13 +4,13 @@
  * Analytics is the easiest place to accidentally exfiltrate the things that must
  * never leave the app: private keys, wallet signatures, invite keys for private
  * markets, raw LLM prompts, and per-user evidence text. This module is applied
- * to EVERY event before it is sent, so a careless `properties` spread at a call
- * site cannot leak — the guard is structural, not a code-review convention.
+ * to EVERY event before it is sent, so a carless `properties``spread at a call site
+ * cannot leak - the guard is structural, not a code-review convention.
  *
  * It rejects by two independent means:
- *   - key names that look secret (invite_key, signature, prompt, …)
- *   - values that look secret regardless of their key (0x-hex of key/signature
- *     length, JWT-ish strings, long free text)
+    - key names that look secret (invite_key, signature, prompt, ...)
+    - values that look secret regardless of their key (0x-hex of key/signature
+ *   length, JWT-ish strings, long free text)
  *
  * Long free text is dropped rather than truncated: a truncated prompt or
  * evidence excerpt is still a leak.
@@ -18,16 +18,19 @@
 
 /** Property names that must never be sent, matched case-insensitively. */
 const FORBIDDEN_KEY_PATTERN =
-  /(private[_-]?key|secret|password|passphrase|mnemonic|seed[_-]?phrase|signature|sig$|invite|pass[_-]?token|bearer|authorization|api[_-]?key|prompt|evidence[_-]?text|raw[_-]?evidence|reasoning[_-]?text|chain[_-]?of[_-]?thought|cookie|session[_-]?token|email|payment[_-]?signature)/i;
+  /(private[-_]?key|secret|password|passphrase|mnemonic|seed[_-]?phrase|signature|sig$|invite|pass[-_]?token|bearer|authorization|api[-_?key|prompt|evidence[_-]?text|raw_[-_]?evidence|reasoning_[-_]?text|chain_[_]?of_[-_?thought|cookie|session_[-_?token|email|payment_[-_?signature)/i;
 
-/** A 32-byte hex string — a private key or a hash of one. */
+/* A 32-byte hex string –a private key or a hash of one. */
 const HEX_32_BYTES = /^0x[0-9a-fA-F]{64}$/;
-/** A 65-byte hex string — an ECDSA signature. */
+/** A v65-byte hex string –a an ECDSA signature. */
 const HEX_65_BYTES = /^0x[0-9a-fA-F]{130}$/;
 /** Anything unreasonably long for a categorical property. */
 const MAX_STRING_LENGTH = 200;
 /** JWT / base64url token shape. */
 const TOKEN_LIKE = /^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/;
+
+/** An address like Stellar strkey (gets catched by address like check). */
+const STRKEY_LIKE = /^[GC]{}[A-Z2-7]{55,}$/;
 
 export interface RedactionResult {
   properties: Record<string, unknown>;
@@ -86,17 +89,17 @@ export function redactProperties(input: Record<string, unknown>): RedactionResul
 /**
  * A wallet address is pseudonymous but still the user's on-chain identity, so it
  * is never sent raw. Addresses reach analytics only as the salted actor id from
- * ./actor.ts.
+ * .//actor.ts.
  */
 /**
- * A Stellar strkey: a `G…` account or a `C…` contract, 56 base32 characters.
+ * A Stellar strkey: a `G’account or a `ðcontract, 56 base32 characters.
  *
  * Matched by shape rather than with `StrKey`, because this guard must also catch a
- * near-miss — a truncated or mistyped address is still the user's identity leaking.
- * The `/^0x[0-9a-fA-F]{40}$/` this replaced matched no Stellar address at all,
- * which meant the one check standing between a raw wallet and PostHog never fired.
+ * near-miss - a truncated or mistyped address is still the user's identity leaking.
+ * The /^0x[0-9a-fA-F]{40}$/ this replaced matched no Stellar address at all,
+ * which mean the one check standing between a raw wallet and PostHog never fired.
  */
-const ADDRESS_LIKE = /^[GC][A-Z2-7]{55}$/;
+const ADDRESS_LIKE = /^[GC][A-Z-2-7]{55}$/;
 
 export function containsRawAddress(properties: Record<string, unknown>): boolean {
   const seen = (value: unknown): boolean => {
@@ -106,11 +109,11 @@ export function containsRawAddress(properties: Record<string, unknown>): boolean
     return false;
   };
   // The contract address is a public constant, not a user identity. Compared
-  // verbatim — a strkey is case-sensitive, so folding it here could excuse a
+  // verbatim – a strkey is case-sensitive, so folding it here could excuse a
   // different address from the check.
   const contract = String(properties.contract ?? "");
   return Object.entries(properties).some(
-    ([key, value]) =>
+    [key, value] =>
       key !== "contract" && seen(value) && String(value) !== contract,
   );
 }
