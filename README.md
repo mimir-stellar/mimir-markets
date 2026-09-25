@@ -68,6 +68,7 @@ guidance is in [`docs/LEDGER_REPLAY.md`](docs/LEDGER_REPLAY.md).
 - [Production deploy (Vercel + Railway)](#production-deploy-vercel--railway)
 - [Configuration reference](#configuration-reference)
 - [Scripts](#scripts)
+- [Running tests & coverage](#running-tests--coverage)
 - [Game modes roadmap](#game-modes-roadmap)
 - [Design principles](#design-principles)
 - [License](#license)
@@ -1186,6 +1187,62 @@ These show up in PR review and shape what we accept:
 7. **Refund the ambiguous.** `Draw` and `Unresolvable` are first-class verdicts that return stakes. Better to be inconclusive and refund than to be wrong and pay out.
 8. **A pull is not a worse push.** Challenger settlement, parked payouts and accrued fees are all collected by their owner, because a transaction's ledger-entry footprint cannot fit 100 payouts and because one frozen trustline must not be able to fail everyone else's settlement. Nothing expires, and the last claimant absorbs the dust.
 9. **Strkeys are compared exactly.** `G…`/`C…` addresses are case-sensitive base32. Never lowercase one to normalise it — that is the EVM reflex, and in an allowlist written the wrong way round it fails open.
+
+---
+
+## Running tests & coverage
+
+Mimir's money-moving paths are gated by a coverage step that runs in CI and locally without any production secrets.
+
+### Quick start
+
+```sh
+# Run all node tests (same as CI test:smoke)
+npm run test:smoke
+
+# Run the coverage-gated subset and print a summary
+npm run test:coverage
+
+# If PASS_SECRET is not set in your environment, set any non-empty value:
+PASS_SECRET=test npm run test:coverage
+```
+
+`DATABASE_URL` is **not required** — `lib/paid-revenue.ts` falls back to an in-memory ring buffer when the variable is unset, which is the default test path.
+
+### Covered modules and thresholds
+
+`npm run test:coverage` enforces the following minimums via [c8](https://github.com/bcoe/c8) on each of the 8 money-moving modules:
+
+| Module | Lines | Branches |
+|---|---|---|
+| `lib/fees.ts` | 80% | 70% |
+| `lib/payout.ts` | 80% | 70% |
+| `lib/money.ts` | 80% | 70% |
+| `lib/paid-pass.ts` | 80% | 70% |
+| `lib/paid-revenue.ts` | 80% | 70% |
+| `lib/x402/buyer.ts` | 80% | 70% |
+| `lib/agents/registry.ts` | 80% | 70% |
+| `lib/agents/spend-permissions.ts` | 80% | 70% |
+
+Thresholds are declared in `.c8rc` at the workspace root. The step fails the build when any threshold is breached.
+
+### Test suites
+
+New test files covering the previously-untested modules live in `tests/node/`:
+
+- `money.test.ts` — `formatUsdc` / `formatUsdcBare` edge cases
+- `paid-pass.test.ts` — HMAC round-trip, expiry, tamper detection
+- `paid-revenue.test.ts` — in-memory ledger idempotency, ring-buffer eviction, aggregation
+- `x402-buyer.test.ts` — kill-switch fail-closed, `PaymentBudgetExceeded` properties
+
+All tests use the Node built-in test runner (`node --test`). No additional test framework is required.
+
+### When to update this section
+
+Update this section in the same PR if you:
+- add a new environment variable that the `test:coverage` step requires
+- rename or remove the `npm run test:coverage` command
+- add, remove, or reorder steps in `.github/workflows/ci.yml`
 
 ---
 
