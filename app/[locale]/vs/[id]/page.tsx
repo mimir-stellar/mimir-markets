@@ -49,6 +49,7 @@ import { idempotencyKey } from "@/lib/analytics/events";
 import { stakeBucket } from "@/lib/analytics/useMarketAnalytics";
 import ReasoningFeed from "@/components/vs/ReasoningFeed";
 import { acquireTxLock } from "@/lib/tx-lock";
+import { evaluateUsdcTrustlineGate } from "@/lib/usdcTrustlineGate";
 import {
   MIN_STAKE,
   ZERO_ADDRESS,
@@ -80,7 +81,10 @@ import ResolutionTerminal from "@/components/ResolutionTerminal";
 import { ShareMarket } from "@/components/vs/ShareMarket";
 import { ProfileLink } from "@/components/ui/AddressChip";
 import ClaimPayoutCard from "@/components/vs/ClaimPayoutCard";
-import { UsdcTrustlineGate } from "@/components/wallet/UsdcTrustlineGate";
+import {
+  UsdcTrustlineGate,
+  useUsdcTrustline,
+} from "@/components/wallet/UsdcTrustlineGate";
 import VsXmtpPanel from "@/components/xmtp/VsXmtpPanel";
 import CouncilVoteWidget from "@/components/council/CouncilVoteWidget";
 import Stage from "@/components/Stage";
@@ -746,7 +750,9 @@ export default function VSDetailPage() {
   const isSampleVS = vsId < 0 && !!SAMPLE_VS[vsId];
   const inviteFromUrl = searchParams.get("invite")?.trim() ?? "";
   const { address, isConnected, connect, signer } = useWallet();
+  const trustline = useUsdcTrustline();
   const t = useTranslations("vsDetail");
+  const tWallet = useTranslations("wallet");
   const tc = useTranslations("common");
   const tStamp = useTranslations("stamp");
   const tBadges = useTranslations("badges");
@@ -1029,6 +1035,14 @@ export default function VSDetailPage() {
     !missingPrivateInvite &&
     isVSJoinable(vs, address) &&
     isConnected;
+  const acceptTrustlineGate = evaluateUsdcTrustlineGate({
+    action: "accept",
+    status: trustline.status,
+    loading: trustline.loading,
+    stale: trustline.stale,
+    isConnected,
+    hasSigner: Boolean(signer),
+  });
   const canCancel = !isSampleVS && vs.state === "open" && isCreator;
   const hasWinner = hasVSWinner(display);
   const creatorRequestedResolve = Boolean(display.creator_requested_resolve);
@@ -1194,6 +1208,10 @@ export default function VSDetailPage() {
       toast.error(t("invalidChallengeStakeMin", { amount: MIN_STAKE }));
       return;
     }
+    if (!acceptTrustlineGate.allowed) {
+      toast.error(tWallet(acceptTrustlineGate.messageKey));
+      return;
+    }
 
     await withTxLock(async (wallet) => {
     flushSync(() => {
@@ -1206,12 +1224,12 @@ export default function VSDetailPage() {
       });
 
       if (!liveVS) {
-        setVS(null);
+        void fetchVS();
         toast.error(t("notFound"));
         return;
       }
 
-      setVS(liveVS);
+      void fetchVS();
 
       if (!isVSJoinable(liveVS, address)) {
         toast.error(t("challengeUnavailable"));
@@ -1897,7 +1915,7 @@ export default function VSDetailPage() {
               {/* A brand-new Stellar account cannot hold USDC until it trusts the
                   issuer, so the first-ever stake needs this once. Renders nothing
                   for an account that is already set up. */}
-              {canAccept && <UsdcTrustlineGate />}
+              {canAccept && <UsdcTrustlineGate trustline={trustline} />}
 
               {canAccept && (
                 <GlassCard glass className="!rounded-2xl border border-pv-ink/[0.12]">
@@ -1915,7 +1933,7 @@ export default function VSDetailPage() {
                         variant="fuch"
                         onClick={handleAccept}
                         loading={actionLoading === "accept"}
-                        disabled={!hasValidChallengeStake}
+                        disabled={!hasValidChallengeStake || !acceptTrustlineGate.allowed}
                         className="h-[3.25rem] w-full"
                       >
                         {actionLoading === "accept"

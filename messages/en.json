@@ -1046,7 +1046,21 @@
     "withdrawSuccess": "Withdrew {amount} USDC.",
     "claimFeesSuccess": "Claimed {amount} USDC in fees.",
     "loadFailed": "Could not read your balances. Try again in a moment.",
-    "cannotSign": "This wallet cannot sign transactions. Reconnect it and try again."
+    "cannotSign": "This wallet cannot sign transactions. Reconnect it and try again.",
+    "connectWalletFirst": "Connect a Stellar wallet before continuing.",
+    "trustlineChecking": "Checking your USDC trustline...",
+    "trustlineStale": "Your wallet changed while the USDC trustline was being checked. Check it again before continuing.",
+    "trustlineRetry": "Check again",
+    "trustlineCheckFailedTitle": "Could not check USDC trustline",
+    "trustlineCheckFailedHint": "Mimir could not verify the Stellar network right now. Try again before signing.",
+    "trustlineUnfundedTitle": "Account not funded",
+    "trustlineUnfunded": "Fund this Stellar account with XLM before adding a USDC trustline.",
+    "trustlineUnfundedHint": "This wallet has no account on the Stellar ledger yet. Add a little XLM before it can hold USDC or sign anything.",
+    "trustlineMissingTitle": "One-time setup",
+    "trustlineMissingHint": "Stellar accounts hold an asset only after they trust its issuer. Add the USDC trustline once before your first stake.",
+    "trustlineAdd": "Add USDC trustline",
+    "trustlineAdding": "Confirm in wallet...",
+    "trustlineRejected": "Trustline signature rejected in your wallet."
   },
   "categories": {
     "sports": "Sports",
