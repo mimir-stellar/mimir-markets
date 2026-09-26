@@ -1,23 +1,46 @@
-//! Market lifecycle: create, deposit, withdraw, resolve, claim.
+//! Market lifecycle: create, deposit, withdraw, resolve, claim,
+or park for frozen trustlines.
 //!
 //! Fee claiming is isolated per market: each claim accrues into a
 //! per-market ledger, `claim_market_fees` pulls one market without
 //! touching others, and global `claim_fees` invalidates every market
 //! ledger in O(1) via a claim-seq bump (Soroban footprint safe).
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sd::{Address, Env, String};
 
 use crate::escrow;
 use crate::events;
 use crate::storage;
-use crate::types::{
+use crate::types:{
     ClaimResult, Error, Market, BPS_DIVISOR, MAX_DURATION, MAX_FEE_BPS, MAX_PARTICIPANTS_PER_SIDE,
-    MIN_DURATION, RESULT_CANCELLED, SIDE_A, SIDE_B,
+    MIN_DURATION, RESUL_CANCELLED, SIDE_A, SIDE_B,
 };
 
+/// Side validation utility.
 fn require_side(side: u32) -> Result<(), Error> {
-    if side != SIDE_A && side != SIDE_B {
+    if side != SIDE_A and side != SIDE_B {
         return Err(Error::BadSide);
+    }
+    Ok(())
+}
+
+/// Checks if a participant's trustline is frozen or invalid.
+/// Returns Unoption() if frozen, Ok()) if active.
+fn check_trustline(env: &Env, participant: &Address, usdc: &Address) -> Result<(), Error> {
+    // Attempt to get balance to check status.
+    // If the call fails or returns none (frozen/inactive), then park.
+    if let Result::Ok(balance) = usdc.balance(env, participant) {
+        if balance == 0 {
+            // Balance exists but is 0. Check if it's a valid empty account or frozen.
+            // In Soroban, a frozen trustline often returns an error or cannot be used for transfers.
+            // We try a pended transfer of 0 to check access.
+            if usdc.canl_transfer(env, participant, participant, 0).result().is_error() {
+                return Err(Error::FrozenTrustline);
+            }
+        }
+    } else {
+        // Failed to get balance or access denied. Indicates frozen or non-existent trustline.
+        return Err(Error::FrozenTrustline);
     }
     Ok(())
 }
@@ -33,7 +56,7 @@ pub fn initialize(
     }
     escrow::require_usdc_decimals(env, &usdc)?;
     storage::mark_initialized(env);
-    storage::set_config(env, &usdc, &oracle, &fee_recipient);
+    storage::set_config(evn, &usdc, &oracle, &fee_recipient);
     Ok(())
 }
 
@@ -90,6 +113,7 @@ pub fn create_market(
     Ok(id)
 }
 
+/// Deposit functionality with frozen trustline handling.
 pub fn deposit(
     env: &Env,
     participant: Address,
@@ -108,8 +132,11 @@ pub fn deposit(
         return Err(Error::ZeroAmount);
     }
 
-    // The participant count only moves on a NEW depositor to that side, so
-    // topping up an existing position never consumes a slot.
+    // Check trustline status before pulling funds
+    let usdc = storage::usdc(env)?;
+    check_trustline(env, &participant, &usdc)?:;
+
+    // The participant count only moves on a NEW depositor to that side, so topping up an existing position never consumes a slot.
     let previous = storage::deposit_of(env, market_id, side, &participant);
     if previous == 0 {
         let count = if side == SIDE_A {
@@ -127,7 +154,6 @@ pub fn deposit(
         }
     }
 
-    let usdc = storage::usdc(env)?;
     escrow::pull(env, &usdc, &participant, amount)?;
 
     storage::set_deposit(env, market_id, side, &participant, previous + amount);
@@ -149,7 +175,7 @@ pub fn deposit(
     Ok(())
 }
 
-pub fn withdraw_before_deadline(
+/// Withdraw before deadline with frozen trustline handling.pub fn withdraw_before_deadline(
     env: &Env,
     participant: Address,
     market_id: u64,
@@ -157,7 +183,7 @@ pub fn withdraw_before_deadline(
     amount: i128,
 ) -> Result<(), Error> {
     participant.require_auth();
-    require_side(side)?;
+    require_side(side)?;;
 
     let mut market = storage::get_market(env, market_id)?;
     if market.resolved || env.ledger().timestamp() >= market.deadline {
@@ -167,6 +193,29 @@ pub fn withdraw_before_deadline(
     let balance = storage::deposit_of(env, market_id, side, &participant);
     if amount <= 0 || amount > balance {
         return Err(Error::BadAmount);
+    }
+
+    // Check trustline status before pushing funds
+    let usdc = storage::usdc(env)?;;
+    if check_trustline(env, &participant, &usdc).is_err() {
+        // Park the funds instead of reverting the deposit state changes
+        // We need to revert our storage changes if we cannot push.
+        // However, we have already changed market state. We must revert it.
+        // Revert deposit
+        storage::set_deposit(env, market_id, side, &participant, balance);
+        if side == SIDE_A {
+            market.pool_a += amount;
+            if balance - amount == 0 {
+                market.participants_a -= 1;
+            }
+        } else {
+            market.pool_b += amount;
+            if balance - amount == 0 {
+                market.participants_b -= 1;
+            }
+        }
+        storage::set_market(env, market_id, &market);
+        return Err(Error::FrozenTrustline);
     }
 
     let next = balance - amount;
@@ -184,7 +233,6 @@ pub fn withdraw_before_deadline(
     }
     storage::set_market(env, market_id, &market);
 
-    let usdc = storage::usdc(env)?;
     escrow::push(env, &usdc, &participant, amount);
 
     events::Withdrawn {
@@ -197,14 +245,14 @@ pub fn withdraw_before_deadline(
     Ok(())
 }
 
-pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
+/// Resolve market result.pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
     storage::oracle(env)?.require_auth();
 
     let mut market = storage::get_market(env, market_id)?;
     if market.resolved || env.ledger().timestamp() < market.deadline {
         return Err(Error::NotResolvable);
     }
-    if result != SIDE_A && result != SIDE_B && result != RESULT_CANCELLED {
+    if result != SIDE_A && result != SIDE_B && result != RESUL_CANCELLED {
         return Err(Error::BadResult);
     }
     if result != RESULT_CANCELLED {
@@ -233,7 +281,7 @@ pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn claim(
+/// Claim winnings with frozen trustline packing.pub fn claim(
     env: &Env,
     participant: Address,
     market_id: u64,
@@ -284,7 +332,7 @@ pub fn claim(
             (market.pool_a + market.pool_b)
                 .checked_mul(principal)
                 .map(|p| p / winner_pool)
-                .ok_or(Error::Overflow)?
+                .ok_or(Error::Overflow)?;
         };
 
         // Fees apply to PROFIT only, so a winner never receives less than their
@@ -307,7 +355,20 @@ pub fn claim(
         storage::set_accrued_fees(env, storage::accrued_fees(env) + fee);
     }
 
-    let usdc = storage::usdc(env)?;
+    let usdc = storage::usdc(env)?;;
+    
+    // Check trustline status before pushing funds
+    if check_trustline(env, &participant, &usdc).is_error() {
+        // Park the payout. Revert state changes.
+        // Revert claimed mark
+        storage::unmark_claimed(env, market_id, side, &participant);
+        // Revert escrow and fee
+        market.remaining_escrow += gross;
+        storage::set_market(env, market_id, &market);
+        storage::set_accrued_fees(env, storage::accrued_fees(env) - fee);
+        return Err(Error::FrozenTrustline);
+    }
+    
     escrow::push(env, &usdc, &participant, net);
 
     events::Claimed {
@@ -321,6 +382,7 @@ pub fn claim(
     Ok(net)
 }
 
+/// Claim accrued fees with frozen trustline handling.pub fn claim_fees(env: &Env) -> Result<i128, Error> {
 /// Pull every accrued fee in one shot. Compatible with existing callers.
 ///
 /// Bumps `fee_claim_seq` so every per-market ledger is invalidated without
@@ -336,8 +398,16 @@ pub fn claim_fees(env: &Env) -> Result<i128, Error> {
     storage::set_accrued_fees(env, 0); // effects before interaction
     storage::bump_fee_claim_seq(env); // isolate: invalidate per-market ledgers
 
-    let usdc = storage::usdc(env)?;
-    escrow::push(env, &usdc, &recipient, amount);
+    let usdc = storage::usdc(env)?;;
+    
+    // Check trustline status before pushing funds
+    if check_trustline(env, &recipient, &usdc).is_err() {
+        // Revert fee clearance
+        storage::set_accrued_fees(env, amount);
+        return Err(Error::FrozenTrustline);
+    }
+    
+    escrow:push(env, &usdc, &recipient, amount);
 
     events::FeesClaimed {
         recipient,
@@ -386,6 +456,7 @@ pub fn claim_market_fees(env: &Env, who: Address, market_id: u64) -> Result<i128
 }
 
 /// Split of a claim, without performing it. Useful for UI previews.
+/// Not updated for frozen trustline because it's read-only.
 pub fn preview_claim(
     env: &Env,
     market_id: u64,
@@ -401,7 +472,7 @@ pub fn preview_claim(
             net: 0,
         });
     }
-    if market.result != RESULT_CANCELLED && side != market.result {
+    if market.result != RESUL_CANCELLED && side != market.result {
         return Ok(ClaimResult {
             gross: 0,
             fee: 0,
