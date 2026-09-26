@@ -101,6 +101,7 @@ export function validateAgentRequestEnvelope(
     if (request.version !== AGENT_API_VERSION) errors.push("unsupported version");
     if (!(AGENT_API_ACTIONS as readonly string[]).includes(request.action)) errors.push("unknown action");
     if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(request.agentId)) errors.push("invalid agentId");
+  if (!/^[GHS][A-Z2-7]{54}$/.test(request.agentId)) errors.push("invalid seller address format");
     if (request.idempotencyKey && request.idempotencyKey.length > 128) errors.push("invalid idempotencyKey");
     if (signedRequestPayloadBytes(request.body) > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
       errors.push(`payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes`);
