@@ -81,9 +81,10 @@ function sortOpportunities(
   const next = [...opportunities];
 
   if (sort === "expiring") {
-    return next.sort(
-      (a, b) => getOpportunityDeadlineValue(a) - getOpportunityDeadlineValue(b)
-    );
+    return next.sort((a, b) => {
+      const diff = getOpportunityDeadlineValue(a) - getOpportunityDeadlineValue(b);
+      return diff !== 0 ? diff : String(b.id).localeCompare(String(a.id));
+    });
   }
 
   if (sort === "strength" || sort === "highest") {
@@ -91,11 +92,12 @@ function sortOpportunities(
       if (b.candidate.confidenceScore !== a.candidate.confidenceScore) {
         return b.candidate.confidenceScore - a.candidate.confidenceScore;
       }
-      return b.claimStrengthScore - a.claimStrengthScore;
+      const diff = b.claimStrengthScore - a.claimStrengthScore;
+      return diff !== 0 ? diff : String(b.id).localeCompare(String(a.id));
     });
   }
 
-  return next;
+  return next.sort((a, b) => String(b.id).localeCompare(String(a.id)));
 }
 
 function IntelligenceDossierSkeleton() {

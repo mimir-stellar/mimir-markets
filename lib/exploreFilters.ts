@@ -155,11 +155,20 @@ export function applyExploreFilters(
 
   const sorted = [...list];
   if (f.sort === "highest") {
-    sorted.sort((a, b) => b.stake_amount - a.stake_amount);
+    sorted.sort((a, b) => {
+      const diff = b.stake_amount - a.stake_amount;
+      return diff !== 0 ? diff : b.id - a.id;
+    });
   } else if (f.sort === "expiring") {
-    sorted.sort((a, b) => a.deadline - b.deadline);
+    sorted.sort((a, b) => {
+      const diff = a.deadline - b.deadline;
+      return diff !== 0 ? diff : b.id - a.id;
+    });
   } else if (f.sort === "upside") {
-    sorted.sort((a, b) => compareByUpside(a, b));
+    sorted.sort((a, b) => {
+      const diff = compareByUpside(a, b);
+      return diff !== 0 ? diff : b.id - a.id;
+    });
   } else if (f.sort === "strength") {
     sorted.sort((a, b) => {
       const aScore = computeClaimQuality({
