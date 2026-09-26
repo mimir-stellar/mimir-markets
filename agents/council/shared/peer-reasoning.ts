@@ -9,6 +9,9 @@
 import { fetchWithBudget, payingWalletFor, type PayingWallet } from "../../../lib/x402/buyer";
 import { getCouncilWallet } from "../../../lib/agent-wallets";
 import { usdcToUnits } from "../../../lib/usdc";
+import { makeLogger } from "../../../lib/logger";
+
+const log = makeLogger("council");
 import {
   type PersonaSpec,
   personaSecretEnv,
@@ -106,10 +109,7 @@ export async function buyPeerReasoning(args: {
         remainingUnits -= result.payment.priceUnits;
       }
     } catch (err) {
-      console.warn(
-        `[council:${args.buyer.slug}] peer read failed from ${seller.slug}:`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn("Peer read failed", { buyerSlug: args.buyer.slug, sellerSlug: seller.slug, err });
     }
 
     if (args.delayMs > 0) {

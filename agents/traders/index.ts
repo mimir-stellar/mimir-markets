@@ -42,6 +42,9 @@ import { AUTHORITY_LEVELS, defaultLimits, REGISTRY_SCHEMA_VERSION, type AgentRec
 import { loadAgent, saveAgent } from "../../lib/agents/store";
 import { getClaimsByFilter, getChallengersByClaimId } from "../../lib/db";
 import { TRADER_PERSONAS, isTraderVerdict, shouldStake, type TraderPersona, type TraderVerdict } from "./personas";
+import { makeLogger } from "../../lib/logger";
+
+const log = makeLogger("traders");
 
 const POLL_INTERVAL_MS = Number(process.env.TRADER_POLL_INTERVAL_MS ?? "900000");
 const MAX_STAKES_PER_CYCLE = Number(process.env.TRADER_MAX_STAKES_PER_CYCLE ?? "1");
@@ -100,7 +103,7 @@ async function ensureRegistered(persona: TraderPersona, wallet: AgentWallet): Pr
     updatedAt: now,
   };
   await saveAgent(record);
-  console.log(`[traders] ${persona.emoji} registered ${persona.agentId} (${wallet.address})`);
+  log.info("Agent registered", { agentId: persona.agentId, address: wallet.address });
   return record;
 }
 
@@ -179,11 +182,11 @@ async function buyOracleOpinion(
     if (!response.ok) return null;
     const verdict = await response.json() as { verdict?: string; confidence?: number; explanation?: string };
     if (payment?.txHash) {
-      console.log(`[traders]   paid ${PRICES.oracle} for an oracle read — ${payment.txHash.slice(0, 12)}…`);
+      log.info("Oracle opinion purchased", { price: PRICES.oracle, txHash: payment.txHash.slice(0, 12) });
     }
     return `Oracle (paid ${PRICES.oracle}): ${verdict.verdict ?? "?"} at ${verdict.confidence ?? "?"}% — ${String(verdict.explanation ?? "").slice(0, 200)}`;
   } catch (err) {
-    console.warn("[traders]   oracle purchase failed:", err instanceof Error ? err.message : err);
+    log.warn("Oracle opinion purchase failed", { err });
     return null;
   }
 }
@@ -241,35 +244,36 @@ async function joinableFor(wallet: AgentWallet) {
 async function runTrader(persona: TraderPersona): Promise<void> {
   const wallet = walletFor(persona);
   if (!wallet) {
-    console.log(`[traders] ${persona.emoji} ${persona.agentId}: ${persona.keyEnv} not set, skipping`);
+    log.warn("Persona wallet key not set — skipping", { agentId: persona.agentId, keyEnv: persona.keyEnv });
     return;
   }
   await ensureRegistered(persona, wallet);
 
   const balances = await readAgentBalances(wallet.address);
-  console.log(
-    `[traders] ${persona.emoji} ${persona.displayName} · ` +
-      `${balances.exists ? `${(balances.xlm ?? 0).toFixed(4)} XLM` : "no account"} · ` +
-      `${balances.usdc === null ? "no USDC trustline" : `${balances.usdc.toFixed(2)} USDC`}`,
-  );
+  log.info("Trader status", {
+    agentId: persona.agentId,
+    xlm: balances.exists ? (balances.xlm ?? 0).toFixed(4) : "no account",
+    usdc: balances.usdc === null ? "no USDC trustline" : balances.usdc.toFixed(2),
+  });
 
-  // Three distinct "cannot trade" states on an account-model chain, and the fix
-  // differs for each — so they are reported separately rather than folded into one
-  // "insufficient balance". The old `MIN_GAS_ETH` margin is gone: an operation
-  // costs ~0.00001 XLM against a Friendbot grant of 10,000, so there is no fee
-  // budget to run down mid-cycle.
   if (!balances.exists) {
-    return void console.log(`[traders]   account does not exist — run npm run agents:fund`);
+    log.warn("Account does not exist — run npm run agents:fund", { agentId: persona.agentId });
+    return;
   }
   if (balances.usdc === null) {
-    return void console.log(`[traders]   no USDC trustline — run npm run agents:fund`);
+    log.warn("No USDC trustline — run npm run agents:fund", { agentId: persona.agentId });
+    return;
   }
   if (balances.usdc < persona.stakeUsdc) {
-    return void console.log(`[traders]   below ${persona.stakeUsdc} USDC, standing aside`);
+    log.warn("Insufficient USDC — standing aside", { agentId: persona.agentId, haveUsdc: balances.usdc.toFixed(2), needUsdc: persona.stakeUsdc });
+    return;
   }
 
   const joinable = await joinableFor(wallet);
-  if (joinable.length === 0) return void console.log(`[traders]   nothing joinable this cycle`);
+  if (joinable.length === 0) {
+    log.info("Nothing joinable this cycle", { agentId: persona.agentId });
+    return;
+  }
 
   let staked = 0;
   for (const claim of joinable) {
@@ -277,49 +281,58 @@ async function runTrader(persona: TraderPersona): Promise<void> {
     const secondOpinion = await buyOracleOpinion(wallet, claim);
     const decision = await decide(persona, claim, secondOpinion);
     const take = shouldStake(decision.verdict, decision.confidence, persona);
-    console.log(`[traders]   #${claim.id} ${decision.verdict} ${decision.confidence}% ${take ? "→ STAKE" : "→ pass"} · ${decision.reasoning.slice(0, 90)}`);
+    log.info("Decision", {
+      agentId: persona.agentId,
+      claimId: claim.id,
+      verdict: decision.verdict,
+      confidence: decision.confidence,
+      action: take ? "STAKE" : "pass",
+      reasoning: decision.reasoning.slice(0, 90),
+    });
     if (!take) continue;
     if (DRY_RUN) {
-      console.log(`[traders]   DRY_RUN — would stake ${persona.stakeUsdc} USDC on #${claim.id}`);
+      log.info("Dry run — would stake", { agentId: persona.agentId, claimId: claim.id, stakeUsdc: persona.stakeUsdc });
       staked += 1;
       continue;
     }
     try {
-      // One signature: `challenge_claim` carries auth for exactly this transfer of
-      // exactly this amount, so there is no approve leg to land first.
       const result = await challengeClaim(wallet.signer, claim.id, persona.stakeUsdc);
-      console.log(
-        `[traders]   ✓ staked ${persona.stakeUsdc} USDC on #${claim.id} — ${result.explorerUrl ?? result.txHash}`,
-      );
+      log.info("Stake confirmed", {
+        agentId: persona.agentId,
+        claimId: claim.id,
+        stakeUsdc: persona.stakeUsdc,
+        url: result.explorerUrl ?? result.txHash,
+      });
       staked += 1;
     } catch (err) {
-      // A contract error is one claim's problem, not the cycle's: keep going.
-      console.warn(`[traders]   ✗ #${claim.id} stake failed:`, err instanceof Error ? err.message : err);
+      log.warn("Stake failed", { agentId: persona.agentId, claimId: claim.id, err });
     }
   }
 }
 
 async function poll(): Promise<void> {
-  console.log(`\n[traders] ── Cycle at ${new Date().toISOString()} · ${TRADER_PERSONAS.length} traders`);
+  log.info("Cycle started", { traderCount: TRADER_PERSONAS.length });
   for (const persona of TRADER_PERSONAS) {
     try {
       await runTrader(persona);
     } catch (err) {
-      console.error(`[traders] ${persona.agentId} failed:`, err instanceof Error ? err.message : err);
+      log.error("Trader cycle failed", { agentId: persona.agentId, err });
     }
   }
 }
 
 async function main(): Promise<void> {
-  console.log("═══════════════════════════════════════════════");
-  console.log("  Mimir demo BYOA traders");
-  console.log(`  Contract   : ${requireMarketContractId()}`);
-  console.log(`  Network    : Stellar ${STELLAR_NETWORK}`);
-  console.log(`  LLM        : ${activeLLMProvider()} / ${activeLLMModel()}`);
-  console.log(`  Traders    : ${TRADER_PERSONAS.map((p) => p.agentId).join(", ")}`);
-  console.log(`  Stake      : ${TRADER_PERSONAS[0].stakeUsdc} USDC · max ${MAX_STAKES_PER_CYCLE}/cycle each`);
-  console.log(`  Poll every : ${POLL_INTERVAL_MS / 1000}s${DRY_RUN ? " · DRY RUN" : ""}`);
-  console.log("═══════════════════════════════════════════════\n");
+  log.banner([
+    "═══════════════════════════════════════════════",
+    "  Mimir demo BYOA traders",
+    `  Contract   : ${requireMarketContractId()}`,
+    `  Network    : Stellar ${STELLAR_NETWORK}`,
+    `  LLM        : ${activeLLMProvider()} / ${activeLLMModel()}`,
+    `  Traders    : ${TRADER_PERSONAS.map((p) => p.agentId).join(", ")}`,
+    `  Stake      : ${TRADER_PERSONAS[0].stakeUsdc} USDC · max ${MAX_STAKES_PER_CYCLE}/cycle each`,
+    `  Poll every : ${POLL_INTERVAL_MS / 1000}s${DRY_RUN ? " · DRY RUN" : ""}`,
+    "═══════════════════════════════════════════════",
+  ].join("\n"));
 
   void randomUUID; // reserved for per-cycle correlation ids
   const safePoll = () => reportingPoll("traders", "traders", POLL_INTERVAL_MS / 1000, poll);
@@ -328,6 +341,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[traders] Fatal:", err);
+  log.error("Fatal error", { err });
   process.exit(1);
 });

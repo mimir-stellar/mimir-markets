@@ -35,6 +35,9 @@ import type {
   PersonaRunnerContext,
   PersonaStakeReceipt,
 } from "./types";
+import { makeLogger } from "../../../lib/logger";
+
+const log = makeLogger("council");
 
 const DEFAULT_MIN_CONFIDENCE = 75;
 const DEFAULT_STAKE_USDC     = 2;
@@ -172,9 +175,11 @@ export async function runPersonaForClaim(
   ctx: PersonaRunnerContext,
 ): Promise<PersonaStakeReceipt | null> {
   if (!process.env[personaSecretEnv(persona)]) {
-    console.warn(
-      `[council:${persona.slug}] missing ${personaSecretEnv(persona)} — run "npm run agents:create-wallets" first.`,
-    );
+    log.warn("Persona missing wallet key — skipping", {
+      slug: persona.slug,
+      envKey: personaSecretEnv(persona),
+      hint: "Run npm run agents:create-wallets first",
+    });
     return null;
   }
   const wallet = getCouncilWallet(persona.slug);
@@ -199,13 +204,11 @@ export async function runPersonaForClaim(
   const balances = await readAgentBalances(address);
   const baseStakeUsdc = persona.stakeUsdc ?? DEFAULT_STAKE_USDC;
   if (balances.usdc === null) {
-    console.log(`[council:${persona.slug}] no USDC trustline — run "npm run agents:fund"`);
+    log.warn("Persona has no USDC trustline — run npm run agents:fund", { slug: persona.slug });
     return null;
   }
   if (balances.usdc < baseStakeUsdc * 2) {
-    console.log(
-      `[council:${persona.slug}] insufficient USDC (${balances.usdc.toFixed(2)}), skipping`,
-    );
+    log.warn("Persona has insufficient USDC — skipping", { slug: persona.slug, haveUsdc: balances.usdc.toFixed(2), needUsdc: baseStakeUsdc * 2 });
     return null;
   }
 
@@ -233,10 +236,13 @@ export async function runPersonaForClaim(
   const staked = await challengeClaim(wallet.signer, claim.id, stakeUsdc);
   const txHash = staked.txHash;
 
-  console.log(
-    `[council:${persona.slug}] ✓ Staked ${stakeUsdc} USDC on claim #${claim.id} — ${staked.explorerUrl ?? txHash}`,
-  );
-  console.log(`[council:${persona.slug}]   ${decision.rationale.slice(0, 160)}`);
+  log.info("Persona stake confirmed", {
+    slug: persona.slug,
+    claimId: claim.id,
+    stakeUsdc,
+    url: staked.explorerUrl ?? txHash,
+    rationale: decision.rationale.slice(0, 160),
+  });
 
   return {
     persona,

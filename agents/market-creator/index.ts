@@ -36,6 +36,7 @@ applyWorkerGeminiKey("CREATOR_GEMINI_API_KEY");
 import { requireEnv, requireAnyLLMKey, applyWorkerGeminiKey } from "../../lib/agent-bootstrap";
 import { callLLM, activeLLMProvider, activeLLMModel, activeLLMKeyFingerprint, pickGeminiModel, extractJson } from "../../lib/llm";
 import { INJECTION_GUARD, fenceUntrusted } from "../../lib/prompt-safety";
+import { makeLogger } from "../../lib/logger";
 import { fetchLaunchEvents, fetchWeatherEvents, type LaunchEvent, type WeatherEvent } from "./sources";
 import {
   cancelClaim,
@@ -114,10 +115,9 @@ function resolveFeeRecipient(): string | undefined {
     .trim();
   if (!configured) return undefined;
   if (!isAccountAddress(configured) && !isContractAddress(configured)) {
-    console.warn(
-      `[market-creator] MARKET_CREATOR_FEE_RECIPIENT "${configured}" is not a Stellar address — ` +
-        `markets will be opened with no agent-owner fee recipient.`,
-    );
+    log.warn("MARKET_CREATOR_FEE_RECIPIENT is not a valid Stellar address — markets will open with no fee recipient", {
+      configured,
+    });
     return undefined;
   }
   return configured;
@@ -134,6 +134,8 @@ const PREFLIGHT_DELAY_MS = Number(process.env.MARKET_CREATOR_PREFLIGHT_DELAY_MS 
 
 requireEnv(["CREATOR_SECRET"]);
 requireAnyLLMKey();
+
+const log = makeLogger("market-creator");
 
 // ── Clients ───────────────────────────────────────────────────────────────────
 const CREATOR        = getCreatorWallet();
@@ -301,18 +303,18 @@ function filterDuplicateCandidates(
 
     const existingSourceId = sig.resolutionUrlKey ? existingSourceKeys.get(sourceKey) : undefined;
     if (existingSourceId !== undefined) {
-      console.warn(`[market-creator] Drop duplicate candidate - same source as active claim #${existingSourceId}: ${candidate.question.slice(0, 90)}`);
+      log.warn("Dropping duplicate candidate — same source as active claim", { existingClaimId: existingSourceId, question: candidate.question.slice(0, 90) });
       return false;
     }
 
     const existingQuestionId = sig.questionKey ? existingQuestionKeys.get(questionKey) : undefined;
     if (existingQuestionId !== undefined) {
-      console.warn(`[market-creator] Drop duplicate candidate - same question as active claim #${existingQuestionId}: ${candidate.question.slice(0, 90)}`);
+      log.warn("Dropping duplicate candidate — same question as active claim", { existingClaimId: existingQuestionId, question: candidate.question.slice(0, 90) });
       return false;
     }
 
     if ((sig.resolutionUrlKey && seenSourceKeys.has(sourceKey)) || (sig.questionKey && seenQuestionKeys.has(questionKey))) {
-      console.warn(`[market-creator] Drop duplicate candidate within run: ${candidate.question.slice(0, 90)}`);
+      log.warn("Dropping duplicate candidate within run", { question: candidate.question.slice(0, 90) });
       return false;
     }
 
@@ -328,10 +330,11 @@ async function applyCouncilPreflight(candidates: ClaimCandidate[]): Promise<Clai
   }
 
   const kept: Array<{ candidate: ClaimCandidate; score: number }> = [];
-  console.log(
-    `[market-creator] Buying council preflight for ${candidates.length} candidate(s) ` +
-    `(min score ${PREFLIGHT_MIN_SCORE}, ${PREFLIGHT_DELAY_MS / 1000}s persona gap)...`,
-  );
+  log.info("Running council preflight", {
+    candidates: candidates.length,
+    minScore: PREFLIGHT_MIN_SCORE,
+    personaGapSec: PREFLIGHT_DELAY_MS / 1000,
+  });
 
   for (const candidate of candidates) {
     const result = await gatherCouncilPreflight({
@@ -342,33 +345,29 @@ async function applyCouncilPreflight(candidates: ClaimCandidate[]): Promise<Clai
       capUsdc: PREFLIGHT_CAP_USDC,
       delayMs: PREFLIGHT_DELAY_MS,
     }).catch((err) => {
-      console.warn(
-        `[market-creator] Council preflight failed for "${candidate.question.slice(0, 70)}...":`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn("Council preflight failed — keeping candidate", { question: candidate.question.slice(0, 70), err });
       return null;
     });
 
     if (!result || result.opinions.length === 0 || result.averageScore === null) {
-      console.warn(
-        `[market-creator] Council preflight unavailable; keeping candidate: ${candidate.question.slice(0, 70)}...`,
-      );
+      log.warn("Council preflight unavailable — keeping candidate", { question: candidate.question.slice(0, 70) });
       kept.push({ candidate, score: candidate.qualityScore });
       continue;
     }
 
     const paidUsdc = unitsToUsdc(result.totalPaidUnits);
     const avg = Math.round(result.averageScore);
-    console.log(
-      `[market-creator] Council preflight ${avg}/100 ` +
-      `(open=${result.openVotes}, revise=${result.reviseVotes}, skip=${result.skipVotes}, paid=${paidUsdc.toFixed(6)} USDC) ` +
-      `for "${candidate.question.slice(0, 70)}..."`,
-    );
+    log.info("Council preflight result", {
+      score: avg,
+      openVotes: result.openVotes,
+      reviseVotes: result.reviseVotes,
+      skipVotes: result.skipVotes,
+      paidUsdc: paidUsdc.toFixed(6),
+      question: candidate.question.slice(0, 70),
+    });
 
     if (avg < PREFLIGHT_MIN_SCORE || result.skipVotes > result.openVotes + result.reviseVotes) {
-      console.warn(
-        `[market-creator] Drop candidate after council preflight (${avg}/100): ${candidate.question.slice(0, 90)}`,
-      );
+      log.warn("Dropping candidate after council preflight", { score: avg, question: candidate.question.slice(0, 90) });
       continue;
     }
 
@@ -380,19 +379,16 @@ async function applyCouncilPreflight(candidates: ClaimCandidate[]): Promise<Clai
     // that as "all four failed" would silently stop creation altogether, so the
     // gate is skipped — loudly — and the blended average above stands alone.
     if (!dimensionsReported(result.verdict)) {
-      console.warn(
-        "[market-creator] Preflight returned no named dimensions; falling back to the blended score. " +
-        "Update the persona preflight prompt to restore the dimension gate.",
-      );
+      log.warn("Preflight returned no named dimensions — falling back to blended score; update persona preflight prompt");
     } else if (!result.verdict.autonomousOk) {
-      console.warn(
-        `[market-creator] Drop candidate — preflight dimension gate: ${result.verdict.blockedBy} ` +
-        `(clarity=${result.verdict.dimensions.resolutionClarity.score ?? "?"}, ` +
-        `sources=${result.verdict.dimensions.sourceIndependence.score ?? "?"}, ` +
-        `liquidity=${result.verdict.dimensions.liquidityFit.score ?? "?"}, ` +
-        `mode=${result.verdict.dimensions.bestMode.score ?? "?"}) ` +
-        `for "${candidate.question.slice(0, 70)}..."`,
-      );
+      log.warn("Dropping candidate — preflight dimension gate", {
+        blockedBy: result.verdict.blockedBy,
+        clarity: result.verdict.dimensions.resolutionClarity.score ?? "?",
+        sources: result.verdict.dimensions.sourceIndependence.score ?? "?",
+        liquidity: result.verdict.dimensions.liquidityFit.score ?? "?",
+        mode: result.verdict.dimensions.bestMode.score ?? "?",
+        question: candidate.question.slice(0, 70),
+      });
       continue;
     }
 
@@ -487,7 +483,7 @@ async function fetchEspnScoreboard(
         ev.startMs <= latestStartMs
       );
   } catch (err) {
-    console.warn(`[market-creator] ESPN fetch failed (${url}):`, err);
+    log.warn("ESPN fetch failed", { url, err });
     return [];
   }
 }
@@ -648,8 +644,7 @@ Return a JSON array of ${MAX_CLAIMS_PER_RUN} candidates. Output JSON only.`;
   } catch (err) {
     // The raw tail is the only way to tell truncation from a model that ignored
     // the format, and without it this failure is unreproducible after the fact.
-    console.warn("[market-creator] Failed to parse candidates:", err);
-    console.warn(`[market-creator]   raw ${text.length} chars, tail: ${JSON.stringify(text.slice(-160))}`);
+    log.warn("Failed to parse LLM candidates", { err, rawLength: text.length, tail: text.slice(-160) });
     return [];
   }
 
@@ -671,7 +666,7 @@ Return a JSON array of ${MAX_CLAIMS_PER_RUN} candidates. Output JSON only.`;
     }
     const deadlineHours = Number(c.deadlineHours ?? 0);
     if (!Number.isFinite(deadlineHours) || deadlineHours < 2 || deadlineHours > MAX_DEADLINE_HOURS) {
-      console.warn(`[market-creator] Drop candidate - invalid deadlineHours=${String(c.deadlineHours)}: ${String(c.question ?? "").slice(0, 90)}`);
+      log.warn("Dropping candidate — invalid deadlineHours", { deadlineHours: String(c.deadlineHours), question: String(c.question ?? "").slice(0, 90) });
       return false;
     }
     const cat = String(c.category ?? "").toLowerCase();
@@ -680,47 +675,35 @@ Return a JSON array of ${MAX_CLAIMS_PER_RUN} candidates. Output JSON only.`;
     if (cat === "sports") {
       const game = sportsUrls.get(url);
       if (!game) {
-        console.warn(`[market-creator] Drop sports candidate — URL not in allowlist: ${url}`);
+        log.warn("Dropping sports candidate — URL not in allowlist", { url });
         return false;
       }
       if (!Number.isFinite(game.startMs)) {
-        console.warn(`[market-creator] Drop sports candidate - missing start time: ${c.question.slice(0, 90)}`);
+        log.warn("Dropping sports candidate — missing start time", { question: c.question.slice(0, 90) });
         return false;
       }
       if (game.startMs <= nowMs) {
-        console.warn(
-          `[market-creator] Drop sports candidate - game already started/passed ` +
-          `(${new Date(game.startMs).toISOString()}): ${c.question.slice(0, 90)}`
-        );
+        log.warn("Dropping sports candidate — game already started/passed", { startedAt: new Date(game.startMs).toISOString(), question: c.question.slice(0, 90) });
         return false;
       }
-      // Pin the betting deadline to KICKOFF, not the LLM's deadlineHours.
-      // The contract uses a single `deadline` for both bet-cutoff and oracle
-      // settlement. If betting stayed open until after the match, anyone could
-      // bet on a known result (sniping). So betting closes at kickoff (the
-      // contract's 60s lock means the last bet lands ~1 min before); the oracle
-      // then waits for the match to be FINAL before resolving (see settle()).
       const targetHours = (game.startMs - nowMs) / 3_600_000;
       if (targetHours < 2 || targetHours > MAX_DEADLINE_HOURS) {
-        console.warn(
-          `[market-creator] Drop sports candidate — kickoff (${new Date(game.startMs).toISOString()}) ` +
-          `is outside the 2-${MAX_DEADLINE_HOURS}h window`
-        );
+        log.warn("Dropping sports candidate — kickoff outside deadline window", { kickoff: new Date(game.startMs).toISOString(), maxHours: MAX_DEADLINE_HOURS });
         return false;
       }
-      c.deadlineHours = targetHours; // betting closes at kickoff; no sniping window
+      c.deadlineHours = targetHours;
       return true;
     }
 
     if (cat === "crypto") {
       const event = cryptoUrls.get(url);
       if (!event) {
-        console.warn(`[market-creator] Drop crypto candidate — URL not in allowlist: ${url}`);
+        log.warn("Dropping crypto candidate — URL not in allowlist", { url });
         return false;
       }
       const reason = cryptoThresholdReason(c, event);
       if (reason) {
-        console.warn(`[market-creator] Drop crypto candidate - ${reason}: ${c.question.slice(0, 90)}`);
+        log.warn("Dropping crypto candidate — threshold check", { reason, question: c.question.slice(0, 90) });
         return false;
       }
       return true;
@@ -728,7 +711,7 @@ Return a JSON array of ${MAX_CLAIMS_PER_RUN} candidates. Output JSON only.`;
 
     if (cat === "stocks") {
       if (!stocksUrls.has(url)) {
-        console.warn(`[market-creator] Drop stocks candidate — URL not in allowlist: ${url}`);
+        log.warn("Dropping stocks candidate — URL not in allowlist", { url });
         return false;
       }
       return true;
@@ -736,32 +719,24 @@ Return a JSON array of ${MAX_CLAIMS_PER_RUN} candidates. Output JSON only.`;
 
     if (cat === "weather") {
       if (!weatherUrls.has(url)) {
-        console.warn(`[market-creator] Drop weather candidate — URL not in allowlist: ${url}`);
+        log.warn("Dropping weather candidate — URL not in allowlist", { url });
         return false;
       }
       return true;
     }
 
     if (cat === "science" || cat === "technology") {
-      // Launch claims are the only science/technology source wired up. If the URL
-      // is one, hold the deadline past the launch window — a market that closes
-      // before the rocket flies has nothing to settle on.
       const launch = launchUrls.get(url);
       if (launch) {
         const deadlineMs = nowMs + deadlineHours * 3_600_000;
         if (deadlineMs <= launch.windowStartMs) {
-          console.warn(
-            `[market-creator] Drop launch candidate — deadline precedes the window ` +
-            `(${launch.windowStart}): ${String(c.question ?? "").slice(0, 80)}`
-          );
+          log.warn("Dropping launch candidate — deadline precedes the window", { windowStart: launch.windowStart, question: String(c.question ?? "").slice(0, 80) });
           return false;
         }
         return true;
       }
     }
 
-    // culture / other: no allowlist — let it through. The oracle's own evidence
-    // fetcher + low-confidence refund path handles these.
     return true;
   });
 }
@@ -786,13 +761,11 @@ async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
   // the creator for fees.
   const balances = await readAgentBalances(CREATOR_ADDR);
   if (balances.usdc === null) {
-    console.warn(`[market-creator] No USDC trustline — run "npm run agents:fund"`);
+    log.warn("No USDC trustline — run npm run agents:fund");
     return null;
   }
   if (balances.usdc < CREATOR_STAKE_USDC * 2) {
-    console.warn(
-      `[market-creator] Insufficient USDC (${balances.usdc.toFixed(2)}) for ${candidate.question.slice(0, 40)}`
-    );
+    log.warn("Insufficient USDC for claim creation", { haveUsdc: balances.usdc.toFixed(2), needUsdc: CREATOR_STAKE_USDC * 2, question: candidate.question.slice(0, 40) });
     return null;
   }
 
@@ -812,10 +785,10 @@ async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
       visibility:            "public",
       agent_owner_recipient: FEE_RECIPIENT,
     });
-    console.log(`[market-creator]   claim id #${result.claimId}`);
+    log.info("Claim created on-chain", { claimId: result.claimId });
     return result.explorerUrl ?? result.txHash;
   } catch (err) {
-    console.error(`[market-creator] Failed to create claim:`, err);
+    log.error("Failed to create claim", { err });
     return null;
   }
 }
@@ -837,7 +810,7 @@ async function sweepAndCount(): Promise<{ cancelled: number; joinable: number; j
   try {
     total = await getClaimCount();
   } catch (err) {
-    console.warn("[market-creator] Failed to read the claim count for sweep:", err);
+    log.warn("Failed to read claim count for sweep", { err });
     return { cancelled: 0, joinable: 0, joinableClaims: [], creatorExposureClaims: [] };
   }
 
@@ -883,16 +856,16 @@ async function sweepAndCount(): Promise<{ cancelled: number; joinable: number; j
     if (claim.state !== "open") continue;
     if (claim.deadline > now) continue;
 
-    console.log(`[market-creator] Cancelling stale claim #${id} (expired, no challenger)`);
+    log.info("Cancelling stale claim", { claimId: id });
     try {
       const result = await cancelClaim(CREATOR.signer, id);
-      console.log(`[market-creator] ✓ Cancelled #${id} — ${result.explorerUrl ?? result.txHash}`);
+      log.info("Claim cancelled", { claimId: id, url: result.explorerUrl ?? result.txHash });
       cancelled++;
       if (CANCEL_DELAY_MS > 0) {
         await new Promise((r) => setTimeout(r, CANCEL_DELAY_MS));
       }
     } catch (err) {
-      console.error(`[market-creator] Failed to cancel #${id}:`, err);
+      log.error("Failed to cancel claim", { claimId: id, err });
     }
   }
   return { cancelled, joinable, joinableClaims, creatorExposureClaims };
@@ -955,10 +928,7 @@ async function recordProposal(
     });
     return proposalId;
   } catch (err) {
-    console.warn(
-      "[market-creator] Proposal log unavailable; continuing without it:",
-      err instanceof Error ? err.message : err,
-    );
+    log.warn("Proposal log unavailable — continuing without it", { err });
     return null;
   }
 }
@@ -968,21 +938,15 @@ async function recordProposal(
 async function run(): Promise<void> {
   const balances = await readAgentBalances(CREATOR_ADDR);
 
-  console.log(`\n[market-creator] ── Run at ${new Date().toISOString()}`);
-  console.log(`[market-creator] Creator : ${CREATOR_ADDR}`);
-  console.log(
-    `[market-creator] Balance : ${(balances.xlm ?? 0).toFixed(4)} XLM · ` +
-      `${balances.usdc === null ? "no USDC trustline" : `${balances.usdc.toFixed(4)} USDC`}`,
-  );
+  log.info("Run started", {
+    creatorAddr: CREATOR_ADDR,
+    xlm: (balances.xlm ?? 0).toFixed(4),
+    usdc: balances.usdc === null ? "no USDC trustline" : balances.usdc.toFixed(4),
+  });
 
-  // Single-pass sweep: cancels creator's stale expired-OPEN claims AND counts
-  // joinable inventory (state ∈ {OPEN,ACTIVE} && deadline > now) on the same
-  // claim walk. Joinable count drives the cap — getPlatformStats was wrong
-  // here because it counted CANCELLED and abandoned expired-OPEN claims as
-  // "unresolved" and deadlocked the creator at the cap forever.
   const { cancelled, joinable, joinableClaims, creatorExposureClaims } = await sweepAndCount();
   if (cancelled > 0) {
-    console.log(`[market-creator] Cancelled ${cancelled} stale claim(s) — stake refunded.`);
+    log.info("Stale claims cancelled", { cancelled });
   }
 
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -997,29 +961,27 @@ async function run(): Promise<void> {
     stakeUsdc: CREATOR_STAKE_USDC,
     maxOpenExposureUsdc: MAX_OPEN_EXPOSURE_USDC,
   });
-  console.log(
-    `[market-creator] Creator open exposure: ${openExposureUsdc.toFixed(4)} USDC ` +
-      `(cap: ${MAX_OPEN_EXPOSURE_USDC}, live claims: ${exposureSum.countedClaimIds.length}, ` +
-      `slots left: ${exposureSlots})`,
-  );
+  log.info("Creator exposure status", {
+    openExposureUsdc: openExposureUsdc.toFixed(4),
+    capUsdc: MAX_OPEN_EXPOSURE_USDC,
+    liveClaimsCount: exposureSum.countedClaimIds.length,
+    exposureSlots,
+  });
   if (exposureSlots <= 0) {
-    console.log(
-      `[market-creator] Open exposure ≥ cap — skipping this run ` +
-        `(${openExposureUsdc} / ${MAX_OPEN_EXPOSURE_USDC} USDC).`,
-    );
+    log.info("Open exposure at cap — skipping run", { openExposureUsdc, capUsdc: MAX_OPEN_EXPOSURE_USDC });
     return;
   }
 
-  console.log(`[market-creator] Joinable on-chain: ${joinable} (cap: ${MAX_ACTIVE_CLAIMS})`);
+  log.info("Joinable inventory", { joinable, cap: MAX_ACTIVE_CLAIMS });
   if (joinable >= MAX_ACTIVE_CLAIMS) {
-    console.log(`[market-creator] Inventory ≥ cap — skipping this run.`);
+    log.info("Inventory at cap — skipping run");
     return;
   }
   const headroom = Math.max(0, MAX_ACTIVE_CLAIMS - joinable);
   const toCreate = Math.min(MAX_CLAIMS_PER_RUN, headroom, exposureSlots);
 
   // Fetch source data in parallel
-  console.log("[market-creator] Fetching market data...");
+  log.info("Fetching market data sources");
   const [crypto, sports, weather, launches] = await Promise.all([
     fetchCryptoEvents(),
     fetchSportsEvents(),
@@ -1027,13 +989,15 @@ async function run(): Promise<void> {
     fetchLaunchEvents(),
   ]);
   const stocks = fetchStockEvents();
-  console.log(
-    `[market-creator] Sources: crypto=${crypto.events.length} pairs, ` +
-    `sports=${sports.events.length} games, stocks=${stocks.events.length} tickers, ` +
-    `weather=${weather.events.length} cities, launches=${launches.events.length}`
-  );
+  log.info("Sources fetched", {
+    crypto: crypto.events.length,
+    sports: sports.events.length,
+    stocks: stocks.events.length,
+    weather: weather.events.length,
+    launches: launches.events.length,
+  });
 
-  console.log("[market-creator] Drafting claim candidates...");
+  log.info("Drafting claim candidates");
   const draftedCandidates = await draftClaimCandidates({
     cryptoText:   crypto.text,
     cryptoEvents: crypto.events,
@@ -1049,20 +1013,20 @@ async function run(): Promise<void> {
   const candidates = filterDuplicateCandidates(draftedCandidates, joinableClaims);
 
   if (candidates.length === 0) {
-    console.log("[market-creator] No high-quality candidates this run.");
+    log.info("No high-quality candidates this run");
     return;
   }
 
   const approvedCandidates = await applyCouncilPreflight(candidates);
 
   if (approvedCandidates.length === 0) {
-    console.log("[market-creator] No candidates passed council preflight this run.");
+    log.info("No candidates passed council preflight this run");
     return;
   }
 
-  console.log(`[market-creator] ${approvedCandidates.length} candidates ready to create:`);
-  approvedCandidates.forEach((c, i) => {
-    console.log(`  ${i + 1}. [${c.qualityScore}] ${c.question.slice(0, 70)}...`);
+  log.info("Candidates ready to create", {
+    count: approvedCandidates.length,
+    questions: approvedCandidates.map((c, i) => `${i + 1}. [${c.qualityScore}] ${c.question.slice(0, 70)}`),
   });
 
   let created = 0;
@@ -1076,49 +1040,40 @@ async function run(): Promise<void> {
       maxOpenExposureUsdc: MAX_OPEN_EXPOSURE_USDC,
     });
     if (!exposureGate.allowed) {
-      console.log(
-        `[market-creator] Exposure cap blocks further creates — ${exposureGate.blockedBy} ` +
-          `(policy max ${CREATOR_POLICY.maxOpenExposureUsdc} USDC).`,
-      );
+      log.info("Exposure cap reached — stopping creates", {
+        blockedBy: exposureGate.blockedBy,
+        capUsdc: CREATOR_POLICY.maxOpenExposureUsdc,
+      });
       break;
     }
 
-    // Record the decision in the canonical schema BEFORE acting on it (§10.4), so
-    // a run that dies mid-create still leaves the proposal it was acting on.
     const proposalId = await recordProposal(candidate, SHADOW_MODE ? "shadow" : "create");
 
     if (SHADOW_MODE) {
-      // The roadmap's gate: proposal-only until shadow precision is measured
-      // against human review. Nothing is published, and the proposal says why.
-      console.log(
-        `[market-creator] SHADOW — proposed only, not published: "${candidate.question.slice(0, 60)}..." ` +
-          `(proposal ${proposalId ?? "unrecorded"})`,
-      );
+      log.info("Shadow mode — proposed, not published", {
+        question: candidate.question.slice(0, 60),
+        proposalId: proposalId ?? "unrecorded",
+      });
       continue;
     }
 
-    console.log(`\n[market-creator] Creating: "${candidate.question.slice(0, 60)}..."`);
+    log.info("Creating claim", { question: candidate.question.slice(0, 60) });
     const link = await createClaim(candidate);
     if (link) {
-      console.log(`[market-creator] ✓ Created — ${link}`);
+      log.info("Claim created", { url: link });
       created++;
-      // Optimistic local accounting: the next iteration must not wait for another
-      // full claim walk to honour the cap inside this run.
       openExposureUsdc = exposureGate.nextExposureUsdc;
     }
     if (i < selected.length - 1 && CREATE_DELAY_MS > 0) {
-      console.log(`[market-creator] Cooling down ${(CREATE_DELAY_MS / 60000).toFixed(1)} min before next market...`);
+      log.debug("Create cooldown", { cooldownMs: CREATE_DELAY_MS });
       await new Promise((r) => setTimeout(r, CREATE_DELAY_MS));
     }
   }
 
   if (SHADOW_MODE) {
-    console.log(
-      `[market-creator] SHADOW MODE — ${selected.length} proposal(s) recorded, 0 published. ` +
-        `Set MARKET_CREATOR_AUTONOMOUS=1 once review precision has been measured.`,
-    );
+    log.info("Shadow mode run complete", { proposed: selected.length, published: 0 });
   } else {
-    console.log(`\n[market-creator] Created ${created}/${approvedCandidates.length} approved markets this run.`);
+    log.info("Run complete", { created, approved: approvedCandidates.length });
   }
 }
 
@@ -1132,24 +1087,26 @@ async function main(): Promise<void> {
     );
   }
 
-  console.log("═══════════════════════════════════════════════");
-  console.log("  Mimir Market Creator Agent (local Stellar keypair signer)");
-  console.log(`  Contract   : ${CONTRACT_ID}`);
-  console.log(`  Creator    : ${CREATOR_ADDR}`);
-  console.log(`  Fees       : ${(balances.xlm ?? 0).toFixed(4)} XLM`);
-  console.log(`  Bankroll   : ${balances.usdc === null ? "no USDC trustline" : `${balances.usdc.toFixed(4)} USDC`}`);
-  console.log(`  Fee to     : ${FEE_RECIPIENT ?? "(none — markets pay no agent-owner fee)"}`);
-  console.log(`  Network    : Stellar ${STELLAR_NETWORK}`);
-  console.log(`  LLM        : ${activeLLMProvider()} / ${activeLLMModel()} · key=${activeLLMKeyFingerprint()}`);
-  console.log(`  Stake/mkt  : ${CREATOR_STAKE_USDC} USDC`);
-  console.log(`  Max/run    : ${MAX_CLAIMS_PER_RUN} claims`);
-  console.log(`  Active cap : ${MAX_ACTIVE_CLAIMS} unresolved (skip run above this)`);
-  console.log(`  Exposure   : ${MAX_OPEN_EXPOSURE_USDC} USDC open-creator ceiling`);
-  console.log(`  Preflight  : ${PREFLIGHT_ENABLED ? `on via ${PREFLIGHT_BASE_URL}` : "off"}`);
-  console.log(`  Create gap : ${CREATE_DELAY_MS / 1000}s`);
-  console.log(`  Cancel gap : ${CANCEL_DELAY_MS / 1000}s`);
-  console.log(`  Interval   : every ${RUN_INTERVAL_HOURS}h`);
-  console.log("═══════════════════════════════════════════════\n");
+  log.banner([
+    "═══════════════════════════════════════════════",
+    "  Mimir Market Creator Agent (local Stellar keypair signer)",
+    `  Contract   : ${CONTRACT_ID}`,
+    `  Creator    : ${CREATOR_ADDR}`,
+    `  Fees       : ${(balances.xlm ?? 0).toFixed(4)} XLM`,
+    `  Bankroll   : ${balances.usdc === null ? "no USDC trustline" : `${balances.usdc.toFixed(4)} USDC`}`,
+    `  Fee to     : ${FEE_RECIPIENT ?? "(none — markets pay no agent-owner fee)"}`,
+    `  Network    : Stellar ${STELLAR_NETWORK}`,
+    `  LLM        : ${activeLLMProvider()} / ${activeLLMModel()} · key=${activeLLMKeyFingerprint()}`,
+    `  Stake/mkt  : ${CREATOR_STAKE_USDC} USDC`,
+    `  Max/run    : ${MAX_CLAIMS_PER_RUN} claims`,
+    `  Active cap : ${MAX_ACTIVE_CLAIMS} unresolved (skip run above this)`,
+    `  Exposure   : ${MAX_OPEN_EXPOSURE_USDC} USDC open-creator ceiling`,
+    `  Preflight  : ${PREFLIGHT_ENABLED ? `on via ${PREFLIGHT_BASE_URL}` : "off"}`,
+    `  Create gap : ${CREATE_DELAY_MS / 1000}s`,
+    `  Cancel gap : ${CANCEL_DELAY_MS / 1000}s`,
+    `  Interval   : every ${RUN_INTERVAL_HOURS}h`,
+    "═══════════════════════════════════════════════",
+  ].join("\n"));
 
   const safeRun = () =>
     reportingPoll("market_creator", "market-creator", RUN_INTERVAL_HOURS * 3600, run);
@@ -1159,7 +1116,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[market-creator] Fatal:", err);
+  log.error("Fatal error", { err });
   process.exit(1);
 });
 

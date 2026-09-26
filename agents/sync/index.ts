@@ -23,6 +23,9 @@ import { getMarketContractId, getStellarRpcUrl } from "../../lib/stellar";
 import { reportingPoll } from "../../lib/ops/heartbeat";
 import { reconcileSettlements } from "../../lib/server/settlement-index";
 import { reconcileVsIndex } from "../../lib/server/vs-index";
+import { makeLogger } from "../../lib/logger";
+
+const log = makeLogger("sync");
 
 // Default 5m: the health probe warns when the index is over 300s stale, so a
 // slower cadence would report a working sync as degraded.
@@ -30,19 +33,22 @@ const POLL_INTERVAL_MS = Number(process.env.SYNC_POLL_INTERVAL_MS ?? "300000");
 
 async function poll(): Promise<void> {
   const summary = await reconcileVsIndex();
-  console.log(
-    `[sync] ── Reconciled at ${new Date().toISOString()} — ` +
-      `${summary.synced} synced, ${summary.new} new, ${summary.stateChanges} state change(s)`,
-  );
+  log.info("VS index reconciled", {
+    synced: summary.synced,
+    new: summary.new,
+    stateChanges: summary.stateChanges,
+  });
 
-  // Settlement/fee projection for /revenue. Runs after the claim index so a market
-  // that just resolved is already indexed when its settlement row appears.
   const fees = await reconcileSettlements();
-  console.log(
-    `[sync]    settlements: ${fees.settlements} market(s), ${fees.accruals} accrual(s), ` +
-      `${fees.payouts} pull payout(s), ${fees.claims} fee claim(s) · ` +
-      `ledgers ${fees.fromLedger}→${fees.toLedger}${fees.truncated ? " (truncated — will resume)" : ""}`,
-  );
+  log.info("Settlements reconciled", {
+    settlements: fees.settlements,
+    accruals: fees.accruals,
+    payouts: fees.payouts,
+    claims: fees.claims,
+    fromLedger: fees.fromLedger,
+    toLedger: fees.toLedger,
+    truncated: fees.truncated,
+  });
 }
 
 async function main(): Promise<void> {
@@ -50,12 +56,14 @@ async function main(): Promise<void> {
     throw new Error("DATABASE_URL is required — the read index has nowhere to live");
   }
 
-  console.log("═══════════════════════════════════════════════");
-  console.log("  Mimir Read-Index Sync Worker");
-  console.log(`  Contract   : ${getMarketContractId() || "(unset)"}`);
-  console.log(`  Soroban RPC: ${getStellarRpcUrl()}`);
-  console.log(`  Poll every : ${POLL_INTERVAL_MS / 1000}s`);
-  console.log("═══════════════════════════════════════════════\n");
+  log.banner([
+    "═══════════════════════════════════════════════",
+    "  Mimir Read-Index Sync Worker",
+    `  Contract   : ${getMarketContractId() || "(unset)"}`,
+    `  Soroban RPC: ${getStellarRpcUrl()}`,
+    `  Poll every : ${POLL_INTERVAL_MS / 1000}s`,
+    "═══════════════════════════════════════════════",
+  ].join("\n"));
 
   // Reports a heartbeat either way, so a crash-looping sync shows as alive and
   // failing on /api/health rather than merely stale.
@@ -66,6 +74,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[sync] Fatal:", err);
+  log.error("Fatal error", { err });
   process.exit(1);
 });

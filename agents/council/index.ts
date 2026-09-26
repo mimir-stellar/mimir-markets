@@ -46,6 +46,7 @@ import { STELLAR_NETWORK, requireMarketContractId } from "../../lib/stellar";
 import { unitsToUsdc } from "../../lib/usdc";
 import { reportingPoll } from "../../lib/ops/heartbeat";
 import { activeLLMProvider, activeLLMModel, activeLLMKeyFingerprint } from "../../lib/llm";
+import { makeLogger } from "../../lib/logger";
 import {
   listCouncilPersonas,
   personaPublicEnv,
@@ -86,6 +87,8 @@ const CONTRACT_ID          = requireMarketContractId();
 // ── Env guard ─────────────────────────────────────────────────────────────────
 requireAnyLLMKey();
 
+const log = makeLogger("council");
+
 // Optional CSV allowlist of persona slugs to keep active. When set, personas
 // not in the list are skipped even if their wallets exist — used to scale LLM
 // load down without re-provisioning wallets.
@@ -105,10 +108,11 @@ const ACTIVE_PERSONAS = CLASSIC_PERSONAS.filter((p) => {
   }
   const ok = !!process.env[personaSecretEnv(p)];
   if (!ok) {
-    console.warn(
-      `[council] ${p.emoji} ${p.displayName} is missing ${personaSecretEnv(p)} — skipping. ` +
-      `Run "npm run agents:create-wallets" to provision.`,
-    );
+    log.warn("Persona missing wallet key — skipping", {
+      slug: p.slug,
+      envKey: personaSecretEnv(p),
+      hint: "Run npm run agents:create-wallets to provision",
+    });
   }
   return ok;
 });
@@ -130,10 +134,11 @@ const ACTIVE_PHILOSOPHERS: PersonaSpec[] = PHILOSOPHERS_ENABLED
   ? activePhilosophers().filter((p) => {
       const ok = !!process.env[philosopherSecretEnv(p.slug)];
       if (!ok) {
-        console.warn(
-          `[council] ${p.emoji} ${p.displayName} is missing ${philosopherSecretEnv(p.slug)} — skipping. ` +
-          `Run "npm run agents:create-wallets" to provision.`,
-        );
+        log.warn("Philosopher missing wallet key — skipping", {
+          slug: p.slug,
+          envKey: philosopherSecretEnv(p.slug),
+          hint: "Run npm run agents:create-wallets to provision",
+        });
       }
       return ok;
     })
@@ -143,7 +148,7 @@ const ACTIVE_PHILOSOPHERS: PersonaSpec[] = PHILOSOPHERS_ENABLED
 const ALL_ACTIVE = [...ACTIVE_PERSONAS, ...ACTIVE_PHILOSOPHERS];
 
 if (ALL_ACTIVE.length === 0) {
-  console.error("[council] No personas have wallets configured. Exiting.");
+  log.error("No personas have wallets configured — exiting");
   process.exit(1);
 }
 
@@ -168,13 +173,14 @@ async function poll(): Promise<void> {
   try {
     total = await getClaimCount();
   } catch (err) {
-    console.warn("[council] Failed to read the claim count:", err);
+    log.warn("Failed to read claim count", { err });
     return;
   }
 
-  console.log(
-    `\n[council] ── Poll at ${new Date().toISOString()} ── ${total} claims, ${ACTIVE_PERSONAS.length} personas`,
-  );
+  log.info("Poll started", {
+    total,
+    activePersonas: ACTIVE_PERSONAS.length,
+  });
 
   // Shared per-cycle evidence cache — one HTTP fetch per claim no matter
   // how many personas need it.
@@ -195,18 +201,18 @@ async function poll(): Promise<void> {
     if (joinable) allClaims.push(claim);
   }
   if (allClaims.length === 0) {
-    console.log("[council] No joinable claims this round.");
+    log.info("No joinable claims this round");
     return;
   }
 
-  // Focus on claims closest to settling — they're the most interesting for
-  // the council to weigh in on and keeps LLM-call volume bounded.
   allClaims.sort((a, b) => a.deadline - b.deadline);
   const claims = allClaims.slice(0, MAX_CLAIMS_PER_CYCLE);
   if (claims.length < allClaims.length) {
-    console.log(
-      `[council] Evaluating ${claims.length} of ${allClaims.length} joinable claims this cycle (deadline-prioritized).`,
-    );
+    log.info("Capping claims for this cycle", {
+      evaluating: claims.length,
+      joinable: allClaims.length,
+      strategy: "deadline-prioritized",
+    });
   }
 
   let stakesThisCycle = 0;
@@ -233,19 +239,22 @@ async function poll(): Promise<void> {
               (sum, read) => sum + unitsToUsdc(BigInt(read.pricePaidUnits ?? "0")),
               0,
             );
-            console.log(
-              `[council:${persona.slug}] bought ${reads.length} peer read(s) for claim #${claim.id} ` +
-              `(${paidUsdc.toFixed(6)} USDC)`,
-            );
+            log.info("Peer reads purchased", {
+              slug: persona.slug,
+              claimId: claim.id,
+              count: reads.length,
+              paidUsdc: paidUsdc.toFixed(6),
+            });
           }
         }
         const receipt = await runPersonaForClaim(persona, claim, ctx);
         if (receipt) stakesThisCycle += 1;
       } catch (err) {
-        console.error(
-          `[council:${persona.slug}] error on claim #${claim.id}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.error("Error running persona on claim", {
+          slug: persona.slug,
+          claimId: claim.id,
+          err,
+        });
       }
       if (DECISION_DELAY_MS > 0) {
         await new Promise((resolve) => setTimeout(resolve, DECISION_DELAY_MS));
@@ -253,48 +262,41 @@ async function poll(): Promise<void> {
     }
   }
 
-  console.log(
-    stakesThisCycle > 0
-      ? `[council] Cycle complete — ${stakesThisCycle} new stakes submitted.`
-      : "[council] Cycle complete — no new stakes.",
-  );
+  log.info("Cycle complete", { stakesThisCycle });
 }
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
-  console.log("═══════════════════════════════════════════════");
-  console.log("  Mimir Council — 10 AI personas as economic actors");
-  console.log(`  Contract       : ${CONTRACT_ID}`);
-  console.log(`  Network        : Stellar ${STELLAR_NETWORK}`);
-  console.log(`  LLM            : ${activeLLMProvider()} / ${activeLLMModel()} · key=${activeLLMKeyFingerprint()}`);
-  console.log(`  Active personas: ${ACTIVE_PERSONAS.length} / ${CLASSIC_PERSONAS.length}`);
-  console.log(`  Philosophers   : ${PHILOSOPHERS_ENABLED ? `${ACTIVE_PHILOSOPHERS.length} / ${PHILOSOPHER_PERSONAS.length}` : "off"}`);
-  console.log(`  Max claims/cycle: ${MAX_CLAIMS_PER_CYCLE}`);
-  console.log(`  Decision gap   : ${DECISION_DELAY_MS / 1000}s`);
-  console.log(`  Peer reads     : ${PEER_READS_ENABLED ? `${PEER_READS_PER_PERSONA}/persona via ${PEER_READS_BASE_URL}` : "off"}`);
-  console.log(`  Peer read gap  : ${PEER_READ_DELAY_MS / 1000}s`);
-  console.log(`  Poll every     : ${POLL_INTERVAL_MS / 1000}s`);
-  console.log("───────────────────────────────────────────────");
+  log.banner([
+    "═══════════════════════════════════════════════",
+    "  Mimir Council — 10 AI personas as economic actors",
+    `  Contract       : ${CONTRACT_ID}`,
+    `  Network        : Stellar ${STELLAR_NETWORK}`,
+    `  LLM            : ${activeLLMProvider()} / ${activeLLMModel()} · key=${activeLLMKeyFingerprint()}`,
+    `  Active personas: ${ACTIVE_PERSONAS.length} / ${CLASSIC_PERSONAS.length}`,
+    `  Philosophers   : ${PHILOSOPHERS_ENABLED ? `${ACTIVE_PHILOSOPHERS.length} / ${PHILOSOPHER_PERSONAS.length}` : "off"}`,
+    `  Max claims/cycle: ${MAX_CLAIMS_PER_CYCLE}`,
+    `  Decision gap   : ${DECISION_DELAY_MS / 1000}s`,
+    `  Peer reads     : ${PEER_READS_ENABLED ? `${PEER_READS_PER_PERSONA}/persona via ${PEER_READS_BASE_URL}` : "off"}`,
+    `  Peer read gap  : ${PEER_READ_DELAY_MS / 1000}s`,
+    `  Poll every     : ${POLL_INTERVAL_MS / 1000}s`,
+    "───────────────────────────────────────────────",
+  ].join("\n"));
 
   for (const p of ALL_ACTIVE) {
-    // Public-key env differs per track, so ask the right one rather than assuming.
     const addr = (isPhilosopher(p)
       ? process.env[philosopherPublicEnv(p.slug)]
       : process.env[personaPublicEnv(p)])?.split(/\s+#/)[0].trim();
     if (!addr) {
-      console.log(`  ${p.emoji} ${p.displayName.padEnd(22)} (no public key configured)`);
+      log.banner(`  ${p.emoji} ${p.displayName.padEnd(22)} (no public key configured)`);
       continue;
     }
-    // Both balances, because the two now answer different questions: XLM says
-    // "can this persona transact at all", USDC says "can it stake".
     const balances = await readAgentBalances(addr).catch(() => null);
     const fees = balances?.xlm === null || balances === null ? "no account" : `${balances.xlm.toFixed(2)} XLM`;
     const bankroll = balances?.usdc == null ? "no USDC" : `${balances.usdc.toFixed(2)} USDC`;
-    console.log(
-      `  ${p.emoji} ${p.displayName.padEnd(22)} ${addr.slice(0, 5)}…${addr.slice(-4)} · ${fees} · ${bankroll}`,
-    );
+    log.banner(`  ${p.emoji} ${p.displayName.padEnd(22)} ${addr.slice(0, 5)}…${addr.slice(-4)} · ${fees} · ${bankroll}`);
   }
-  console.log("═══════════════════════════════════════════════\n");
+  log.banner("═══════════════════════════════════════════════\n");
 
   const safePoll = () => reportingPoll("council", "council", POLL_INTERVAL_MS / 1000, poll);
 
@@ -303,6 +305,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error("[council] fatal:", err);
+  log.error("Fatal error", { err });
   process.exit(1);
 });

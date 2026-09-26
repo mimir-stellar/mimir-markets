@@ -32,6 +32,9 @@ import { reserveCouncilBonus, recordCouncilBonusResult } from "../../lib/council
 import type { ClaimData } from "../../lib/contract";
 import { usdcToUnits } from "../../lib/usdc";
 import type { Verdict } from "../../lib/verdict";
+import { makeLogger } from "../../lib/logger";
+
+const log = makeLogger("oracle");
 import {
   classifyVoteAttempt,
   evaluateQuorum,
@@ -236,7 +239,7 @@ export async function gatherCouncilVerdict(args: {
   // Cancelled / resolved claims never buy votes — chain already decided.
   if (claimState === "cancelled" || claimState === "resolved") {
     const gate = evaluateQuorum([], quorum, { claimState });
-    console.warn(`[council] ${gate.reason}`);
+    log.warn("Council vote skipped — claim not settleable", { reason: gate.reason });
     return null;
   }
   const sr = args.selfResolving;
@@ -384,7 +387,7 @@ export async function gatherCouncilVerdict(args: {
   // Quorum + fallback policy: below quorum / dependency-heavy ballots → solo.
   const gate = evaluateQuorum(classified, quorum, { claimState });
   if (gate.action !== "use_council") {
-    console.warn(`[council] ${gate.reason}`);
+    log.warn("Council quorum gate — not using council", { reason: gate.reason });
     return null;
   }
 
