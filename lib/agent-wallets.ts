@@ -50,6 +50,7 @@ import { USDC_CODE, USDC_ISSUER, formatAtomicUsdc, usdcAsset } from "./usdc";
 import { readUsdcTrustline, ensureUsdcTrustline } from "./stellar-trustline";
 import { verifyStellarSignedMessage } from "./stellar-message";
 import type { StellarAgentWalletAdapter } from "./agents/wallet-adapter";
+import { sequenceManager } from "./agents/sequence-manager";
 
 /** Friendbot only exists on Testnet; it is the funding source for the fleet. */
 export const FRIENDBOT_URL =
@@ -168,11 +169,16 @@ export function stellarAgentWalletAdapter(wallet: AgentWallet): StellarAgentWall
         return { ok: false, reason: error instanceof Error ? error.message : "simulation failed" };
       }
     },
-    send: async (call) => {
-      const assembled = await call.assemble(wallet.signer);
-      const sent = await assembled.signAndSend();
-      return sent.sendTransactionResponse?.hash ?? "";
-    },
+    // Assembly is where the bindings bake the source account's sequence into the
+    // envelope, so the lease has to cover the assemble as well as the send. A
+    // `stale` rejection is rebuilt against a refreshed sequence by the manager; a
+    // duplicate or transport failure is surfaced, never replayed.
+    send: async (call) =>
+      sequenceManager.guardedSubmit(wallet.address, async () => {
+        const assembled = await call.assemble(wallet.signer);
+        const sent = await assembled.signAndSend();
+        return sent.sendTransactionResponse?.hash ?? "";
+      }),
   };
 }
 
@@ -295,20 +301,26 @@ export async function transferUsdc(args: {
     throw new Error(`${to} holds no USDC trustline — it cannot receive USDC yet`);
   }
 
-  const horizon = createHorizonServer();
-  const source = await horizon.loadAccount(args.wallet.address);
-  const transaction = new TransactionBuilder(source, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(
-      Operation.payment({ destination: to, asset: usdcAsset(), amount: args.amountUsdc }),
-    )
-    .setTimeout(120)
-    .build();
-  transaction.sign(args.wallet.keypair);
-  const result = await horizon.submitTransaction(transaction);
-  return result.hash;
+  // Two transfers from the same worker wallet must not read the same source
+  // account sequence — the second signature would be rejected `tx_bad_seq`. The
+  // lease serializes the load+build+submit span per wallet, and a `stale`
+  // rejection is retried against a freshly loaded account instead of surfaced.
+  return sequenceManager.guardedSubmit(args.wallet.address, async () => {
+    const horizon = createHorizonServer();
+    const source = await horizon.loadAccount(args.wallet.address);
+    const transaction = new TransactionBuilder(source, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        Operation.payment({ destination: to, asset: usdcAsset(), amount: args.amountUsdc }),
+      )
+      .setTimeout(120)
+      .build();
+    transaction.sign(args.wallet.keypair);
+    const result = await horizon.submitTransaction(transaction);
+    return result.hash;
+  });
 }
 
 /**
@@ -328,20 +340,22 @@ export async function transferXlm(args: {
   const to = args.to.trim();
   if (!isAccountAddress(to)) throw new Error(`XLM transfer target is not a Stellar account: ${to}`);
 
-  const horizon = createHorizonServer();
-  const source = await horizon.loadAccount(args.wallet.address);
-  const transaction = new TransactionBuilder(source, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(
-      Operation.payment({ destination: to, asset: Asset.native(), amount: args.amountXlm }),
-    )
-    .setTimeout(120)
-    .build();
-  transaction.sign(args.wallet.keypair);
-  const result = await horizon.submitTransaction(transaction);
-  return result.hash;
+  return sequenceManager.guardedSubmit(args.wallet.address, async () => {
+    const horizon = createHorizonServer();
+    const source = await horizon.loadAccount(args.wallet.address);
+    const transaction = new TransactionBuilder(source, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        Operation.payment({ destination: to, asset: Asset.native(), amount: args.amountXlm }),
+      )
+      .setTimeout(120)
+      .build();
+    transaction.sign(args.wallet.keypair);
+    const result = await horizon.submitTransaction(transaction);
+    return result.hash;
+  });
 }
 
 /** Render atomic USDC for logs without going through IEEE-754. */

@@ -57,6 +57,7 @@ import { MIN_STAKE_USDC, unitsToUsdc, usdcToUnits } from "./usdc";
 import { normalizeCategoryId, ZERO_ADDRESS } from "./constants";
 import { guardChallenge, toCanonicalMode } from "./market-modes";
 import { checkWriteAllowed } from "./ops/flags";
+import { sequenceManager } from "./agents/sequence-manager";
 import { availableCreatorLiquidityUnits } from "./payout";
 import { decodeHash32Hex } from "./content-hash";
 import type { VSCacheFreshness } from "./vs-freshness";
@@ -376,15 +377,18 @@ function squadWriter(signer: StellarSigner): MimirSquad.Client {
  * transaction is final on inclusion (no reorgs, no confirmation count), so a
  * successful `signAndSend` is the whole receipt.
  */
+/** An assembled, simulated contract call, ready to be signed and sent. */
+interface AssembledContractCall {
+  signAndSend: () => Promise<{
+    result: unknown;
+    sendTransactionResponse?: { hash: string } | undefined;
+    getTransactionResponse?: unknown;
+  }>;
+}
+
 async function sendCall<T>(
   label: string,
-  assembled: {
-    signAndSend: () => Promise<{
-      result: unknown;
-      sendTransactionResponse?: { hash: string } | undefined;
-      getTransactionResponse?: unknown;
-    }>;
-  },
+  assembled: AssembledContractCall,
 ): Promise<{ value: T; write: ContractWriteResult }> {
   const sent = await assembled.signAndSend();
   const txHash = sent.sendTransactionResponse?.hash ?? "";
@@ -400,6 +404,28 @@ async function sendCall<T>(
       pending: !sent.getTransactionResponse,
     },
   };
+}
+
+/**
+ * Build, sign and submit one contract call under its wallet's sequence lease.
+ *
+ * The Soroban bindings bake the source account's SEQUENCE NUMBER into the
+ * envelope at BUILD time — `client.create_claim(...)` simulates and assembles —
+ * so serializing only the `signAndSend()` half would still let two overlapping
+ * calls read the same account sequence, sign `N+1` twice, and have the second
+ * rejected `tx_bad_seq`. The lease therefore has to span the build as well, which
+ * is why `build` is a thunk rather than an already-assembled transaction. A
+ * `stale` rejection is refreshed and retried inside {@link sequenceManager};
+ * duplicate, cancelled and transport failures are surfaced instead of replayed.
+ */
+async function sendWalletCall<T>(
+  signer: StellarSigner,
+  label: string,
+  build: () => Promise<AssembledContractCall>,
+): Promise<{ value: T; write: ContractWriteResult }> {
+  return sequenceManager.guardedSubmit(signer.publicKey, async () =>
+    sendCall<T>(label, await build()),
+  );
 }
 
 // ── Bulk-read concurrency limiter ─────────────────────────────────────────────
@@ -734,9 +760,8 @@ export async function queueFeePolicy(
   },
 ): Promise<ContractWriteResult> {
   const signer = requireSigner(wallet, "queue a fee policy");
-  const { write } = await sendCall<void>(
-    "queue_fee_policy",
-    await marketWriter(signer).queue_fee_policy({
+  const { write } = await sendWalletCall<void>(signer, "queue_fee_policy", () =>
+    marketWriter(signer).queue_fee_policy({
       platform_fee_bps:    params.platform_fee_bps,
       agent_owner_fee_bps: params.agent_owner_fee_bps,
       platform_recipient:  params.platform_recipient ?? undefined,
@@ -753,9 +778,8 @@ export async function queueFeePolicy(
  */
 export async function executeFeePolicy(wallet: WalletArg): Promise<ContractWriteResult> {
   const signer = requireSigner(wallet, "execute the queued fee policy");
-  const { write } = await sendCall<void>(
-    "execute_fee_policy",
-    await marketWriter(signer).execute_fee_policy(),
+  const { write } = await sendWalletCall<void>(signer, "execute_fee_policy", () =>
+    marketWriter(signer).execute_fee_policy(),
   );
   return write;
 }
@@ -763,9 +787,8 @@ export async function executeFeePolicy(wallet: WalletArg): Promise<ContractWrite
 /** Drop a queued policy before it executes. Owner only. */
 export async function cancelFeePolicy(wallet: WalletArg): Promise<ContractWriteResult> {
   const signer = requireSigner(wallet, "cancel the queued fee policy");
-  const { write } = await sendCall<void>(
-    "cancel_fee_policy",
-    await marketWriter(signer).cancel_fee_policy(),
+  const { write } = await sendWalletCall<void>(signer, "cancel_fee_policy", () =>
+    marketWriter(signer).cancel_fee_policy(),
   );
   return write;
 }
@@ -896,9 +919,8 @@ export async function createClaim(
 
   const signer = requireSigner(wallet, "create this market");
   const client = marketWriter(signer);
-  const { value, write } = await sendCall<bigint>(
-    "create_claim",
-    await client.create_claim({
+  const { value, write } = await sendWalletCall<bigint>(signer, "create_claim", () =>
+    client.create_claim({
       creator: signer.publicKey,
       params: buildCreateParams(params),
     }),
@@ -962,9 +984,8 @@ export async function challengeClaim(
 
   const signer = requireSigner(wallet, "join this market");
   const client = marketWriter(signer);
-  const { write } = await sendCall<void>(
-    "challenge_claim",
-    await client.challenge_claim({
+  const { write } = await sendWalletCall<void>(signer, "challenge_claim", () =>
+    client.challenge_claim({
       challenger: signer.publicKey,
       claim_id: BigInt(claimId),
       stake_amount: usdcToUnits(stakeAmount),
@@ -1006,9 +1027,8 @@ export async function resolveClaim(
 
   const signer = requireSigner(wallet, "resolve this market");
   const client = marketWriter(signer);
-  const { write } = await sendCall<void>(
-    "resolve_claim",
-    await client.resolve_claim({
+  const { write } = await sendWalletCall<void>(signer, "resolve_claim", () =>
+    client.resolve_claim({
       claim_id: BigInt(claimId),
       winner_side: toWinnerSide(verdict.winner_side),
       summary: verdict.summary,
@@ -1027,9 +1047,8 @@ export async function cancelClaim(
     return sendDemoTx("cancel_claim", { claimId });
   }
   const signer = requireSigner(wallet, "cancel this market");
-  const { write } = await sendCall<void>(
-    "cancel_claim",
-    await marketWriter(signer).cancel_claim({ claim_id: BigInt(claimId) }),
+  const { write } = await sendWalletCall<void>(signer, "cancel_claim", () =>
+    marketWriter(signer).cancel_claim({ claim_id: BigInt(claimId) }),
   );
   return { ...write, claimId };
 }
@@ -1089,9 +1108,8 @@ export async function claimChallengerPayout(
   claimId: number,
 ): Promise<ClaimWriteResult & { netPayout: number }> {
   const signer = requireSigner(wallet, "collect this payout");
-  const { value, write } = await sendCall<bigint>(
-    "claim_challenger_payout",
-    await marketWriter(signer).claim_challenger_payout({
+  const { value, write } = await sendWalletCall<bigint>(signer, "claim_challenger_payout", () =>
+    marketWriter(signer).claim_challenger_payout({
       challenger: signer.publicKey,
       claim_id: BigInt(claimId),
     }),
@@ -1110,9 +1128,8 @@ export async function withdraw(
   wallet: WalletArg,
 ): Promise<ContractWriteResult & { amount: number }> {
   const signer = requireSigner(wallet, "withdraw");
-  const { value, write } = await sendCall<bigint>(
-    "withdraw",
-    await marketWriter(signer).withdraw({ who: signer.publicKey }),
+  const { value, write } = await sendWalletCall<bigint>(signer, "withdraw", () =>
+    marketWriter(signer).withdraw({ who: signer.publicKey }),
   );
   return { ...write, amount: unitsToUsdc(value) };
 }
@@ -1122,9 +1139,8 @@ export async function claimFees(
   wallet: WalletArg,
 ): Promise<ContractWriteResult & { amount: number }> {
   const signer = requireSigner(wallet, "claim fees");
-  const { value, write } = await sendCall<bigint>(
-    "claim_fees",
-    await marketWriter(signer).claim_fees({ who: signer.publicKey }),
+  const { value, write } = await sendWalletCall<bigint>(signer, "claim_fees", () =>
+    marketWriter(signer).claim_fees({ who: signer.publicKey }),
   );
   return { ...write, amount: unitsToUsdc(value) };
 }
@@ -1225,9 +1241,8 @@ export async function createSquadMarket(
   const gate = checkWriteAllowed({ capability: "create_market" });
   if (!gate.allowed) throw new Error(gate.detail ?? "market creation is unavailable");
   const signer = requireSigner(wallet, "open this squad market");
-  const { value, write } = await sendCall<bigint>(
-    "create_market",
-    await squadWriter(signer).create_market({
+  const { value, write } = await sendWalletCall<bigint>(signer, "create_market", () =>
+    squadWriter(signer).create_market({
       captain: signer.publicKey,
       question: params.question,
       deadline: BigInt(params.deadline),
@@ -1246,9 +1261,8 @@ export async function squadDeposit(
   const gate = checkWriteAllowed({ capability: "stake" });
   if (!gate.allowed) throw new Error(gate.detail ?? "staking is unavailable");
   const signer = requireSigner(wallet, "back this side");
-  const { write } = await sendCall<void>(
-    "deposit",
-    await squadWriter(signer).deposit({
+  const { write } = await sendWalletCall<void>(signer, "deposit", () =>
+    squadWriter(signer).deposit({
       participant: signer.publicKey,
       market_id: BigInt(marketId),
       side,
@@ -1265,9 +1279,8 @@ export async function squadClaim(
   side: number,
 ): Promise<ContractWriteResult & { netPayout: number }> {
   const signer = requireSigner(wallet, "collect this payout");
-  const { value, write } = await sendCall<bigint>(
-    "claim",
-    await squadWriter(signer).claim({
+  const { value, write } = await sendWalletCall<bigint>(signer, "claim", () =>
+    squadWriter(signer).claim({
       participant: signer.publicKey,
       market_id: BigInt(marketId),
       side,
@@ -1283,9 +1296,8 @@ export async function squadWithdrawBeforeDeadline(
   amount: number,
 ): Promise<ContractWriteResult> {
   const signer = requireSigner(wallet, "withdraw this stake");
-  const { write } = await sendCall<void>(
-    "withdraw_before_deadline",
-    await squadWriter(signer).withdraw_before_deadline({
+  const { write } = await sendWalletCall<void>(signer, "withdraw_before_deadline", () =>
+    squadWriter(signer).withdraw_before_deadline({
       participant: signer.publicKey,
       market_id: BigInt(marketId),
       side,
