@@ -19,6 +19,8 @@ import "server-only";
 import { buildEnvelope, conformEventProperties, hasRequiredEnvelope, isAnalyticsEvent, type EventInput } from "./events";
 import { redactProperties, redactWalletAddresses } from "./redact";
 import { isInternalActor, opaqueAnalyticsId, resolveActor } from "./actor";
+import { currentTraceId } from "../ops/trace";
+import { isTraceId } from "../ops/trace-id";
 
 // Re-exported for server call sites; the implementation is pure and lives in
 // ./events so the client and the tests can use it too.
@@ -89,7 +91,15 @@ export async function capture(args: CaptureArgs): Promise<CaptureResult> {
   });
 
   const conformed = conformEventProperties(args.event, args.properties ?? {});
-  const envelope = buildEnvelope({ ...args.envelope, actor_type: actor.actorType });
+  // An explicit trace_id on the call wins over the ambient one; neither is trusted
+  // until `buildEnvelope` has checked the shape. The id joins this event to the
+  // worker span or request span that produced it — see docs/TRACE_CORRELATION.md.
+  const traceId = args.envelope?.trace_id ?? currentTraceId();
+  const envelope = buildEnvelope({
+    ...args.envelope,
+    actor_type: actor.actorType,
+    ...(isTraceId(traceId) ? { trace_id: traceId } : {}),
+  });
   const redacted = redactProperties({
     ...conformed.properties,
     ...envelope,

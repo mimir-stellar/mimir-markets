@@ -25,6 +25,7 @@
 
 import { listCouncilPersonas, type PersonaSpec } from "../council/personas";
 import { fetchWithBudget, type PayingWallet } from "../../lib/x402/buyer";
+import { outboundTraceHeaders } from "../../lib/ops/trace-http";
 import { getCouncilAddress, transferUsdc, type AgentWallet } from "../../lib/agent-wallets";
 import { getUsdcBalanceUnits, formatAtomicUsdc, parseUsdcAtomic, USDC_UNIT } from "../../lib/usdc";
 import { STELLAR_NETWORK } from "../../lib/stellar";
@@ -272,7 +273,13 @@ export async function gatherCouncilVerdict(args: {
       url += `&history=${encodeURIComponent(JSON.stringify(history.slice(-8)))}`;
     }
     try {
-      const r = await fetchWithBudget(url, args.payer, capUnits);
+      // The trace header rides the same request as the payment, so the buy-a-vote
+      // cycle, this HTTP call, and the web-side span share one id. It is inert as
+      // far as the x402 proof is concerned — the payment is signed, not the header
+      // set — so correlation costs the settlement path nothing.
+      const r = await fetchWithBudget(url, args.payer, capUnits, {
+        headers: outboundTraceHeaders(),
+      });
       if (!r.response.ok) {
         classified.push(
           classifyVoteAttempt({

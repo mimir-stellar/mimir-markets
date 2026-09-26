@@ -39,6 +39,7 @@ import { getUsdcBalanceUnits, usdcToUnits, parseUsdcAtomic } from "@/lib/usdc";
 import { getAgentEarningsSummary } from "@/lib/db";
 import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
 import { apiError } from "@/lib/api/errors";
+import { tracedRoute } from "@/lib/ops/trace-http";
 
 export const dynamic = "force-dynamic";
 
@@ -216,7 +217,10 @@ function clientIp(req: Request): string | undefined {
   return forwarded?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || undefined;
 }
 
-export async function POST(req: Request, context: { params: Promise<{ action: string }> }): Promise<Response> {
+export async function handleAgentApiPost(
+  req: Request,
+  context: { params: Promise<{ action: string }> },
+): Promise<Response> {
   const { action: rawAction } = await context.params;
   if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action" } }, 404);
   const action = rawAction as AgentApiAction;
@@ -562,3 +566,9 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
   await saveIdempotentResponse(agent.agentId, action, request.idempotencyKey, result);
   return json(result);
 }
+
+// Traced: this is the API an autonomous agent calls, and the failure it gets back
+// carries the id in its body (see `apiError`) and in the `x-mimir-trace-id`
+// header. A signature failure, a pause, and a 500 are all one grep away instead of
+// three log streams read by eye. See docs/TRACE_CORRELATION.md.
+export const POST = tracedRoute("api.agents.v1", handleAgentApiPost);

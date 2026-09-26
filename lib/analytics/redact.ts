@@ -91,7 +91,10 @@ export function redactProperties(input: Record<string, unknown>): RedactionResul
         dropped.push(full);
         continue;
       }
-      if (isRawActorIdentity(value) && !(path === "" && key === "contract" && value.startsWith("C"))) {
+      if (
+        isRawActorIdentity(value) &&
+        !(path === "" && key === "contract" && typeof value === "string" && value.startsWith("C"))
+      ) {
         dropped.push(full);
         continue;
       }
