@@ -211,3 +211,25 @@ property testable on a clean checkout and in CI.
   cannot sneak into archives) and it fails loud if you forget to wire it.
 - Never commit real archives to the repo. The committed fixture in
   `tests/fixtures/cache-backup/valid.json` is synthetic.
+
+## Schema snapshot gate (devx)
+
+The Postgres schema is the ordered `SCHEMA_STATEMENTS` list in `lib/db.ts`; there
+is no separate migration runner, so a schema edit ships on merge. The gate makes
+that change reviewable:
+
+- **Verify** (`npm run check:schema-snapshot`) rebuilds the snapshot from
+  `getSchemaStatements()` and compares it with
+  `schemas/db-schema.snapshot.json` (`lib/ops/schema-snapshot.ts`). Pure — no
+  `DATABASE_URL`, no network, no secrets. It is a CI gate.
+- **Update** a schema, index, or `schema_migrations` row, then run
+  `npm run check:schema-snapshot -- --write` and commit the snapshot in the same
+  pull request. Fail-closed findings: `SNAPSHOT_MISSING`, `SNAPSHOT_INVALID`,
+  `EMPTY_SCHEMA`, `FINGERPRINT_MISMATCH`, `TABLE_DRIFT`, `INDEX_DRIFT`,
+  `MIGRATION_DRIFT`, `MIGRATION_DUPLICATE_VERSION`, `MIGRATION_UNREGISTERED`.
+- **Rollback**: revert the schema change and the snapshot together, then rerun
+  the check; reverting only one leaves the gate failing by design. The read index
+  is disposable and can be rebuilt from chain (`npm run warm:vs-index`).
+- Every new table or index must ship with a `schema_migrations` registration; a
+  schema with no registered migration fails `MIGRATION_UNREGISTERED`.
+- Policy: [`docs/SCHEMA_SNAPSHOTS.md`](./SCHEMA_SNAPSHOTS.md).
