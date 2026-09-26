@@ -8,7 +8,7 @@ import {
   hasRequiredEnvelope,
   isAnalyticsEvent,
 } from "../../lib/analytics/events";
-import { containsRawAddress, redactProperties } from "../../lib/analytics/redact";
+import { containsRawAddress, redactProperties, redactWalletAddresses } from "../../lib/analytics/redact";
 import {
   ANON_ACTOR_ID,
   actorIdForAddress,
@@ -232,6 +232,124 @@ test("a raw wallet address in the payload is detectable", () => {
 
 test("the contract address is public context, not a user identity", () => {
   assert.equal(containsRawAddress({ contract: ADDRESS }), false);
+});
+
+// ── Wallet address redaction ──────────────────────────────────────────────────
+
+test("redactWalletAddresses drops raw wallet addresses from properties", () => {
+  const { properties, dropped } = redactWalletAddresses({ payer: ADDRESS, claim_id: 1 });
+  assert.equal("payer" in properties, false);
+  assert.equal(properties.claim_id, 1);
+  assert.deepEqual(dropped, ["payer"]);
+});
+
+test("redactWalletAddresses preserves contract address as public context", () => {
+  const { properties, dropped } = redactWalletAddresses({ contract: ADDRESS, claim_id: 1 });
+  assert.equal(properties.contract, ADDRESS);
+  assert.deepEqual(dropped, []);
+});
+
+test("redactWalletAddresses walks nested objects", () => {
+  const { properties, dropped } = redactWalletAddresses({
+    context: { seller: ADDRESS, claim_id: 5 },
+  });
+  assert.deepEqual(properties, { context: { claim_id: 5 } });
+  assert.deepEqual(dropped, ["context.seller"]);
+});
+
+test("redactWalletAddresses removes addresses from arrays", () => {
+  const { properties, dropped } = redactWalletAddresses({
+    participants: [ADDRESS, OTHER, "not-an-address"],
+  });
+  assert.deepEqual(properties.participants, ["not-an-address"]);
+  // Both individual element paths and the parent array path are reported
+  assert.deepEqual(dropped.sort(), ["participants", "participants[0]", "participants[1]"].sort());
+});
+
+test("redactWalletAddresses handles mixed nested arrays and objects", () => {
+  const { properties, dropped } = redactWalletAddresses({
+    data: { buyers: [ADDRESS], seller: OTHER, meta: { referrer: ADDRESS } },
+  });
+  // Both ADDRESS and OTHER are user wallet addresses — both are redacted.
+  // Only contract addresses are preserved as public context.
+  assert.deepEqual(properties, { data: { buyers: [], meta: {} } });
+  assert.deepEqual(dropped.sort(), ["data.buyers", "data.buyers[0]", "data.meta.referrer", "data.seller"].sort());
+});
+
+test("redactWalletAddresses does not drop actor ids (hashed, not raw)", () => {
+  const actorId = actorIdForAddress(ADDRESS, SALT)!;
+  const { properties, dropped } = redactWalletAddresses({ distinct_id: actorId, claim_id: 1 });
+  assert.equal(properties.distinct_id, actorId);
+  assert.deepEqual(dropped, []);
+});
+
+test("redactWalletAddresses does not drop agent ids", () => {
+  const { properties, dropped } = redactWalletAddresses({ distinct_id: "agent:oracle", claim_id: 1 });
+  assert.equal(properties.distinct_id, "agent:oracle");
+  assert.deepEqual(dropped, []);
+});
+
+// ── Boundary and negative tests for wallet address redaction ──────────────────
+
+test("redactWalletAddresses handles empty object", () => {
+  const { properties, dropped } = redactWalletAddresses({});
+  assert.deepEqual(properties, {});
+  assert.deepEqual(dropped, []);
+});
+
+test("redactWalletAddresses handles null and undefined values", () => {
+  const { properties, dropped } = redactWalletAddresses({
+    claim_id: 1,
+    nullable_field: null,
+    undefined_field: undefined,
+  });
+  assert.deepEqual(properties, { claim_id: 1 });
+  assert.deepEqual(dropped, []);
+});
+
+test("redactWalletAddresses does not drop EVM addresses (not Stellar strkeys)", () => {
+  const evmAddress = "0x1111111111111111111111111111111111111111";
+  const { properties, dropped } = redactWalletAddresses({ eth_address: evmAddress });
+  assert.equal(properties.eth_address, evmAddress);
+  assert.deepEqual(dropped, []);
+});
+
+test("redactWalletAddresses does not drop truncated address-like strings", () => {
+  const truncated = ADDRESS.slice(0, 50); // Too short to be a valid strkey
+  const { properties, dropped } = redactWalletAddresses({ partial: truncated });
+  assert.equal(properties.partial, truncated);
+  assert.deepEqual(dropped, []);
+});
+
+test("redactWalletAddresses preserves case-sensitive contract address exactly", () => {
+  // Contract addresses are compared verbatim — case matters for strkeys
+  const { properties, dropped } = redactWalletAddresses({
+    contract: ADDRESS,
+    other_field: ADDRESS,
+  });
+  assert.equal(properties.contract, ADDRESS);
+  assert.ok(!properties.other_field); // non-contract address is dropped
+  assert.deepEqual(dropped, ["other_field"]);
+});
+
+test("redactWalletAddresses drops address in deeply nested structure", () => {
+  const { properties, dropped } = redactWalletAddresses({
+    level1: { level2: { level3: { wallet: ADDRESS } } },
+  });
+  assert.deepEqual(properties, { level1: { level2: { level3: {} } } });
+  assert.deepEqual(dropped, ["level1.level2.level3.wallet"]);
+});
+
+test("redactWalletAddresses handles arrays with mixed types", () => {
+  const { properties, dropped } = redactWalletAddresses({
+    mixed: [ADDRESS, 123, "string", { nested: ADDRESS }, null, [OTHER]],
+  });
+  // Object keys containing addresses are dropped entirely (not kept as empty),
+  // consistent with nested object behavior.
+  assert.deepEqual(properties.mixed, [123, "string", {}, null, []]);
+  // Reports element paths for nested arrays; parent array "mixed" is reported
+  // at the top level, but nested array "mixed[5]" only reports its elements.
+  assert.deepEqual(dropped.sort(), ["mixed", "mixed[0]", "mixed[3].nested", "mixed[5][0]"].sort());
 });
 
 // ── Actor identity ────────────────────────────────────────────────────────────

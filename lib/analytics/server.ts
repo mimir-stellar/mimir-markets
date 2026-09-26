@@ -17,7 +17,7 @@
 
 import "server-only";
 import { buildEnvelope, hasRequiredEnvelope, isAnalyticsEvent, type EventInput } from "./events";
-import { redactProperties } from "./redact";
+import { redactProperties, redactWalletAddresses } from "./redact";
 import { isInternalActor, resolveActor } from "./actor";
 
 // Re-exported for server call sites; the implementation is pure and lives in
@@ -89,7 +89,7 @@ export async function capture(args: CaptureArgs): Promise<CaptureResult> {
   });
 
   const envelope = buildEnvelope({ ...args.envelope, actor_type: actor.actorType });
-  const { properties: safeProperties, dropped } = redactProperties({
+  const { properties: safeProperties, dropped: secretDropped } = redactProperties({
     ...(args.properties ?? {}),
     ...envelope,
     analytics_environment: analyticsEnvironment(),
@@ -101,7 +101,12 @@ export async function capture(args: CaptureArgs): Promise<CaptureResult> {
     actor_id_degraded: actor.degraded,
   });
 
-  if (!hasRequiredEnvelope(safeProperties)) {
+  // Redact any wallet addresses that callers may have accidentally included in
+  // properties or envelope. Contract addresses are preserved as public context.
+  const { properties: finalProperties, dropped: addressDropped } = redactWalletAddresses(safeProperties);
+  const dropped = [...secretDropped, ...addressDropped];
+
+  if (!hasRequiredEnvelope(finalProperties)) {
     return { sent: false, reason: "incomplete_envelope", dropped };
   }
 
@@ -112,7 +117,7 @@ export async function capture(args: CaptureArgs): Promise<CaptureResult> {
     distinct_id: actor.actorId,
     timestamp: new Date(args.at ?? Date.now()).toISOString(),
     properties: {
-      ...safeProperties,
+      ...finalProperties,
       // PostHog deduplicates on $insert_id.
       ...(args.idempotencyKey ? { $insert_id: args.idempotencyKey } : {}),
       // Salted ids are not people; person profiles would only add PII surface.

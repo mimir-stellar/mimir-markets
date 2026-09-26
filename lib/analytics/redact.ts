@@ -114,3 +114,95 @@ export function containsRawAddress(properties: Record<string, unknown>): boolean
       key !== "contract" && seen(value) && String(value) !== contract,
   );
 }
+
+/**
+ * Redact raw wallet addresses from properties, returning sanitized properties
+ * and a list of dropped key paths. This is the enforcement layer that prevents
+ * callers from accidentally leaking identities through event properties.
+ */
+export function redactWalletAddresses(properties: Record<string, unknown>): RedactionResult {
+  const sanitized: Record<string, unknown> = {};
+  const dropped: string[] = [];
+
+  const walk = (source: Record<string, unknown>, target: Record<string, unknown>, path: string) => {
+    for (const [key, value] of Object.entries(source)) {
+      const full = path ? `${path}.${key}` : key;
+
+      // Contract address is public context — allowed
+      if (key === "contract" && typeof value === "string" && ADDRESS_LIKE.test(value.trim())) {
+        target[key] = value;
+        continue;
+      }
+
+      if (typeof value === "string" && ADDRESS_LIKE.test(value.trim())) {
+        dropped.push(full);
+        continue;
+      }
+      if (value === undefined || value === null) continue;
+      if (Array.isArray(value)) {
+        const kept: unknown[] = [];
+        let hasDropped = false;
+        for (let i = 0; i < value.length; i++) {
+          const item = value[i];
+          const itemPath = `${full}[${i}]`;
+          if (typeof item === "string" && ADDRESS_LIKE.test(item.trim())) {
+            dropped.push(itemPath);
+            hasDropped = true;
+            continue;
+          }
+          if (item && typeof item === "object") {
+            if (Array.isArray(item)) {
+              const nestedArray: unknown[] = [];
+              walkArray(item, nestedArray, itemPath);
+              if (nestedArray.length !== item.length) hasDropped = true;
+              kept.push(nestedArray);
+            } else {
+              const nested: Record<string, unknown> = {};
+              walk(item as Record<string, unknown>, nested, itemPath);
+              kept.push(nested);
+            }
+            continue;
+          }
+          kept.push(item);
+        }
+        if (hasDropped || kept.length !== value.length) dropped.push(full);
+        target[key] = kept;
+        continue;
+      }
+      if (typeof value === "object") {
+        const nested: Record<string, unknown> = {};
+        walk(value as Record<string, unknown>, nested, full);
+        target[key] = nested;
+        continue;
+      }
+      target[key] = value;
+    }
+  };
+
+  function walkArray(source: unknown[], target: unknown[], path: string) {
+    for (let i = 0; i < source.length; i++) {
+      const item = source[i];
+      const itemPath = `${path}[${i}]`;
+      if (typeof item === "string" && ADDRESS_LIKE.test(item.trim())) {
+        dropped.push(itemPath);
+        continue;
+      }
+      if (item && typeof item === "object") {
+        if (Array.isArray(item)) {
+          const nestedArray: unknown[] = [];
+          walkArray(item, nestedArray, itemPath);
+          target.push(nestedArray);
+        } else {
+          const nested: Record<string, unknown> = {};
+          walk(item as Record<string, unknown>, nested, itemPath);
+          target.push(nested);
+        }
+        continue;
+      }
+      target.push(item);
+    }
+  }
+
+  walk(properties, sanitized, "");
+  return { properties: sanitized, dropped };
+}
