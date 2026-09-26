@@ -57,6 +57,20 @@ import { MIN_STAKE_USDC, unitsToUsdc, usdcToUnits } from "./usdc";
 import { normalizeCategoryId, ZERO_ADDRESS } from "./constants";
 import { guardChallenge, toCanonicalMode } from "./market-modes";
 import { checkWriteAllowed } from "./ops/flags";
+import {
+  contractErrorFromRustError,
+  contractReadErrorFromRustError,
+  contractWriteErrorFromRustError,
+  isContractError,
+  isContractReadError,
+  isContractWriteError,
+  categoryForError,
+  categoryForLabel,
+  CONTRACT_ERROR_LABELS,
+  type ContractError,
+  type ContractReadError,
+  type ContractWriteError,
+} from "./contract-errors";
 import { availableCreatorLiquidityUnits } from "./payout";
 import { decodeHash32Hex } from "./content-hash";
 import type { VSCacheFreshness } from "./vs-freshness";
@@ -254,6 +268,29 @@ export interface VSDetailSnapshot {
 /** A wallet argument: a real signer, or a bare address for legacy call sites. */
 export type WalletArg = string | StellarSigner;
 
+/**
+ * Machine-readable contract error surfaced to the app.
+ *
+ * `code` is a compact, stable id (e.g. `claim_not_open`) that survives JSON
+ * round-trips and is what server routes turn into `createApiError(code, msg)`.
+ * `category` is the UI/analytics bucket. `userMessage` is the actionable copy a
+ * person can act on; it is never raw Rust. `retryable` is always false here:
+ * a contract revert means the request was wrong, not that the network hiccuped.
+ */
+/**
+ * Machine-readable contract error surfaced to the app.
+ *
+ * `code` is a compact, stable id (e.g. `claim_not_open`) that survives JSON
+ * round-trips and is what server routes turn into `createApiError(code, msg)`.
+ * `category` is the UI/analytics bucket. `userMessage` is the actionable copy a
+ * person can act on; it is never raw Rust. `retryable` is always false here:
+ * a contract revert means the request was wrong, not that the network hiccuped.
+ */
+
+
+
+
+
 // ── State / side mappers ──────────────────────────────────────────────────────
 function mapState(state: MimirMarket.ClaimState): ClaimData["state"] {
   switch (state) {
@@ -300,7 +337,7 @@ function unwrap<T>(label: string, result: unknown): T {
         error && typeof error === "object" && "message" in error
           ? String((error as { message: unknown }).message)
           : JSON.stringify(error);
-      throw new Error(`${label}: ${message}`);
+      throw contractErrorFromRustError(error, categoryForLabel(label));
     }
     return rustResult.unwrap();
   }
@@ -308,10 +345,18 @@ function unwrap<T>(label: string, result: unknown): T {
 }
 
 /** Same, but a contract error becomes `null` — for "does this exist" reads. */
-function unwrapOrNull<T>(result: unknown): T | null {
+function unwrapOrNull<T>(result: unknown, label = "unknown"): T | null {
   if (result && typeof result === "object" && "isOk" in result) {
-    const rustResult = result as { isOk(): boolean; unwrap(): T };
-    return rustResult.isOk() ? rustResult.unwrap() : null;
+    const rustResult = result as { isOk(): boolean; unwrap(): T; error?: unknown };
+    if (!rustResult.isOk()) {
+      const error = rustResult.error;
+      const message =
+        error && typeof error === "object" && "message" in error
+          ? String((error as { message: unknown }).message)
+          : JSON.stringify(error);
+      throw contractReadErrorFromRustError(error, categoryForLabel(label));
+    }
+    return rustResult.unwrap();
   }
   return (result ?? null) as T | null;
 }
@@ -343,6 +388,7 @@ function squadReader(): MimirSquad.Client {
  * compile; it cannot sign, so it fails here with a message a user can act on
  * rather than an opaque XDR error deeper in the SDK.
  */
+
 function requireSigner(wallet: WalletArg, action: string): StellarSigner {
   if (isStellarSigner(wallet)) return wallet;
   throw new Error(

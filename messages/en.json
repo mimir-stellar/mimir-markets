@@ -646,28 +646,6 @@
       "challengers": "Challenger side wins",
       "draw": "Draw",
       "unresolvable": "Marked unresolvable"
-    },
-    "receiptPot": "Total pot",
-    "receiptRemainingEscrow": "Remaining escrow",
-    "receiptWinner": "Winner address",
-    "receiptOutcomeNone": "No outcome recorded",
-    "receiptValueUnavailable": "—",
-    "receiptChainNote": "Amounts and outcome come from the on-chain claim record. Challenger payouts stay pull-based after settlement.",
-    "receiptStatus": {
-      "loading": "Loading",
-      "invalid": "Not settled",
-      "stale": "Stale",
-      "disconnected": "Disconnected",
-      "dependency_failure": "Unavailable",
-      "ready": "Final"
-    },
-    "receiptStatusHint": {
-      "loading": "Fetching the contract-backed settlement receipt.",
-      "invalid": "This claim is not settled yet, so no settlement receipt is available.",
-      "stale": "Showing the last known settlement receipt. Refresh if the market may have changed.",
-      "disconnected": "Wallet or network is disconnected. Reconnect to verify the live on-chain receipt.",
-      "dependency_failure": "Settlement fields could not be mapped from the claim record. Retry after the index catches up.",
-      "ready": "Contract-backed settlement receipt for this claim."
     }
   },
   "copyTrading": {
@@ -1241,42 +1219,41 @@
     "fresh_hours": "captured {value}h ago",
     "fresh_days": "captured {value}d ago"
   },
-  "researchCitations": {
-    "title": "Research sources",
-    "excerpt": "Excerpt",
-    "noHash": "No content hash",
-    "unsafeLink": "Link blocked",
-    "duplicatedNote": "{count} duplicate source(s) collapsed.",
-    "privacyNote": "Citations show public source links and content hashes only — no wallet addresses, prompts, or analytics identifiers.",
-    "trust": {
-      "primary": "Primary",
-      "corroborating": "Corroborating",
-      "unverified": "Unverified",
-      "unknown": "Unspecified"
-    },
-    "status": {
-      "ready": "Cited",
-      "empty": "No sources",
-      "invalid": "Invalid",
-      "stale": "Stale",
-      "cancelled": "Cancelled",
-      "dependency_failure": "Unavailable"
-    },
-    "statusHint": {
-      "ready": "Research-source citations for this claim. Hashes let you verify the page later.",
-      "empty": "No research sources were attached to this view.",
-      "invalid": "Source links were missing or unsafe, so citations are not shown.",
-      "stale": "Cited sources look stale relative to the claim deadline or freshness window.",
-      "cancelled": "This claim is cancelled, so research citations are withheld.",
-      "dependency_failure": "Citation fields could not be mapped from the source record."
-    },
-    "rowStatus": {
-      "ready": "Ready",
-      "invalid": "Invalid",
-      "stale": "Stale",
-      "duplicated": "Duplicate",
-      "cancelled": "Cancelled",
-      "dependency_failure": "Bad hash"
-    }
+  "contract": {
+    "already_challenged": "A challenger has already entered this challenge. Join the existing challenge instead.",
+    "already_claimed_payout": "This challenger already collected their settlement.",
+    "chain_unavailable": "The contract is temporarily unavailable. Refresh and try again.",
+    "challenge_window_closed": "The challenge window is closed. This claim is no longer accepting challenges.",
+    "challengers_did_not_win": "The challenger side did not win this claim, so this payout was not awarded. Check the final outcome before collecting.",
+    "claim_full": "This market has reached the maximum number of challengers. Choose another one or wait for a slot to open.",
+    "claim_not_active": "This challenge is no longer active for new stakes. Review the current state first.",
+    "claim_not_found": "We could not read that challenge. Check the link or load the market again.",
+    "claim_not_open": "This challenge is closed to new stakes. Review the current state before acting.",
+    "claim_not_resolved": "That action only works after the market has been resolved.",
+    "deadline_in_past": "The deadline is in the past. Use a future deadline so the marketplace can accept the entry.",
+    "duel_needs_equal_stake": "A duel needs a stake that exactly matches the creator's. Adjust your stake and try again.",
+    "empty_question": "Every challenge needs a question. Write the outcome you want to settle, then try again.",
+    "fee_cap_exceeded": "Fee policy changes are capped at the configured limit. Reduce the total fee and try again.",
+    "fee_needs_recipient": "A fee recipient must be set before this policy can be queued.",
+    "fee_policy_not_ready": "The queued fee policy is not ready yet. Wait for the stated window to open.",
+    "insufficient_creation_liquidity": "This creator liquidity is not sufficient for the amount you offered. Reduce your stake or choose a market with more attached capacity.",
+    "invalid_invite_key": "That invite link is not valid. Ask the creator for the current invite link.",
+    "invalid_request": "This request cannot be completed as written. Check the input and try again.",
+    "invalid_verdict": "The verdict you tried to record is not valid. Confirm the winner side and try again.",
+    "invite_key_too_long": "That invite key is too long. Use a shorter invite link.",
+    "no_fees": "There are no accrued fees to claim right now.",
+    "not_a_challenger": "You are not listed as a challenger on this claim, so you cannot pull this payout.",
+    "not_creator": "Only the creator of this challenge can perform that action.",
+    "not_yet_expired": "This deadline has not ended yet, so that action cannot be taken now.",
+    "nothing_queued": "There is no fee policy waiting to be applied.",
+    "nothing_to_withdraw": "There is nothing parked for you yet. Withdrawals from funded markets stay open.",
+    "overflow": "The requested action would exceed what the contract can hold. Reduce the amount and try again.",
+    "payout_exceeds_escrow": "The payout that was attempted is larger than the money held by the market. This is a contract state issue; try again with a smaller amount.",
+    "self_challenge": "You cannot challenge your own claim. Open a challenge against another claim.",
+    "stake_too_small": "Your stake is below the minimum. Enter at least the configured minimum stake for this market.",
+    "timelocked": "This fee policy is still inside its approved time window. Try again after it opens.",
+    "unsupported_decimals": "This market requires the expected token scale. Please use the configured asset so your amount is read correctly.",
+    "unsupported_token": "The token this market is configured for cannot be accepted. This market only supports the configured asset. Choose another market.",
+    "zero_stake": "Stake must be greater than zero."
   }
 }
