@@ -38,6 +38,11 @@ pub const MAX_TOTAL_FEE_BPS: u32 = 1_000;
 /// A queued policy change cannot take effect before this much time passes.
 pub const FEE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 
+/// A queued oracle rotation cannot take effect before this much time passes.
+/// Same delay as fee policy so participants get equal notice of trust-boundary
+/// changes that control settlement.
+pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
+
 /// Upper bound on the byte length of an invite key.
 ///
 /// DEVIATION FROM SOLIDITY: `keccak256(bytes(inviteKey))` accepted any length.
@@ -146,6 +151,13 @@ pub struct PendingFeePolicy {
     pub platform_fee_bps: u32,
     pub agent_owner_fee_bps: u32,
     pub platform_recipient: Option<Address>,
+    pub executable_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingOracle {
+    pub next: Address,
     pub executable_at: u64,
 }
 

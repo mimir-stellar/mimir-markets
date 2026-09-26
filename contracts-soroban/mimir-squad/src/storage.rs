@@ -2,6 +2,7 @@
 
 use soroban_sdk::{contracttype, Address, Env};
 
+use crate::types::{Error, Market, PendingOracle};
 use crate::types::{Error, Market, MarketFeeBalance};
 
 #[contracttype]
@@ -11,6 +12,7 @@ pub enum DataKey {
     Usdc,
     Oracle,
     FeeRecipient,
+    PendingOracle,
     MarketCount,
     AccruedFees,
     /// Bumped by global `claim_fees` so per-market ledgers invalidate in O(1).
@@ -62,6 +64,22 @@ pub fn set_config(env: &Env, usdc: &Address, oracle: &Address, fee_recipient: &A
     env.storage()
         .instance()
         .set(&DataKey::FeeRecipient, fee_recipient);
+}
+
+pub fn set_oracle(env: &Env, oracle: &Address) {
+    env.storage().instance().set(&DataKey::Oracle, oracle);
+}
+
+pub fn pending_oracle(env: &Env) -> Option<PendingOracle> {
+    env.storage().instance().get(&DataKey::PendingOracle)
+}
+
+pub fn set_pending_oracle(env: &Env, pending: &PendingOracle) {
+    env.storage().instance().set(&DataKey::PendingOracle, pending);
+}
+
+pub fn clear_pending_oracle(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingOracle);
 }
 
 // ── Counters ─────────────────────────────────────────────────────────────────

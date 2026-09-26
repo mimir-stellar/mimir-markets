@@ -5,6 +5,7 @@
 
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
+use crate::types::{Challenger, Claim, Error, FeePolicy, PendingFeePolicy, PendingOracle};
 use crate::types::{Challenger, Claim, Error, FeePolicy, PendingFeePolicy, Verdict};
 
 #[contracttype]
@@ -17,6 +18,8 @@ pub enum DataKey {
     Usdc,
     Policy,
     Pending,
+    /// Queued oracle rotation (separate from fee-policy Pending).
+    PendingOracle,
     ClaimCount,
     TotalResolved,
     FeesAccrued,
@@ -102,6 +105,18 @@ pub fn set_pending_fee_policy(env: &Env, pending: &PendingFeePolicy) {
 
 pub fn clear_pending_fee_policy(env: &Env) {
     env.storage().instance().remove(&DataKey::Pending);
+}
+
+pub fn pending_oracle(env: &Env) -> Option<PendingOracle> {
+    env.storage().instance().get(&DataKey::PendingOracle)
+}
+
+pub fn set_pending_oracle(env: &Env, pending: &PendingOracle) {
+    env.storage().instance().set(&DataKey::PendingOracle, pending);
+}
+
+pub fn clear_pending_oracle(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingOracle);
 }
 
 fn counter(env: &Env, key: DataKey) -> u64 {

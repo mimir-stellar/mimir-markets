@@ -21,6 +21,9 @@ pub const BPS_DIVISOR: i128 = 10_000;
 /// `initialize` refuses a token that reports any other.
 pub const USDC_DECIMALS: u32 = 7;
 
+/// A queued oracle rotation cannot take effect before this much time passes.
+pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
+
 // ── Storage shapes ───────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -46,6 +49,13 @@ pub struct ClaimResult {
     pub gross: i128,
     pub fee: i128,
     pub net: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingOracle {
+    pub next: Address,
+    pub executable_at: u64,
 }
 
 /// Per-market accrued fee ledger. `seq` ties the balance to the current
@@ -89,5 +99,6 @@ pub enum Error {
     UnsupportedToken = 23,
     Overflow = 24,
     UnsupportedDecimals = 25,
-    ConservationViolation = 26,
+    NothingQueued = 26,
+    Timelocked = 27,
 }
