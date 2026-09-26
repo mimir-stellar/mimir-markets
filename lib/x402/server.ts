@@ -206,6 +206,10 @@ export function paidRoute<T>(
   // x402 selling pauses independently of the rest of the app: if Horizon is
   // degraded we stop selling — a verifier that cannot read the ledger must refuse
   // rather than guess — while market settlement and withdrawal keep working.
+  //
+  // Quotes expire before verification to preserve contract-first accounting,
+  // clear market semantics, and safe agent operations. The `withX402` wrapper
+  // enforces this by rejecting stale proofs during the scheme's settle step.
   const withKillSwitch = async (req: NextRequest): Promise<NextResponse<T>> => {
     const paused = sellingPausedResponse();
     if (paused) {
