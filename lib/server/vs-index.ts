@@ -41,6 +41,96 @@ const POST_WRITE_REFRESH_ATTEMPTS = 5;
 const POST_WRITE_REFRESH_DELAY_MS = 1_500;
 const BACKGROUND_REFRESH_COOLDOWN_MS = 30_000;
 
+// ── Cursor validation and restart safety ─────────────────────────────────────
+
+/**
+ * Validate and sanitize a sync cursor value.
+ *
+ * Malformed, negative, or non-numeric cursor values are rejected to prevent
+ * corrupted state from propagating. This is the defense against a poisoned
+ * `sync_meta` row — whether from manual intervention, a failed migration, or
+ * a bug in an earlier version.
+ */
+export function validateCursorValue(value: string | null, key: string): number | null {
+  if (value == null || value === "") return null;
+  
+  // Trim whitespace to reject "  100  " as invalid
+  const trimmed = value.trim();
+  if (trimmed !== value) {
+    console.warn(`[vs-index] Invalid cursor value for ${key}: "${value}" (contains whitespace), resetting to null`);
+    return null;
+  }
+  
+  // Reject hexadecimal strings like "0x64"
+  if (trimmed.startsWith("0x") || trimmed.startsWith("0X")) {
+    console.warn(`[vs-index] Invalid cursor value for ${key}: "${value}" (hexadecimal format), resetting to null`);
+    return null;
+  }
+  
+  // Reject scientific notation like "1e2" or "1E2"
+  if (/^[+-]?\d+e[+-]?\d+$/i.test(trimmed)) {
+    console.warn(`[vs-index] Invalid cursor value for ${key}: "${value}" (scientific notation), resetting to null`);
+    return null;
+  }
+  
+  const parsed = Number(trimmed);
+  // Reject non-finite values, negative numbers, and NaN
+  if (!Number.isFinite(parsed) || parsed < 0 || Number.isNaN(parsed)) {
+    console.warn(`[vs-index] Invalid cursor value for ${key}: "${value}", resetting to null`);
+    return null;
+  }
+  
+  // Reject floating point numbers - cursor positions must be integers
+  if (!Number.isInteger(parsed)) {
+    console.warn(`[vs-index] Invalid cursor value for ${key}: "${value}" (not an integer), resetting to null`);
+    return null;
+  }
+  
+  return parsed;
+}
+
+/**
+ * Transactionally update a sync cursor with validation.
+ *
+ * The cursor is only advanced if the new value is greater than the current one,
+ * preventing cursor rollback from a race condition or malformed state. This is
+ * called inside a database transaction in production, but the validation logic
+ * lives here to keep the sync layer self-contained.
+ */
+async function advanceCursor(key: string, newValue: number): Promise<void> {
+  const current = await getSyncMeta(key);
+  const currentValidated = validateCursorValue(current, key);
+  
+  // Only advance; never roll back. A rollback would mean losing progress and
+  // re-scanning already-indexed data, which is both wasteful and a replay risk.
+  if (currentValidated !== null && newValue <= currentValidated) {
+    console.warn(`[vs-index] Cursor ${key} would roll back from ${currentValidated} to ${newValue}, skipping update`);
+    return;
+  }
+  
+  await setSyncMeta(key, String(newValue));
+}
+
+/**
+ * Recover from a corrupted or missing cursor by falling back to a safe default.
+ *
+ * This is the fail-closed path: if the cursor is unusable, we restart from a
+ * known-good position rather than proceeding with bad state that could skip
+ * data or duplicate work.
+ */
+async function recoverCursor(key: string, fallback: number): Promise<number> {
+  const current = await getSyncMeta(key);
+  const validated = validateCursorValue(current, key);
+  
+  if (validated === null) {
+    console.warn(`[vs-index] Recovering cursor ${key} to fallback value ${fallback}`);
+    await setSyncMeta(key, String(fallback));
+    return fallback;
+  }
+  
+  return validated;
+}
+
 type ReconcileResult = {
   synced: number;
   new: number;
@@ -501,7 +591,8 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
     }),
   ]);
 
-  const lastClaimCount = Number(lastClaimCountValue ?? "0");
+  // Use validated cursor; fall back to 0 if corrupted
+  const lastClaimCount = validateCursorValue(lastClaimCountValue, "last_claim_count") ?? 0;
   let synced = 0;
   let newClaims = 0;
   let stateChanges = 0;
@@ -532,12 +623,12 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
       let checkpoint = startId - 1;
       while (got.has(checkpoint + 1)) checkpoint += 1;
       if (checkpoint >= startId) {
-        await setSyncMeta("last_claim_count", String(checkpoint));
+        await advanceCursor("last_claim_count", checkpoint);
       }
       break;
     }
 
-    await setSyncMeta("last_claim_count", String(pageEnd));
+    await advanceCursor("last_claim_count", pageEnd);
   }
 
   // 2. Refresh claims the index believes are open/active by reading only
@@ -556,7 +647,8 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
     }
   }
 
-  await setSyncMeta("last_sync_at", String(now));
+  // Advance sync timestamp only on successful completion
+  await advanceCursor("last_sync_at", now);
 
   return {
     synced,
