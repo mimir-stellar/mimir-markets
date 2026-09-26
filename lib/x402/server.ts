@@ -215,10 +215,23 @@ export function paidRoute<T>(
       }) as NextResponse<T>;
     }
     const { authorizeRequest } = await import("@/lib/api/policy");
+    const { verifyBrowserOrigin } = await import("@/lib/api/origin");
     const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
     const wallet = paymentPayer(req) || undefined;
     const tier = wallet ? "authenticated_user" : "public_read";
-    const rlGate = authorizeRequest(tier, { route: req.nextUrl.pathname, ip, wallet });
+    
+    // We assume non-GET methods mutate value. If an endpoint requires an idempotency key,
+    // it will be enforced by the policy.
+    const mutatesValue = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
+    const originValid = verifyBrowserOrigin(req);
+    
+    const rlGate = authorizeRequest(tier, { 
+      route: req.nextUrl.pathname, 
+      ip, 
+      wallet,
+      mutatesValue,
+      originValid,
+    });
     if (!rlGate.allowed && rlGate.error) {
       return NextResponse.json(rlGate.error.body, { status: rlGate.error.status, headers: rlGate.error.headers }) as NextResponse<T>;
     }
