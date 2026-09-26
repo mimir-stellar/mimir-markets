@@ -53,7 +53,13 @@ applyWorkerGeminiKey("ORACLE_GEMINI_API_KEY");
 
 import { requireEnv, requireAnyLLMKey, applyWorkerGeminiKey, createThrottle } from "../../lib/agent-bootstrap";
 import { kellyFraction } from "../../lib/kelly";
-import { type VerdictPayload } from "../../lib/verdict";
+import {
+  type VerdictPayload,
+  type ResearchCitation,
+  validateResearchCitation,
+  validateCitationsList,
+  MAX_VERDICT_CITATIONS,
+} from "../../lib/verdict";
 import {
   parseLLMVerdictWithRetry,
   VERDICT_LLM_SCHEMA,
@@ -83,6 +89,8 @@ import {
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll } from "../../lib/ops/heartbeat";
 import { isPaused } from "../../lib/ops/flags";
+// Explicit settlement outcome + named UNRESOLVABLE (refund) reasons (#99).
+import { applySettlementPolicy, describeDecision } from "../../lib/oracle/unresolvable-policy";
 import { unitsToUsdc, usdcToUnits, formatAtomicUsdc } from "../../lib/usdc";
 import {
   fetchEvidence as fetchEvidenceShared,
@@ -101,6 +109,8 @@ import {
   type CouncilVote,
 } from "./council-vote";
 import { normalizeQuorum } from "../../lib/council/quorum";
+// Confidence tiers + fetcher-trust cap: pure and fixture-calibrated (#97).
+import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tiers";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -359,54 +369,11 @@ function verdictToSide(
 // Oracle plays few, high-conviction markets — cap Kelly at 25% of bankroll.
 const KELLY_CAP = 0.25;
 
-// Confidence tiers govern how the oracle commits a verdict.
-// HIGH      → settle as the LLM said.
-// MEDIUM    → still settle, but the explanation gets a [CONTESTED] prefix so
-//             the UI can flag low-trust resolutions.
-// LOW       → force the verdict to UNRESOLVABLE so the contract refunds.
-// Keeps the "refund the ambiguous" principle out of marketing slides and
-// into actual on-chain behavior.
-const CONFIDENCE_HIGH_MIN = 80; // ≥ : settle as-is
-const CONFIDENCE_MED_MIN  = 60; // 60–79: settle but mark contested
-                                // < 60 : downgrade to UNRESOLVABLE
-
-function tierVerdict(verdict: OracleVerdict): OracleVerdict {
-  if (verdict.verdict === "UNRESOLVABLE" || verdict.verdict === "DRAW") return verdict;
-  if (verdict.confidence >= CONFIDENCE_HIGH_MIN) return verdict;
-  if (verdict.confidence >= CONFIDENCE_MED_MIN) {
-    return {
-      ...verdict,
-      explanation: `[CONTESTED] ${verdict.explanation}`.slice(0, 500),
-    };
-  }
-  // Low confidence: refund rather than guess
-  return {
-    verdict:     "UNRESOLVABLE",
-    confidence:  verdict.confidence,
-    explanation: `[LOW CONFIDENCE — refunded] ${verdict.explanation}`.slice(0, 500),
-  };
-}
-
-// Cap confidence and tag the audit trail when the evidence wasn't fetched
-// through a deterministic API (CoinGecko). Scraped HTML — even via Jina —
-// can drift, be paginated, or be partially blocked, so we don't allow a
-// firm HIGH-tier settlement off it.
-const MAX_CONFIDENCE_NON_API = 75;
-
-function applyFetcherTrust(
-  verdict: OracleVerdict,
-  fetcher: EvidenceFetcherKind | "none",
-): OracleVerdict {
-  if (fetcher === "coingecko-api") return verdict;
-  if (verdict.verdict === "UNRESOLVABLE") return verdict;
-  const cappedConfidence = Math.min(verdict.confidence, MAX_CONFIDENCE_NON_API);
-  const tag = fetcher === "jina" ? "[via-jina]" : fetcher === "direct" ? "[via-scrape]" : "[no-fetch]";
-  return {
-    ...verdict,
-    confidence: cappedConfidence,
-    explanation: `${tag} ${verdict.explanation}`.slice(0, 500),
-  };
-}
+// Confidence tiers govern how the oracle commits a verdict: HIGH (≥80) settles
+// as the LLM said, MEDIUM (60–79) settles with a [CONTESTED] prefix, LOW (<60)
+// is forced to UNRESOLVABLE so the contract refunds. Non-API evidence is capped
+// at 75 first. Both helpers (tierVerdict, applyFetcherTrust) live unchanged in
+// lib/oracle/confidence-tiers.ts, calibrated against fixtures (#97).
 
 // Sports markets close betting at kickoff, so the claim is "expired" (settleable)
 // while the match may still be in progress. Defer settlement until the match is
@@ -544,14 +511,45 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
     council:         councilCommitment,
   });
   const trusted      = applyFetcherTrust(rawVerdict, evidence.fetcher);
-  const verdict      = tierVerdict(trusted);
+  // The policy names the outcome (firm / contested / draw / refund + reason)
+  // instead of inferring it by diffing strings against rawVerdict, which logged
+  // a model-issued UNRESOLVABLE as "FIRM" and fetcher-tagged verdicts as
+  // "CONTESTED". It also refunds a decisive verdict with an invalid confidence
+  // instead of settling a side on it (#99).
+  const decision     = applySettlementPolicy(trusted, tierVerdict);
+  const verdict      = decision.verdict;
 
-  const tierTag =
-    verdict.verdict !== rawVerdict.verdict ? "REFUND" :
-    verdict.explanation !== rawVerdict.explanation ? "CONTESTED" :
-    "FIRM";
+  // Attach canonical research citations to the verdict payload
+  const citations: ResearchCitation[] = [];
+  if (claim.resolution_url && claim.resolution_url.startsWith("http")) {
+    const canonical = validateResearchCitation({
+      url: claim.resolution_url,
+      contentHash: evidenceHash,
+      capturedAt: Date.now(),
+      trustTier: evidence.fetcher === "coingecko-api" ? "primary" : evidence.fetcher === "none" ? "unverified" : "corroborating",
+      fetcher: evidence.fetcher,
+      title: claim.question ? claim.question.slice(0, 100) : undefined,
+    });
+    if (canonical) {
+      citations.push(canonical);
+    }
+  }
+  if (Array.isArray(rawVerdict.citations) && rawVerdict.citations.length > 0) {
+    const validatedLlmCitations = validateCitationsList(rawVerdict.citations);
+    if (validatedLlmCitations.ok && validatedLlmCitations.citations) {
+      for (const c of validatedLlmCitations.citations) {
+        if (!citations.some((existing) => existing.url === c.url)) {
+          citations.push(c);
+        }
+      }
+    }
+  }
+  if (citations.length > 0) {
+    verdict.citations = citations.slice(0, MAX_VERDICT_CITATIONS);
+    console.log(`[settle] Citations (${verdict.citations.length}): ${verdict.citations.map((c) => c.domain).join(", ")}`);
+  }
 
-  console.log(`[settle] Verdict: ${verdict.verdict} (${verdict.confidence}%) [${tierTag}]`);
+  console.log(`[settle] Verdict: ${verdict.verdict} (${verdict.confidence}%) [${describeDecision(decision)}]`);
   console.log(`[settle] Evidence hash: ${evidenceHash}`);
   console.log(`[settle] "${verdict.explanation.slice(0, 100)}..."`);
 
