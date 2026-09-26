@@ -68,6 +68,7 @@ guidance is in [`docs/LEDGER_REPLAY.md`](docs/LEDGER_REPLAY.md).
 - [Production deploy (Vercel + Railway)](#production-deploy-vercel--railway)
 - [Configuration reference](#configuration-reference)
 - [Scripts](#scripts)
+- [Running tests & coverage](#running-tests--coverage)
 - [Game modes roadmap](#game-modes-roadmap)
 - [Design principles](#design-principles)
 - [License](#license)
@@ -863,7 +864,7 @@ mimir-markets/
 
 - Node.js 22+
 - A Stellar wallet (Freighter, xBull, Lobstr or Hana) **switched to Testnet**, funded with XLM from [Friendbot via Stellar Lab](https://lab.stellar.org/account/fund) and test USDC from [Circle's faucet](https://faucet.circle.com) — both free
-- Rust + the `stellar` CLI, only if you intend to build or deploy the contracts
+- Rust (via rustup) + the `stellar` CLI, only if you intend to build or deploy the contracts. rustup installs the pinned toolchain from `rust-toolchain.toml` on first use; see [`docs/CONTRACT_TOOLCHAINS.md`](docs/CONTRACT_TOOLCHAINS.md)
 - At least one LLM API key configured in `.env.local`
 - Optional: a Neon account at [console.neon.tech](https://console.neon.tech) for the read-index
 
@@ -1061,7 +1062,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `MIMIR_FEATURE_COPY_TRADING`      | copy routes              | `1` enables copy-trading execution                                                  |
 | `MIMIR_FEATURE_AGENT_BASKETS`     | basket routes            | `1` enables basket composition and following                                        |
 | `MIMIR_FEATURE_FEE_POLICY`        | settlement               | `1` enforces the fee policy; needs the audited `mimir-market` escrow deployed first |
-| `MIMIR_PAUSE_<CAPABILITY>`        | ops                      | `1` pauses one capability (`stake`, `create_market`, `copy_execution`, `x402_selling`, ...); `MIMIR_PAUSE_ALL=1` for all. Withdrawals are never pausable |
+| `MIMIR_PAUSE_<CAPABILITY>`        | ops                      | `1` pauses one capability (`stake`, `create_market`, `copy_execution`, `x402_selling`, ...); `MIMIR_PAUSE_ALL=1` for all. Withdrawals are never pausable. Full list and behavior: [`docs/INCIDENT_KILL_SWITCHES.md`](docs/INCIDENT_KILL_SWITCHES.md) |
 | `MIMIR_DISABLE_CATEGORY_<ID>`     | ops                      | `1` stops new markets in one category without a deploy                              |
 | `SPEND_PERMISSION_SPENDER`        | agent API                | Mimir's spender (`G…` or `C…`) for BYOA spend permissions; unset means funded actions cannot be delegated |
 | `DATABASE_URL`                    | optional (Neon)          | Read-index cache. Pages that need it fail gracefully if absent                     |
@@ -1118,6 +1119,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run typecheck`                          | `tsc --noEmit` across app, workers and scripts                                     |
 | `npm run check:terms`                        | Forbidden-terms lint (keeps pre-Stellar chain names and bespoke-402 residue out)   |
 | `npm run test:contracts`                     | `cargo test --release` over `contracts-soroban`                                     |
+| `npm run check:toolchains`                   | Pinned release toolchain, contract MSRV and CI toolchain matrix agree (no Rust needed) |
 | `npm run workers`                            | Run all agent workers in parallel (Railway entry point: oracle + market-creator + council + sync + traders) |
 | `npm run oracle`                             | Run only the oracle (settler; optionally `AUTO_CHALLENGE=1`)                       |
 | `npm run market-creator`                     | Run only the market-creator                                                        |
@@ -1133,7 +1135,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run deploy:contract`                    | Build, deploy and initialize the Soroban contracts on Stellar Testnet              |
 | `npm run verify:deployment`                  | Check the deployed contract ids, WASM hash and initialized config                  |
 | `npm run verify:artifacts`                   | Verify / pin Soroban Wasm digests against `deploy/contract-artifacts.manifest.json` (no secrets) |
-| `npm run verify:analytics`                   | Check the analytics gates the launch gate requires                                 |
+| `npm run verify:analytics`                   | Check exported analytics quality; privacy/release runbook: [`docs/ANALYTICS_PRIVACY.md`](./docs/ANALYTICS_PRIVACY.md) |
 | `npm run backup:read-index`                  | Dump the Neon read-index cache to a self-verified checksummed archive (`--out <path>` or stdout; needs `DATABASE_URL`, no seeds) |
 | `npm run verify:cache-backup`                | Verify a cache-backup archive offline — no `DATABASE_URL`, no network, byte-reproducible |
 | `npm run restore:read-index`                 | Restore a *verified* archive into the Neon read-index and fingerprint-check the result (`--dry-run` to preview) |
@@ -1146,6 +1148,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run test:baskets`                       | Basket validation, virtual NAV and high-water fee suites                           |
 | `npm run test:squad`                         | Squad view and pool suites                                                         |
 | `npm run test:schema`                        | Schema backlog suites                                                              |
+| `npm run test:kill-switches`                 | Every incident kill switch at its enforcement point, offline                       |
 | `npm run warm:vs-index`                      | Rebuild the Neon read-index from current on-chain state                            |
 | `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run)                                                  |
 | `npx tsx scripts/demo-full-cycle.ts`         | Full create -> challenge -> settle demo in ~90s                                    |
@@ -1184,6 +1187,62 @@ These show up in PR review and shape what we accept:
 7. **Refund the ambiguous.** `Draw` and `Unresolvable` are first-class verdicts that return stakes. Better to be inconclusive and refund than to be wrong and pay out.
 8. **A pull is not a worse push.** Challenger settlement, parked payouts and accrued fees are all collected by their owner, because a transaction's ledger-entry footprint cannot fit 100 payouts and because one frozen trustline must not be able to fail everyone else's settlement. Nothing expires, and the last claimant absorbs the dust.
 9. **Strkeys are compared exactly.** `G…`/`C…` addresses are case-sensitive base32. Never lowercase one to normalise it — that is the EVM reflex, and in an allowlist written the wrong way round it fails open.
+
+---
+
+## Running tests & coverage
+
+Mimir's money-moving paths are gated by a coverage step that runs in CI and locally without any production secrets.
+
+### Quick start
+
+```sh
+# Run all node tests (same as CI test:smoke)
+npm run test:smoke
+
+# Run the coverage-gated subset and print a summary
+npm run test:coverage
+
+# If PASS_SECRET is not set in your environment, set any non-empty value:
+PASS_SECRET=test npm run test:coverage
+```
+
+`DATABASE_URL` is **not required** — `lib/paid-revenue.ts` falls back to an in-memory ring buffer when the variable is unset, which is the default test path.
+
+### Covered modules and thresholds
+
+`npm run test:coverage` enforces the following minimums via [c8](https://github.com/bcoe/c8) on each of the 8 money-moving modules:
+
+| Module | Lines | Branches |
+|---|---|---|
+| `lib/fees.ts` | 80% | 70% |
+| `lib/payout.ts` | 80% | 70% |
+| `lib/money.ts` | 80% | 70% |
+| `lib/paid-pass.ts` | 80% | 70% |
+| `lib/paid-revenue.ts` | 80% | 70% |
+| `lib/x402/buyer.ts` | 80% | 70% |
+| `lib/agents/registry.ts` | 80% | 70% |
+| `lib/agents/spend-permissions.ts` | 80% | 70% |
+
+Thresholds are declared in `.c8rc` at the workspace root. The step fails the build when any threshold is breached.
+
+### Test suites
+
+New test files covering the previously-untested modules live in `tests/node/`:
+
+- `money.test.ts` — `formatUsdc` / `formatUsdcBare` edge cases
+- `paid-pass.test.ts` — HMAC round-trip, expiry, tamper detection
+- `paid-revenue.test.ts` — in-memory ledger idempotency, ring-buffer eviction, aggregation
+- `x402-buyer.test.ts` — kill-switch fail-closed, `PaymentBudgetExceeded` properties
+
+All tests use the Node built-in test runner (`node --test`). No additional test framework is required.
+
+### When to update this section
+
+Update this section in the same PR if you:
+- add a new environment variable that the `test:coverage` step requires
+- rename or remove the `npm run test:coverage` command
+- add, remove, or reorder steps in `.github/workflows/ci.yml`
 
 ---
 

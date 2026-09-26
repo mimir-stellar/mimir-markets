@@ -435,6 +435,20 @@ fn cancelling_before_any_challenge_refunds_in_full() {
 }
 
 #[test]
+fn cancelling_twice_is_idempotent() {
+    let f = Fixture::new(1_000, 0);
+    let creator = f.user(100 * USDC);
+    let id = f.client().create_claim(&creator, &f.params(10 * USDC));
+
+    f.client().cancel_claim(&id);
+    f.client().cancel_claim(&id); // Should not error
+
+    assert_eq!(f.client().get_claim(&id).state, ClaimState::Cancelled);
+    assert_eq!(f.token().balance(&creator), 100 * USDC);
+    assert_eq!(f.escrow_balance(), 0);
+}
+
+#[test]
 fn a_challenged_claim_can_no_longer_be_cancelled() {
     let f = Fixture::new(0, 0);
     let creator = f.user(100 * USDC);
@@ -466,15 +480,13 @@ fn only_the_creator_can_cancel() {
 }
 
 #[test]
-fn a_cancelled_claim_cannot_be_challenged_or_cancelled_again() {
+fn a_cancelled_claim_cannot_be_challenged() {
     let f = Fixture::new(0, 0);
     let creator = f.user(100 * USDC);
     let c1 = f.user(100 * USDC);
     let id = f.client().create_claim(&creator, &f.params(10 * USDC));
     f.client().cancel_claim(&id);
 
-    let err = f.client().try_cancel_claim(&id).unwrap_err().unwrap();
-    assert_eq!(err, Error::ClaimNotOpen);
     let err = f
         .client()
         .try_challenge_claim(&c1, &id, &(5 * USDC), &None)

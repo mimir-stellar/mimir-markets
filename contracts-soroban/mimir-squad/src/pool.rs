@@ -277,7 +277,14 @@ pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
     storage::oracle(env)?.require_auth();
 
     let mut market = storage::get_market(env, market_id)?;
-    if market.resolved || env.ledger().timestamp() < market.deadline {
+    if market.resolved {
+        if market.result == result {
+            return Ok(());
+        } else {
+            return Err(Error::NotResolvable);
+        }
+    }
+    if env.ledger().timestamp() < market.deadline {
         return Err(Error::NotResolvable);
     }
     if result != SIDE_A && result != SIDE_B && result != RESULT_CANCELLED {
