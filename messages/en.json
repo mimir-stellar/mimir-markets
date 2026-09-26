@@ -159,76 +159,31 @@
   "create": {
     "challengeSectionTitle": "WHAT WILL HAPPEN?",
     "challengeQuestionExamples": [
-      [
-        [
-          "question",
-          "e.g. BTC hits $100k this week"
-        ],
-        [
-          "creator",
-          "BTC reaches or exceeds $100k this week"
-        ],
-        [
-          "opponent",
-          "BTC stays below $100k this week"
-        ]
-      ],
-      [
-        [
-          "question",
-          "e.g. Argentina beats Brazil?"
-        ],
-        [
-          "creator",
-          "Argentina wins the match"
-        ],
-        [
-          "opponent",
-          "Brazil wins or draw"
-        ]
-      ],
-      [
-        [
-          "question",
-          "e.g. Will it rain tomorrow in Buenos Aires?"
-        ],
-        [
-          "creator",
-          "Rain in Buenos Aires that day"
-        ],
-        [
-          "opponent",
-          "No rain in Buenos Aires that day"
-        ]
-      ],
-      [
-        [
-          "question",
-          "e.g. Will GPT-5 be announced before June?"
-        ],
-        [
-          "creator",
-          "OpenAI announces GPT-5 before June 1"
-        ],
-        [
-          "opponent",
-          "No GPT-5 announcement before June 1"
-        ]
-      ],
-      [
-        [
-          "question",
-          "e.g. Will Hozier win a 2027 Grammy?"
-        ],
-        [
-          "creator",
-          "Hozier wins at least one Grammy in 2027"
-        ],
-        [
-          "opponent",
-          "Hozier wins no Grammy in 2027"
-        ]
-      ]
+      {
+        "question": "e.g. BTC hits $100k this week",
+        "creator": "BTC reaches or exceeds $100k this week",
+        "opponent": "BTC stays below $100k this week"
+      },
+      {
+        "question": "e.g. Argentina beats Brazil?",
+        "creator": "Argentina wins the match",
+        "opponent": "Brazil wins or draw"
+      },
+      {
+        "question": "e.g. Will it rain tomorrow in Buenos Aires?",
+        "creator": "Rain in Buenos Aires that day",
+        "opponent": "No rain in Buenos Aires that day"
+      },
+      {
+        "question": "e.g. Will GPT-5 be announced before June?",
+        "creator": "OpenAI announces GPT-5 before June 1",
+        "opponent": "No GPT-5 announcement before June 1"
+      },
+      {
+        "question": "e.g. Will Hozier win a 2027 Grammy?",
+        "creator": "Hozier wins at least one Grammy in 2027",
+        "opponent": "Hozier wins no Grammy in 2027"
+      }
     ],
     "whatWillHappen": "What will happen?",
     "ibet": "I bet",
@@ -284,48 +239,18 @@
     "moderationNeedsMoreInfo": "Fill in the claim to run the policy check.",
     "moderationNeedsCheck": "Policy check not run yet for these terms.",
     "moderationUpToDate": "Policy check is up to date.",
-    "moderationCodes": [
-      [
-        "death_self_harm",
-        "Self-harm / death"
-      ],
-      [
-        "violence_harm",
-        "Violence / harm"
-      ],
-      [
-        "hate_harassment",
-        "Hate / harassment"
-      ],
-      [
-        "sexual_minors",
-        "Sexual content involving minors"
-      ],
-      [
-        "nonconsensual_sexual",
-        "Non-consensual sexual content"
-      ],
-      [
-        "illegal_facilitation",
-        "Illegal facilitation"
-      ],
-      [
-        "doxxing_personal_data",
-        "Doxxing / personal data"
-      ],
-      [
-        "medical_privacy",
-        "Medical privacy"
-      ],
-      [
-        "graphic_content",
-        "Graphic content"
-      ],
-      [
-        "other_policy",
-        "Other policy issue"
-      ]
-    ],
+    "moderationCodes": {
+      "death_self_harm": "Self-harm / death",
+      "violence_harm": "Violence / harm",
+      "hate_harassment": "Hate / harassment",
+      "sexual_minors": "Sexual content involving minors",
+      "nonconsensual_sexual": "Non-consensual sexual content",
+      "illegal_facilitation": "Illegal facilitation",
+      "doxxing_personal_data": "Doxxing / personal data",
+      "medical_privacy": "Medical privacy",
+      "graphic_content": "Graphic content",
+      "other_policy": "Other policy issue"
+    },
     "submittedPending": "Transaction submitted to Stellar. It may take a moment to appear.",
     "walletTx": "Wallet tx",
     "consensusTx": "Consensus tx",
@@ -352,59 +277,23 @@
     "settlementMode": "Settlement mode",
     "duelConversationTarget": "Private duel requested from XMTP conversation with {wallet}. Create it, then send the generated invite link in that encrypted chat.",
     "poolSlots": "Challenger slots",
-    "settlementModes": [
-      [
-        "pool",
-        [
-          [
-            "label",
-            "Pool Market"
-          ],
-          [
-            "hint",
-            "Many challengers, proportional payout"
-          ],
-          [
-            "detail",
-            "Challengers share your stake in proportion to their own. The more join one side, the thinner each winner's profit — and your profit comes from the losing side, not from Mimir."
-          ]
-        ]
-      ],
-      [
-        "duel",
-        [
-          [
-            "label",
-            "Duel"
-          ],
-          [
-            "hint",
-            "One rival, equal stakes"
-          ],
-          [
-            "detail",
-            "Exactly one rival must match your stake, and the winner takes the two-person pot. A draw or an unresolvable outcome refunds both sides in full."
-          ]
-        ]
-      ],
-      [
-        "fixed_odds",
-        [
-          [
-            "label",
-            "Fixed Odds"
-          ],
-          [
-            "hint",
-            "You guarantee a total return"
-          ],
-          [
-            "detail",
-            "You guarantee challengers a fixed total-return multiple, backed by your own stake. Capacity is bounded by your unreserved liquidity, not by a slot count."
-          ]
-        ]
-      ]
-    ],
+    "settlementModes": {
+      "pool": {
+        "label": "Pool Market",
+        "hint": "Many challengers, proportional payout",
+        "detail": "Challengers share your stake in proportion to their own. The more join one side, the thinner each winner's profit — and your profit comes from the losing side, not from Mimir."
+      },
+      "duel": {
+        "label": "Duel",
+        "hint": "One rival, equal stakes",
+        "detail": "Exactly one rival must match your stake, and the winner takes the two-person pot. A draw or an unresolvable outcome refunds both sides in full."
+      },
+      "fixed_odds": {
+        "label": "Fixed Odds",
+        "hint": "You guarantee a total return",
+        "detail": "You guarantee challengers a fixed total-return multiple, backed by your own stake. Capacity is bounded by your unreserved liquidity, not by a slot count."
+      }
+    },
     "marketType": "Market type",
     "oddsMode": "Odds mode",
     "category": "Category",
@@ -430,64 +319,25 @@
     "questionStrengthHint": "Name the outcome, the subject, and the exact window you want Mimir to judge.",
     "sourceStrengthHint": "Use a source page that will still show the exact result when the deadline arrives.",
     "settlementStrengthHint": "The clearer your settlement rule is, the easier the claim is to resolve consistently.",
-    "marketTypes": [
-      [
-        "binary",
-        "Binary"
-      ],
-      [
-        "moneyline",
-        "Moneyline"
-      ],
-      [
-        "spread",
-        "Spread"
-      ],
-      [
-        "total",
-        "Total"
-      ],
-      [
-        "prop",
-        "Prop"
-      ],
-      [
-        "custom",
-        "Custom"
-      ]
-    ],
-    "oddsModes": [
-      [
-        "pool",
-        "Pool odds"
-      ],
-      [
-        "fixed",
-        "Fixed odds"
-      ]
-    ],
-    "presets": [
-      [
-        "1h",
-        "1h"
-      ],
-      [
-        "24h",
-        "24h"
-      ],
-      [
-        "3days",
-        "3 days"
-      ],
-      [
-        "1week",
-        "1 week"
-      ],
-      [
-        "1month",
-        "1 month"
-      ]
-    ],
+    "marketTypes": {
+      "binary": "Binary",
+      "moneyline": "Moneyline",
+      "spread": "Spread",
+      "total": "Total",
+      "prop": "Prop",
+      "custom": "Custom"
+    },
+    "oddsModes": {
+      "pool": "Pool odds",
+      "fixed": "Fixed odds"
+    },
+    "presets": {
+      "1h": "1h",
+      "24h": "24h",
+      "3days": "3 days",
+      "1week": "1 week",
+      "1month": "1 month"
+    },
     "pageTitleBefore": "SET THE TERMS AND",
     "pageTitleAccent": "INITIALIZE CHALLENGE",
     "demoModeHint": "Demo mode uses hosted server signers so the flow stays reliable even if browser wallets are unstable.",
@@ -514,20 +364,11 @@
     "sourceDraftDeadline": "Suggested deadline",
     "sourceDraftPrimarySource": "Primary source",
     "sourceDraftSettlementRule": "Settlement rule",
-    "sourceDraftSourceTypes": [
-      [
-        "official",
-        "Official source"
-      ],
-      [
-        "media",
-        "Media source"
-      ],
-      [
-        "other",
-        "Other source"
-      ]
-    ],
+    "sourceDraftSourceTypes": {
+      "official": "Official source",
+      "media": "Media source",
+      "other": "Other source"
+    },
     "useRecommendedRule": "Use recommended rules",
     "qualityReview": "Demo readiness checklist",
     "qualityReviewHint": "Quick checks for your question, verification source, and settlement rule. This list is informative only and does not block publishing.",
@@ -544,161 +385,53 @@
     "ticketAuthSig": "AUTH_SIG",
     "ticketSignatureNote": "Initialization requires smart contract signature",
     "ticketSettlementFallback": "Add a settlement rule or use the category default from the Advanced section.",
-    "guidance": [
-      [
-        "sports",
-        [
-          [
-            "sourceHint",
-            "Use the official match, league, or scoreboard page for the exact event you want to settle."
-          ],
-          [
-            "questionHint",
-            "Name the teams, competition, and timeframe directly in the claim."
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this against the official final result of the linked event. State whether extra time, penalties, or overtime count."
-          ]
-        ]
-      ],
-      [
-        "weather",
-        [
-          [
-            "sourceHint",
-            "Use a weather source that clearly names the location and date being measured."
-          ],
-          [
-            "questionHint",
-            "Name the city or region and the exact day being judged."
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this using the weather reported for the named location and date on the linked source. Use the exact precipitation or temperature condition written here."
-          ]
-        ]
-      ],
-      [
-        "deportes",
-        [
-          [
-            "sourceHint",
-            "Use the official match, league, or scoreboard page for the exact event you want to settle."
-          ],
-          [
-            "questionHint",
-            "Name the teams, competition, and timeframe directly in the claim."
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this against the official final result of the linked event. State whether extra time, penalties, or overtime count."
-          ]
-        ]
-      ],
-      [
-        "clima",
-        [
-          [
-            "sourceHint",
-            "Use a weather source that clearly names the location and date being measured."
-          ],
-          [
-            "questionHint",
-            "Name the city or region and the exact day being judged."
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this using the weather reported for the named location and date on the linked source. Use the exact precipitation or temperature condition written here."
-          ]
-        ]
-      ],
-      [
-        "crypto",
-        [
-          [
-            "sourceHint",
-            "Use a price page that will still show the asset and quoted value at settlement time."
-          ],
-          [
-            "questionHint",
-            "Name the asset, threshold, and deadline explicitly."
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this using the visible spot price on the linked source at the deadline time. Apply any threshold or line exactly as written."
-          ]
-        ]
-      ],
-      [
-        "culture",
-        [
-          [
-            "sourceHint",
-            "Prefer the official publication, awards page, or primary entertainment source behind the claim."
-          ],
-          [
-            "questionHint",
-            "Anchor the claim to a concrete release, award, ranking, or publication event."
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this only from the linked official or authoritative source. Do not infer beyond the exact published result."
-          ]
-        ]
-      ],
-      [
-        "tech",
-        [
-          [
-            "sourceHint",
-            "Use an official product blog, press release, or changelog that will still reflect the announced fact at settlement."
-          ],
-          [
-            "questionHint",
-            "Name the product, company, and the concrete milestone or date window being judged."
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this only from the linked official source at the deadline. Treat “announced” as a public, attributable statement from the named party."
-          ]
-        ]
-      ],
-      [
-        "cultura",
-        [
-          [
-            "sourceHint",
-            "Prefer the official publication, awards page, or primary entertainment source behind the claim."
-          ],
-          [
-            "questionHint",
-            "Anchor the claim to a concrete release, award, ranking, or publication event."
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this only from the linked official or authoritative source. Do not infer beyond the exact published result."
-          ]
-        ]
-      ],
-      [
-        "custom",
-        [
-          [
-            "sourceHint",
-            "Use the official match, league, or scoreboard page for the exact event you want to settle."
-          ],
-          [
-            "questionHint",
-            ""
-          ],
-          [
-            "settlementTemplate",
-            "Resolve this exactly as written using the linked source only. If the wording or source is ambiguous, mark it unresolvable."
-          ]
-        ]
-      ]
-    ],
+    "guidance": {
+      "sports": {
+        "sourceHint": "Use the official match, league, or scoreboard page for the exact event you want to settle.",
+        "questionHint": "Name the teams, competition, and timeframe directly in the claim.",
+        "settlementTemplate": "Resolve this against the official final result of the linked event. State whether extra time, penalties, or overtime count."
+      },
+      "weather": {
+        "sourceHint": "Use a weather source that clearly names the location and date being measured.",
+        "questionHint": "Name the city or region and the exact day being judged.",
+        "settlementTemplate": "Resolve this using the weather reported for the named location and date on the linked source. Use the exact precipitation or temperature condition written here."
+      },
+      "deportes": {
+        "sourceHint": "Use the official match, league, or scoreboard page for the exact event you want to settle.",
+        "questionHint": "Name the teams, competition, and timeframe directly in the claim.",
+        "settlementTemplate": "Resolve this against the official final result of the linked event. State whether extra time, penalties, or overtime count."
+      },
+      "clima": {
+        "sourceHint": "Use a weather source that clearly names the location and date being measured.",
+        "questionHint": "Name the city or region and the exact day being judged.",
+        "settlementTemplate": "Resolve this using the weather reported for the named location and date on the linked source. Use the exact precipitation or temperature condition written here."
+      },
+      "crypto": {
+        "sourceHint": "Use a price page that will still show the asset and quoted value at settlement time.",
+        "questionHint": "Name the asset, threshold, and deadline explicitly.",
+        "settlementTemplate": "Resolve this using the visible spot price on the linked source at the deadline time. Apply any threshold or line exactly as written."
+      },
+      "culture": {
+        "sourceHint": "Prefer the official publication, awards page, or primary entertainment source behind the claim.",
+        "questionHint": "Anchor the claim to a concrete release, award, ranking, or publication event.",
+        "settlementTemplate": "Resolve this only from the linked official or authoritative source. Do not infer beyond the exact published result."
+      },
+      "tech": {
+        "sourceHint": "Use an official product blog, press release, or changelog that will still reflect the announced fact at settlement.",
+        "questionHint": "Name the product, company, and the concrete milestone or date window being judged.",
+        "settlementTemplate": "Resolve this only from the linked official source at the deadline. Treat “announced” as a public, attributable statement from the named party."
+      },
+      "cultura": {
+        "sourceHint": "Prefer the official publication, awards page, or primary entertainment source behind the claim.",
+        "questionHint": "Anchor the claim to a concrete release, award, ranking, or publication event.",
+        "settlementTemplate": "Resolve this only from the linked official or authoritative source. Do not infer beyond the exact published result."
+      },
+      "custom": {
+        "sourceHint": "Use the official match, league, or scoreboard page for the exact event you want to settle.",
+        "questionHint": "",
+        "settlementTemplate": "Resolve this exactly as written using the linked source only. If the wording or source is ambiguous, mark it unresolvable."
+      }
+    },
     "totalReturnLabel": "Total return promised to challengers",
     "totalReturnHint": "Challengers get {multiple}x their stake back on a win, funded from your stake. At this multiple your market can absorb about {capacity} USDC of challenges.",
     "bestOfTarget": "Best of {n}: the first side to {wins} wins takes the series. Draws and refunds do not count toward it."
@@ -779,20 +512,11 @@
     "confidenceHigh": "HIGH",
     "confidenceMedium": "MEDIUM",
     "confidenceLow": "LOW",
-    "challengeOpportunitySourceTypes": [
-      [
-        "official",
-        "Official source"
-      ],
-      [
-        "media",
-        "Media source"
-      ],
-      [
-        "other",
-        "Other source"
-      ]
-    ],
+    "challengeOpportunitySourceTypes": {
+      "official": "Official source",
+      "media": "Media source",
+      "other": "Other source"
+    },
     "readyToChallenge": "Ready to challenge",
     "readyToChallengeHint": "Open claims you can join right now, ranked by claim strength.",
     "results": "{count} result",
@@ -822,83 +546,29 @@
     "featuredCarouselStatus": "Spotlight {current} of {total}",
     "featuredCtaPrimary": "JOIN CHALLENGE",
     "featuredCtaSecondary": "MORE CHALLENGES",
-    "featuredSlides": [
-      [
-        "boxing",
-        [
-          [
-            "imageAlt",
-            "Featured boxing event artwork"
-          ],
-          [
-            "pill",
-            "Featured event"
-          ],
-          [
-            "titleLine1",
-            "Pereira vs Canelo"
-          ],
-          [
-            "titleLine2",
-            "Over 7 rounds"
-          ],
-          [
-            "body",
-            "Predicting high-intensity technical exchanges. System intelligence\nsuggests a 68% probability of extended duration."
-          ]
-        ]
-      ],
-      [
-        "f1",
-        [
-          [
-            "imageAlt",
-            "Formula 1 featured spotlight — Franco Colapinto"
-          ],
-          [
-            "pill",
-            "Featured event"
-          ],
-          [
-            "titleLine1",
-            "Franco Colapinto"
-          ],
-          [
-            "titleLine2",
-            "Finishes P17"
-          ],
-          [
-            "body",
-            "Austin race rhythm rewards tire discipline.\nOur stack prices P17 as the modal outcome versus opening lines."
-          ]
-        ]
-      ],
-      [
-        "alvarez",
-        [
-          [
-            "imageAlt",
-            "Argentina national team — Julián Álvarez World Cup spotlight"
-          ],
-          [
-            "pill",
-            "Featured event"
-          ],
-          [
-            "titleLine1",
-            "Julián Álvarez +6 goals"
-          ],
-          [
-            "titleLine2",
-            "FIFA World Cup 2026"
-          ],
-          [
-            "body",
-            "Attack volume and draw path point to upside on the goals line.\nOur read: more than six goals across the FIFA World Cup 2026."
-          ]
-        ]
-      ]
-    ]
+    "featuredSlides": {
+      "boxing": {
+        "imageAlt": "Featured boxing event artwork",
+        "pill": "Featured event",
+        "titleLine1": "Pereira vs Canelo",
+        "titleLine2": "Over 7 rounds",
+        "body": "Predicting high-intensity technical exchanges. System intelligence\nsuggests a 68% probability of extended duration."
+      },
+      "f1": {
+        "imageAlt": "Formula 1 featured spotlight — Franco Colapinto",
+        "pill": "Featured event",
+        "titleLine1": "Franco Colapinto",
+        "titleLine2": "Finishes P17",
+        "body": "Austin race rhythm rewards tire discipline.\nOur stack prices P17 as the modal outcome versus opening lines."
+      },
+      "alvarez": {
+        "imageAlt": "Argentina national team — Julián Álvarez World Cup spotlight",
+        "pill": "Featured event",
+        "titleLine1": "Julián Álvarez +6 goals",
+        "titleLine2": "FIFA World Cup 2026",
+        "body": "Attack volume and draw path point to upside on the goals line.\nOur read: more than six goals across the FIFA World Cup 2026."
+      }
+    }
   },
   "quality": {
     "claimStrength": "Claim Strength",
@@ -906,50 +576,20 @@
     "score": "Score",
     "scoreOutOf": "out of 100",
     "needsChallengers": "Needs challengers",
-    "tiers": [
-      [
-        "strong",
-        "Strong"
-      ],
-      [
-        "good",
-        "Good"
-      ],
-      [
-        "fair",
-        "Fair"
-      ],
-      [
-        "weak",
-        "Weak"
-      ]
-    ],
-    "signals": [
-      [
-        "question_specific",
-        "Specific question"
-      ],
-      [
-        "positions_clear",
-        "Clear opposing positions"
-      ],
-      [
-        "source_present",
-        "Verifiable source linked"
-      ],
-      [
-        "settlement_specific",
-        "Specific settlement rule"
-      ],
-      [
-        "structured_category",
-        "Structured category"
-      ],
-      [
-        "sufficient_time",
-        "Enough time before deadline"
-      ]
-    ],
+    "tiers": {
+      "strong": "Strong",
+      "good": "Good",
+      "fair": "Fair",
+      "weak": "Weak"
+    },
+    "signals": {
+      "question_specific": "Specific question",
+      "positions_clear": "Clear opposing positions",
+      "source_present": "Verifiable source linked",
+      "settlement_specific": "Specific settlement rule",
+      "structured_category": "Structured category",
+      "sufficient_time": "Enough time before deadline"
+    },
     "moderationLabel": "Moderation",
     "moderationAnalyzing": "Analyzing with AI…",
     "moderationAllowed": "Allowed by policy.",
@@ -964,48 +604,18 @@
     "moderationCheckedMinutesAgo": "Checked {minutes}m ago.",
     "moderationBlockedGeneric": "Blocked by policy.",
     "moderationReviewPending": "Needs manual review before publishing.",
-    "moderationBlockedByCode": [
-      [
-        "death_self_harm",
-        "Self-harm / death"
-      ],
-      [
-        "violence_harm",
-        "Violence / harm"
-      ],
-      [
-        "hate_harassment",
-        "Hate / harassment"
-      ],
-      [
-        "sexual_minors",
-        "Sexual content involving minors"
-      ],
-      [
-        "nonconsensual_sexual",
-        "Non-consensual sexual content"
-      ],
-      [
-        "illegal_facilitation",
-        "Illegal facilitation"
-      ],
-      [
-        "doxxing_personal_data",
-        "Doxxing / personal data"
-      ],
-      [
-        "medical_privacy",
-        "Medical privacy"
-      ],
-      [
-        "graphic_content",
-        "Graphic content"
-      ],
-      [
-        "other_policy",
-        "Other policy issue"
-      ]
-    ]
+    "moderationBlockedByCode": {
+      "death_self_harm": "Self-harm / death",
+      "violence_harm": "Violence / harm",
+      "hate_harassment": "Hate / harassment",
+      "sexual_minors": "Sexual content involving minors",
+      "nonconsensual_sexual": "Non-consensual sexual content",
+      "illegal_facilitation": "Illegal facilitation",
+      "doxxing_personal_data": "Doxxing / personal data",
+      "medical_privacy": "Medical privacy",
+      "graphic_content": "Graphic content",
+      "other_policy": "Other policy issue"
+    }
   },
   "settlement": {
     "title": "Settlement explanation",
@@ -1017,20 +627,11 @@
     "evidenceHint": "This was the primary source referenced when the claim was settled.",
     "openSource": "Open source",
     "confidence": "Confidence",
-    "confidenceTiers": [
-      [
-        "high",
-        "High confidence"
-      ],
-      [
-        "medium",
-        "Medium confidence"
-      ],
-      [
-        "low",
-        "Low confidence"
-      ]
-    ],
+    "confidenceTiers": {
+      "high": "High confidence",
+      "medium": "Medium confidence",
+      "low": "Low confidence"
+    },
     "consensusHint": "The claim only settled after validator consensus on the final outcome.",
     "receipt": "Settlement receipt",
     "receiptOutcome": "Outcome",
@@ -1040,24 +641,12 @@
     "scoreOutOf": "out of 100",
     "unknownSource": "Source unavailable",
     "noSummary": "No written summary was returned. The locked source and settlement rule were still used to determine the result.",
-    "outcomes": [
-      [
-        "creator",
-        "Creator side wins"
-      ],
-      [
-        "challengers",
-        "Challenger side wins"
-      ],
-      [
-        "draw",
-        "Draw"
-      ],
-      [
-        "unresolvable",
-        "Marked unresolvable"
-      ]
-    ]
+    "outcomes": {
+      "creator": "Creator side wins",
+      "challengers": "Challenger side wins",
+      "draw": "Draw",
+      "unresolvable": "Marked unresolvable"
+    }
   },
   "dashboard": {
     "title": "MY DASHBOARD",
@@ -1117,359 +706,101 @@
     "overviewLossesTitle": "Challenges lost",
     "overviewWinRateTitle": "Win rate",
     "overviewTotalClaimedTitle": "Total claimed",
-    "holdings": [
-      [
-        "sectionAria",
-        "Stake holdings"
-      ],
-      [
-        "sectionTitle",
-        "Active Exposure"
-      ],
-      [
-        "viewDetails",
-        "View details"
-      ],
-      [
-        "positionSummaryLabel",
-        "Position summary"
-      ],
-      [
-        "returnMultiple",
-        "Return multiple"
-      ],
-      [
-        "chipsGroupAria",
-        "Category and market ID"
-      ],
-      [
-        "marketTypeShort",
-        "Market"
-      ],
-      [
-        "oddsModeShort",
-        "Odds"
-      ],
-      [
-        "status",
-        [
-          [
-            "open",
-            "Open"
-          ],
-          [
-            "accepted",
-            "Live"
-          ],
-          [
-            "resolved",
-            "Settled"
-          ],
-          [
-            "cancelled",
-            "Cancelled"
-          ]
-        ]
-      ],
-      [
-        "yourStake",
-        "Your stake"
-      ],
-      [
-        "winEstimate",
-        "Win estimate"
-      ],
-      [
-        "riskSectionAria",
-        "Risk allocation profile"
-      ],
-      [
-        "riskTitle",
-        "Risk allocation profile"
-      ],
-      [
-        "risk",
-        [
-          [
-            "conservative",
-            "Conservative"
-          ],
-          [
-            "moderate",
-            "Moderate"
-          ],
-          [
-            "aggressive",
-            "Aggressive"
-          ]
-        ]
-      ],
-      [
-        "quickActionsAria",
-        "Quick actions"
-      ],
-      [
-        "quickActionsTitle",
-        "Quick actions"
-      ],
-      [
-        "actionAnalysis",
-        "Browse arena"
-      ],
-      [
-        "actionCreate",
-        "New challenge"
-      ],
-      [
-        "actionWithdraw",
-        "Withdraw"
-      ],
-      [
-        "withdrawSoon",
-        "Coming soon"
-      ],
-      [
-        "friendsAria",
-        "Friends"
-      ],
-      [
-        "friendsTitle",
-        "Friends"
-      ],
-      [
-        "friendsHint",
-        "Rivals and organizers — landing soon."
-      ],
-      [
-        "searchEmpty",
-        "No stake holdings match your search. Try another name or keyword."
-      ],
-      [
-        "visibilityPublic",
-        "Public"
-      ],
-      [
-        "visibilityPrivate",
-        "Private"
-      ],
-      [
-        "footerParticipants",
-        "{count} participants"
-      ],
-      [
-        "footerParticipantsCapped",
-        "{current} / {max} participants"
-      ],
-      [
-        "poolPill",
-        [
-          [
-            "closed",
-            "Closed"
-          ]
-        ]
-      ],
-      [
-        "demoBadge",
-        "Sample"
-      ],
-      [
-        "demoVsBadge",
-        "Demo VS"
-      ],
-      [
-        "loadMore",
-        "Load more"
-      ],
-      [
-        "exposurePagingPartial",
-        "Showing {visible} of {total} challenges"
-      ],
-      [
-        "exposurePagingAll",
-        "All {total} challenges match your filters"
-      ],
-      [
-        "listLoadingAria",
-        "Loading your challenges"
-      ],
-      [
-        "exposureSummaryBarAria",
-        "Summary of filtered challenges"
-      ],
-      [
-        "exposureSummaryOpen",
-        "{count} open"
-      ],
-      [
-        "exposureSummaryLive",
-        "{count} live"
-      ],
-      [
-        "exposureSummaryClosed",
-        "{count} closed"
-      ],
-      [
-        "exposureSummaryAtRisk",
-        "{amount} USDC at risk"
-      ],
-      [
-        "outcomeWon",
-        "You won"
-      ],
-      [
-        "outcomeLost",
-        "You lost"
-      ],
-      [
-        "outcomeCancelled",
-        "Cancelled"
-      ],
-      [
-        "outcomeSettledNeutral",
-        "Settled"
-      ],
-      [
-        "settlementTeaserWon",
-        "You won this challenge. Credited: {amount} USDC."
-      ],
-      [
-        "settlementTeaserLost",
-        "This challenge settled against your position."
-      ],
-      [
-        "settlementTeaserCancelled",
-        "This challenge was cancelled before a final outcome."
-      ],
-      [
-        "settlementTeaserNoVerdict",
-        "Marked settled in your list — open the challenge to see how Mimir ruled."
-      ],
-      [
-        "settlementDetailsCta",
-        "Settlement details"
-      ],
-      [
-        "emptyCtaCreate",
-        "Create a challenge"
-      ],
-      [
-        "emptyCtaExplore",
-        "Browse the arena"
-      ],
-      [
-        "vsTitlePrivate",
-        "Private challenge {id}"
-      ],
-      [
-        "vsTitleOpen",
-        "Challenge {id}"
-      ],
-      [
-        "items",
-        [
-          [
-            "canelo",
-            [
-              [
-                "title",
-                "Pereira vs Canelo · Over 7 rounds"
-              ],
-              [
-                "meta",
-                "UFC Seattle — 25/05/2026 18:30"
-              ],
-              [
-                "bodyLead",
-                "This position settles as a win if the bout exceeds seven completed rounds."
-              ],
-              [
-                "body",
-                "Settlement is based on the official UFC result and round clock, including late-round stoppages or judges' decisions."
-              ],
-              [
-                "stake",
-                "20 USDC"
-              ],
-              [
-                "winEstimate",
-                "27 USDC"
-              ],
-              [
-                "returnMultiple",
-                "1.35×"
-              ]
-            ]
-          ],
-          [
-            "colapinto",
-            [
-              [
-                "title",
-                "Franco Colapinto · Finishes P17"
-              ],
-              [
-                "meta",
-                "F1 — Circuit of the Americas — 14/05/2026 08:45"
-              ],
-              [
-                "bodyLead",
-                "This position settles as a win if Franco Colapinto achieves a final classification of 17th (P17)."
-              ],
-              [
-                "body",
-                "Settlement is based exclusively on official FIA race results for the United States Grand Prix."
-              ],
-              [
-                "stake",
-                "12 USDC"
-              ],
-              [
-                "winEstimate",
-                "18 USDC"
-              ],
-              [
-                "returnMultiple",
-                "1.50×"
-              ]
-            ]
-          ],
-          [
-            "alvarez",
-            [
-              [
-                "title",
-                "Julián Álvarez · Over 7 goals · FIFA World Cup 2026"
-              ],
-              [
-                "meta",
-                "FIFA World Cup — Group stage window"
-              ],
-              [
-                "bodyLead",
-                "Position wins if Julián Álvarez records over 7 total goals during the 2026 World Cup."
-              ],
-              [
-                "body",
-                "Settlement follows official FIFA tournament statistics for all active appearances."
-              ],
-              [
-                "stake",
-                "35 USDC"
-              ],
-              [
-                "winEstimate",
-                "52 USDC"
-              ],
-              [
-                "returnMultiple",
-                "1.49×"
-              ]
-            ]
-          ]
-        ]
-      ]
-    ],
+    "holdings": {
+      "sectionAria": "Stake holdings",
+      "sectionTitle": "Active Exposure",
+      "viewDetails": "View details",
+      "positionSummaryLabel": "Position summary",
+      "returnMultiple": "Return multiple",
+      "chipsGroupAria": "Category and market ID",
+      "marketTypeShort": "Market",
+      "oddsModeShort": "Odds",
+      "status": {
+        "open": "Open",
+        "accepted": "Live",
+        "resolved": "Settled",
+        "cancelled": "Cancelled"
+      },
+      "yourStake": "Your stake",
+      "winEstimate": "Win estimate",
+      "riskSectionAria": "Risk allocation profile",
+      "riskTitle": "Risk allocation profile",
+      "risk": {
+        "conservative": "Conservative",
+        "moderate": "Moderate",
+        "aggressive": "Aggressive"
+      },
+      "quickActionsAria": "Quick actions",
+      "quickActionsTitle": "Quick actions",
+      "actionAnalysis": "Browse arena",
+      "actionCreate": "New challenge",
+      "actionWithdraw": "Withdraw",
+      "withdrawSoon": "Coming soon",
+      "friendsAria": "Friends",
+      "friendsTitle": "Friends",
+      "friendsHint": "Rivals and organizers — landing soon.",
+      "searchEmpty": "No stake holdings match your search. Try another name or keyword.",
+      "visibilityPublic": "Public",
+      "visibilityPrivate": "Private",
+      "footerParticipants": "{count} participants",
+      "footerParticipantsCapped": "{current} / {max} participants",
+      "poolPill": {
+        "closed": "Closed"
+      },
+      "demoBadge": "Sample",
+      "demoVsBadge": "Demo VS",
+      "loadMore": "Load more",
+      "exposurePagingPartial": "Showing {visible} of {total} challenges",
+      "exposurePagingAll": "All {total} challenges match your filters",
+      "listLoadingAria": "Loading your challenges",
+      "exposureSummaryBarAria": "Summary of filtered challenges",
+      "exposureSummaryOpen": "{count} open",
+      "exposureSummaryLive": "{count} live",
+      "exposureSummaryClosed": "{count} closed",
+      "exposureSummaryAtRisk": "{amount} USDC at risk",
+      "outcomeWon": "You won",
+      "outcomeLost": "You lost",
+      "outcomeCancelled": "Cancelled",
+      "outcomeSettledNeutral": "Settled",
+      "settlementTeaserWon": "You won this challenge. Credited: {amount} USDC.",
+      "settlementTeaserLost": "This challenge settled against your position.",
+      "settlementTeaserCancelled": "This challenge was cancelled before a final outcome.",
+      "settlementTeaserNoVerdict": "Marked settled in your list — open the challenge to see how Mimir ruled.",
+      "settlementDetailsCta": "Settlement details",
+      "emptyCtaCreate": "Create a challenge",
+      "emptyCtaExplore": "Browse the arena",
+      "vsTitlePrivate": "Private challenge {id}",
+      "vsTitleOpen": "Challenge {id}",
+      "items": {
+        "canelo": {
+          "title": "Pereira vs Canelo · Over 7 rounds",
+          "meta": "UFC Seattle — 25/05/2026 18:30",
+          "bodyLead": "This position settles as a win if the bout exceeds seven completed rounds.",
+          "body": "Settlement is based on the official UFC result and round clock, including late-round stoppages or judges' decisions.",
+          "stake": "20 USDC",
+          "winEstimate": "27 USDC",
+          "returnMultiple": "1.35×"
+        },
+        "colapinto": {
+          "title": "Franco Colapinto · Finishes P17",
+          "meta": "F1 — Circuit of the Americas — 14/05/2026 08:45",
+          "bodyLead": "This position settles as a win if Franco Colapinto achieves a final classification of 17th (P17).",
+          "body": "Settlement is based exclusively on official FIA race results for the United States Grand Prix.",
+          "stake": "12 USDC",
+          "winEstimate": "18 USDC",
+          "returnMultiple": "1.50×"
+        },
+        "alvarez": {
+          "title": "Julián Álvarez · Over 7 goals · FIFA World Cup 2026",
+          "meta": "FIFA World Cup — Group stage window",
+          "bodyLead": "Position wins if Julián Álvarez records over 7 total goals during the 2026 World Cup.",
+          "body": "Settlement follows official FIFA tournament statistics for all active appearances.",
+          "stake": "35 USDC",
+          "winEstimate": "52 USDC",
+          "returnMultiple": "1.49×"
+        }
+      }
+    },
     "statsSectionAria": "Performance summary: challenges won, challenges lost, win rate, and total winnings",
     "kpiStatsLoading": "Loading performance summary",
     "tabsSectionAria": "Search and filter your challenges"
@@ -1616,42 +947,18 @@
     "progressAccepted": "Accepted",
     "progressVerifying": "Verifying",
     "progressProven": "VERDICT",
-    "marketTypes": [
-      [
-        "binary",
-        "Binary"
-      ],
-      [
-        "moneyline",
-        "Moneyline"
-      ],
-      [
-        "spread",
-        "Spread"
-      ],
-      [
-        "total",
-        "Total"
-      ],
-      [
-        "prop",
-        "Prop"
-      ],
-      [
-        "custom",
-        "Custom"
-      ]
-    ],
-    "oddsModes": [
-      [
-        "pool",
-        "Pool odds"
-      ],
-      [
-        "fixed",
-        "Fixed odds"
-      ]
-    ],
+    "marketTypes": {
+      "binary": "Binary",
+      "moneyline": "Moneyline",
+      "spread": "Spread",
+      "total": "Total",
+      "prop": "Prop",
+      "custom": "Custom"
+    },
+    "oddsModes": {
+      "pool": "Pool odds",
+      "fixed": "Fixed odds"
+    },
     "designPreviewLifecycleHint": "Design only: tap a lifecycle step to preview that phase (no on-chain state changes).",
     "designPreviewReset": "Use live sample state",
     "designPreviewResolutionSummary": "Preview only: the creator side is shown as the prevailing outcome. No consensus transaction was executed.",
@@ -1838,24 +1145,12 @@
     "badgeAwaiting": "Awaiting event",
     "badgeNoComms": "No comms",
     "viewVs": "View",
-    "reason": [
-      [
-        "sample",
-        "Demo VS — chat only on real on-chain duels."
-      ],
-      [
-        "not_accepted",
-        "Chat unlocks when the VS is accepted."
-      ],
-      [
-        "waiting_opponent",
-        "Waiting for a fixed rival before DM opens."
-      ],
-      [
-        "multi_challenger",
-        "Multi-challenger VS — XMTP is 1v1 only for now."
-      ]
-    ]
+    "reason": {
+      "sample": "Demo VS — chat only on real on-chain duels.",
+      "not_accepted": "Chat unlocks when the VS is accepted.",
+      "waiting_opponent": "Waiting for a fixed rival before DM opens.",
+      "multi_challenger": "Multi-challenger VS — XMTP is 1v1 only for now."
+    }
   },
   "emergingNarratives": {
     "title": "EMERGING NARRATIVES",
