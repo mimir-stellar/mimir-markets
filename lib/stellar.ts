@@ -17,6 +17,7 @@
  */
 import { Horizon, rpc, StrKey } from "@stellar/stellar-sdk";
 import type { SignAuthEntry, SignTransaction } from "@stellar/stellar-sdk/contract";
+import type { DependencyHealthCategory } from "./types";
 
 // ── Env plumbing ──────────────────────────────────────────────────────────────
 
@@ -32,6 +33,36 @@ function cleanEnv(raw: string | undefined): string | undefined {
   const withoutComment = raw.includes("#") ? raw.split(/\s+#/)[0] : raw;
   const value = withoutComment.trim();
   return value.length > 0 ? value : undefined;
+}
+
+/**
+ * Map internal health states to the dependency health categories exposed by the API.
+ *
+ * This mapping preserves the contract-first boundary: the API consumer sees a
+ * stable enum of categories, while Mimir retains the granular chain-as-source-of-truth
+ * behavior internally.
+ *
+ * - `invalid`: The contract ID or network configuration is malformed/unset.
+ * - `stale`: The chain is reachable but no events/transactions have been seen recently.
+ * - `duplicated`: Internal deduplication detected redundant state (rare, usually transient).
+ * - `cancelled`: A pending transaction or claim was explicitly cancelled by the user.
+ * - `dependency-failure`: A downstream dependency (e.g., USDC SAC, Horizon) is unreachable.
+ */
+export function mapHealthToCategory(status: string): DependencyHealthCategory {
+  switch (status) {
+    case "invalid":
+      return "invalid";
+    case "stale":
+      return "stale";
+    case "duplicated":
+      return "duplicated";
+    case "cancelled":
+      return "cancelled";
+    case "dependency-failure":
+      return "dependency-failure";
+    default:
+      return "unknown";
+  }
 }
 
 /**
@@ -162,12 +193,34 @@ export function isMarketConfigured(): boolean {
   return isContractAddress(getMarketContractId());
 }
 
+/**
+ * Check if the USDC SAC (Stellar Asset Contract) is configured and valid.
+ *
+ * This is a specific dependency health check for the USDC asset used in payouts.
+ * Returns `false` if the ID is unset or malformed, signaling a `dependency-failure`
+ * state in the broader health report.
+ */
+export function isUsdcSacHealthy(): boolean {
+  return isUsdcConfigured();
+}
+
 export function isSquadConfigured(): boolean {
   return isContractAddress(getSquadContractId());
 }
 
 export function isUsdcConfigured(): boolean {
   return isContractAddress(getUsdcSacId());
+}
+
+/**
+ * Check if the Squad contract is configured and valid.
+ *
+ * This is a specific dependency health check for the Squad contract.
+ * Returns `false` if the ID is unset or malformed, signaling a `dependency-failure`
+ * state in the broader health report.
+ */
+export function isSquadHealthy(): boolean {
+  return isSquadConfigured();
 }
 
 /** Throwing accessor for paths that cannot degrade to "not configured". */
@@ -553,4 +606,35 @@ export function stroopsToXlm(stroops: bigint | number | string): number {
 
 export function formatXlmAmount(stroops: bigint | number | string, decimals = 5): string {
   return `${stroopsToXlm(stroops).toFixed(decimals)} XLM`;
+}
+
+/**
+ * Aggregate dependency health status for the Stellar chain layer.
+ *
+ * This function checks the health of all critical dependencies (Market, Squad, USDC SAC)
+ * and maps their internal states to the exposed dependency health categories.
+ *
+ * @returns An object containing the overall health status and individual dependency statuses.
+ */
+export function getDependencyHealth(): {
+  overall: DependencyHealthCategory;
+  dependencies: Record<string, DependencyHealthCategory>;
+} {
+  const marketHealthy = isMarketConfigured();
+  const squadHealthy = isSquadHealthy();
+  const usdcHealthy = isUsdcSacHealthy();
+
+  const dependencies = {
+    market: marketHealthy ? "healthy" : "dependency-failure",
+    squad: squadHealthy ? "healthy" : "dependency-failure",
+    usdc: usdcHealthy ? "healthy" : "dependency-failure",
+  };
+
+  const overall =
+    marketHealthy && squadHealthy && usdcHealthy ? "healthy" : "dependency-failure";
+
+  return {
+    overall,
+    dependencies,
+  };
 }
