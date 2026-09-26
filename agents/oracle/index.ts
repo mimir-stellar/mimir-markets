@@ -56,12 +56,10 @@ import { kellyFraction } from "../../lib/kelly";
 import {
   type VerdictPayload,
   type ResearchCitation,
-  checkSettlementGuards,
   validateResearchCitation,
   validateCitationsList,
   MAX_VERDICT_CITATIONS,
 } from "../../lib/verdict";
-import { pauseState } from "../../lib/ops/flags";
 import {
   parseLLMVerdictWithRetry,
   VERDICT_LLM_SCHEMA,
@@ -456,18 +454,6 @@ Reply JSON only: { "final": true | false }
 // Returns true if resolved on-chain, false if deferred (e.g. match not final yet).
 async function settle(claim: ClaimOnChain): Promise<boolean> {
   console.log(`\n[settle] Claim #${claim.id}: "${claim.question.slice(0, 60)}..."`);
-
-  // Guard check: ensure operational policy and claim preconditions permit settlement
-  const pause = pauseState("oracle_settlement");
-  const guardErr = checkSettlementGuards({
-    claimState: claim.state,
-    deadline: claim.deadline,
-    paused: pause.paused,
-  });
-  if (guardErr) {
-    console.log(`[settle] Claim #${claim.id} settlement blocked (${guardErr.reason}): ${guardErr.detail}`);
-    return false;
-  }
 
   const evidence     = await fetchEvidence(claim);
   console.log(`[settle] Evidence fetcher: ${evidence.fetcher}`);

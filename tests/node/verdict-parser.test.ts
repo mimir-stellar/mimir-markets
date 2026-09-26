@@ -29,7 +29,6 @@ import {
   parseVerdictPayload,
   dependencyFailure,
   malformedFailure,
-  pausedFailure,
   validateResearchCitation,
   validateCitationsList,
   MAX_VERDICT_CITATIONS,
@@ -243,19 +242,6 @@ test("checkSettlementGuards: cancelled takes priority over stale", () => {
   assert.equal(err!.reason, "cancelled");
 });
 
-test("checkSettlementGuards: paused => reason=paused", () => {
-  const err = checkSettlementGuards(ctx({ paused: true }));
-  assert.ok(err !== null);
-  assert.equal(err!.reason, "paused");
-  assert.equal(err!.ok, false);
-});
-
-test("checkSettlementGuards: paused takes priority over cancelled and stale", () => {
-  const err = checkSettlementGuards(ctx({ paused: true, claimState: "cancelled", deadline: FUTURE }));
-  assert.ok(err !== null);
-  assert.equal(err!.reason, "paused");
-});
-
 // ── D. parseVerdictPayload ────────────────────────────────────────────────────
 
 test("parseVerdictPayload: happy path returns ok=true with normalised payload", () => {
@@ -369,16 +355,6 @@ test("parseVerdictPayload: guard passes, then valid JSON => ok=true", () => {
   );
   assert.ok(r.ok);
   assert.equal(r.payload.verdict, "DRAW");
-});
-
-test("parseVerdictPayload: settlement guard fires on paused", () => {
-  const r = parseVerdictPayload(
-    asLLMText(),
-    identityExtract,
-    ctx({ paused: true }),
-  );
-  assert.equal(r.ok, false);
-  assert.equal(r.reason, "paused");
 });
 
 test("parseVerdictPayload: payload with valid citations parses cleanly", () => {
@@ -711,13 +687,6 @@ test("malformedFailure returns a well-formed VerdictParseError", () => {
   assert.equal(err.ok, false);
   assert.equal(err.reason, "malformed");
   assert.ok(err.detail.includes("Citations"));
-});
-
-test("pausedFailure returns a well-formed VerdictParseError", () => {
-  const err = pausedFailure("Settlement kill-switch active");
-  assert.equal(err.ok, false);
-  assert.equal(err.reason, "paused");
-  assert.ok(err.detail.includes("kill-switch"));
 });
 
 // ── H. Regression fixtures ────────────────────────────────────────────────────

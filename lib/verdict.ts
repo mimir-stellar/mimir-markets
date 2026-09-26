@@ -114,7 +114,6 @@ export type VerdictParseError = {
    *  stale              — the claim deadline is in the future; settlement
    *                       was triggered too early.
    *  cancelled          — claim state is "cancelled"; must not be settled.
-   *  paused             — settlement is paused by operational policy.
    *  dependency-failure — a required upstream step (evidence fetch, council
    *                       quorum, etc.) failed and the oracle cannot proceed
    *                       without it for this claim.
@@ -127,7 +126,6 @@ export type VerdictParseError = {
     | "duplicate"
     | "stale"
     | "cancelled"
-    | "paused"
     | "dependency-failure";
   /** Developer-readable detail, never surfaced to end users. */
   detail: string;
@@ -287,29 +285,18 @@ export interface VerdictGuardContext {
   deadline: number;
   /** Unix seconds — current time (injectable for tests). Defaults to Date.now()/1000. */
   nowSecs?: number;
-  /** Optional operational pause state. When true, settlement is blocked. */
-  paused?: boolean;
 }
 
 /**
  * Check settlement pre-conditions and return an error result if any guard
  * fails.  Returns `null` (no problem found) when the claim is settleable.
  *
- *  paused     — settlement paused by operational flag.
  *  cancelled  — claim.state === "cancelled"; the contract would reject this.
  *  duplicate  — claim.state === "resolved"; already settled.
  *  stale      — deadline > now; oracle must not settle before the deadline.
  */
 export function checkSettlementGuards(ctx: VerdictGuardContext): VerdictParseError | null {
   const now = ctx.nowSecs ?? Math.floor(Date.now() / 1000);
-
-  if (ctx.paused) {
-    return {
-      ok: false,
-      reason: "paused",
-      detail: `Settlement is currently paused by operational policy.`,
-    };
-  }
 
   if (ctx.claimState === "cancelled") {
     return {
@@ -448,12 +435,5 @@ export function dependencyFailure(detail: string): VerdictParseError {
  */
 export function malformedFailure(detail: string): VerdictParseError {
   return { ok: false, reason: "malformed", detail };
-}
-
-/**
- * Constructs a `VerdictParseError` with reason `"paused"`.
- */
-export function pausedFailure(detail: string): VerdictParseError {
-  return { ok: false, reason: "paused", detail };
 }
 

@@ -37,7 +37,6 @@ import {
   parseVerdictPayload,
   dependencyFailure,
   malformedFailure,
-  pausedFailure,
   validateResearchCitation,
   validateCitationsList,
   type VerdictPayload,
@@ -59,7 +58,6 @@ export type {
 export {
   dependencyFailure,
   malformedFailure,
-  pausedFailure,
   validateResearchCitation,
   validateCitationsList,
 } from "./verdict";
