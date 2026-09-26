@@ -83,6 +83,8 @@ import {
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll } from "../../lib/ops/heartbeat";
 import { isPaused } from "../../lib/ops/flags";
+// Explicit settlement outcome + named UNRESOLVABLE (refund) reasons (#99).
+import { applySettlementPolicy, describeDecision } from "../../lib/oracle/unresolvable-policy";
 import { unitsToUsdc, usdcToUnits, formatAtomicUsdc } from "../../lib/usdc";
 import {
   fetchEvidence as fetchEvidenceShared,
@@ -544,14 +546,15 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
     council:         councilCommitment,
   });
   const trusted      = applyFetcherTrust(rawVerdict, evidence.fetcher);
-  const verdict      = tierVerdict(trusted);
+  // The policy names the outcome (firm / contested / draw / refund + reason)
+  // instead of inferring it by diffing strings against rawVerdict, which logged
+  // a model-issued UNRESOLVABLE as "FIRM" and fetcher-tagged verdicts as
+  // "CONTESTED". It also refunds a decisive verdict with an invalid confidence
+  // instead of settling a side on it (#99).
+  const decision     = applySettlementPolicy(trusted, tierVerdict);
+  const verdict      = decision.verdict;
 
-  const tierTag =
-    verdict.verdict !== rawVerdict.verdict ? "REFUND" :
-    verdict.explanation !== rawVerdict.explanation ? "CONTESTED" :
-    "FIRM";
-
-  console.log(`[settle] Verdict: ${verdict.verdict} (${verdict.confidence}%) [${tierTag}]`);
+  console.log(`[settle] Verdict: ${verdict.verdict} (${verdict.confidence}%) [${describeDecision(decision)}]`);
   console.log(`[settle] Evidence hash: ${evidenceHash}`);
   console.log(`[settle] "${verdict.explanation.slice(0, 100)}..."`);
 
