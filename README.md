@@ -68,6 +68,7 @@ guidance is in [`docs/LEDGER_REPLAY.md`](docs/LEDGER_REPLAY.md).
 - [Production deploy (Vercel + Railway)](#production-deploy-vercel--railway)
 - [Configuration reference](#configuration-reference)
 - [Scripts](#scripts)
+- [Running tests & coverage](#running-tests--coverage)
 - [Game modes roadmap](#game-modes-roadmap)
 - [Design principles](#design-principles)
 - [License](#license)
@@ -170,6 +171,17 @@ The read-index is a cache, so its backup workflow is built to be verifiable *off
 3. `npm run restore:read-index -- backups/read-index.json --dry-run` then without `--dry-run` — an unverified archive is refused *before* any write; writes run in one transaction; the cache is re-read afterwards and fingerprint-compared to the archive's checksum.
 
 Rollback is two-layered: restore any verified archive, or — because the chain is the source of truth — re-warm from chain (`npm run warm:vs-index`, or the `sync` worker) to rebuild a cache that drifted. Restoration never writes to the chain.
+
+### Schema snapshot gate
+
+The Postgres schema is the ordered `SCHEMA_STATEMENTS` list in `lib/db.ts`, applied on cold start — there is no separate migration runner, so a schema edit ships the moment it merges. That is why it is gated:
+
+```bash
+npm run check:schema-snapshot            # fail-closed drift check (no DATABASE_URL, no network, no secrets)
+npm run check:schema-snapshot -- --write # regenerate after a reviewed change
+```
+
+The committed snapshot `schemas/db-schema.snapshot.json` pins the SHA-256 fingerprint of every statement, the tables and indexes the schema creates, and every row registered in `schema_migrations`. A table, index, or migration that exists in code but not in the snapshot fails CI, so schema changes cannot land unnoticed. See [`docs/SCHEMA_SNAPSHOTS.md`](./docs/SCHEMA_SNAPSHOTS.md) for failure, rollback, artifact, secret, and environment policy.
 
 ---
 
@@ -755,7 +767,7 @@ Both loaders synthesize their own payments, signatures and Horizon reads on an i
 | LLM layer          | Routed language model layer                                                       | `lib/llm.ts` handles model calls, cooldowns, and fallback routing                                                  |
 | Messaging          | XMTP Browser SDK v7 (`@xmtp/browser-sdk`)                                         | Optional E2E-encrypted chat between creator and challenger before/after settlement                               |
 | Database           | Neon Postgres via `@neondatabase/serverless`                                      | Serverless-friendly driver, works on both Vercel functions and Railway long-running workers                      |
-| i18n               | next-intl (English only today)                                                    | Locale-prefixed routing (`/en/*`) with the plumbing in place; add a locale in `i18n/routing.ts` + `messages/`     |
+| i18n               | next-intl (English only today)                                                    | Locale-prefixed routing (`/en/*`) with the plumbing in place; add a locale in `i18n/routing.ts` + `messages/`, then run `npm run check:locales` — see [`docs/LOCALIZATION.md`](docs/LOCALIZATION.md) |
 | Frontend hosting   | Vercel                                                                            | Native Next.js, `iad1` region, 30s function timeout for /api routes                                              |
 | Worker hosting     | Railway                                                                           | Long-lived processes; `npm run workers` runs the oracle + market-creator + council with auto-restart              |
 
@@ -821,6 +833,7 @@ mimir-markets/
 │   ├── ops/                              # offline verifiers & gates (projection, artifact provenance, cache backup)
 │   │   ├── projection.ts                 # pure chain-events → read-index fold
 │   │   ├── artifact-provenance.ts        # fail-closed Wasm digest verification
+│   │   ├── schema-snapshot.ts            # fail-closed schema fingerprint + migration drift gate
 │   │   └── cache-backup.ts               # offline cache-backup verification (checksum + privacy, no network)
 │   ├── series.ts / scoring.ts / etc.     # read-index-derived product logic (pure where possible)
 │   ├── db.ts                             # Neon read-index
@@ -830,7 +843,8 @@ mimir-markets/
 │   ├── xmtp/                             # optional encrypted chat (see docs/xmtp-integration.md)
 │   └── server/                           # server-only modules (DB writers, read-index backup/restore, etc.)
 ├── schemas/
-│   └── agent-api-v1.schema.json          # BYOA request schema
+│   ├── agent-api-v1.schema.json          # BYOA request schema
+│   └── db-schema.snapshot.json           # pinned Postgres schema + migration snapshot
 ├── scripts/
 │   ├── stellar-keys.ts                   # keypairs + Friendbot + USDC trustline
 │   ├── stellar-usdc-faucet.ts            # testnet USDC helper
@@ -839,6 +853,7 @@ mimir-markets/
 │   ├── fund-agents.ts                    # fund agents from a master seed
 │   ├── verify-deployment.ts              # assert the deployed contracts match this repo
 │   ├── verify-artifact-provenance.ts     # fail-closed Wasm digest / manifest checks
+│   ├── check-schema-snapshot.ts          # verify / write the Postgres schema snapshot (no DATABASE_URL)
 │   ├── verify-cache-backup.ts            # offline cache-backup verification (no DATABASE_URL)
 │   ├── backup-read-index.ts              # dump the Neon read-index to a verified archive
 │   ├── restore-read-index.ts             # restore a verified archive (dry-run capable)
@@ -1117,8 +1132,11 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run build` / `npm start`                | Production build / serve                                                           |
 | `npm run typecheck`                          | `tsc --noEmit` across app, workers and scripts                                     |
 | `npm run check:terms`                        | Forbidden-terms lint (keeps pre-Stellar chain names and bespoke-402 residue out)   |
+| `npm run check:locales`                      | Locale completeness check — diffs every registered locale against `messages/en.json`; exits 1 on missing or funded-feature violations |
+| `npm run check:locales:strict`               | Same as above but also fails on extra (stale) keys not present in the English baseline |
 | `npm run test:contracts`                     | `cargo test --release` over `contracts-soroban`                                     |
 | `npm run check:toolchains`                   | Pinned release toolchain, contract MSRV and CI toolchain matrix agree (no Rust needed) |
+| `npm run check:schema-snapshot`              | Fail-closed Postgres schema / migration drift check; `-- --write` regenerates the snapshot (no secrets) |
 | `npm run workers`                            | Run all agent workers in parallel (Railway entry point: oracle + market-creator + council + sync + traders) |
 | `npm run oracle`                             | Run only the oracle (settler; optionally `AUTO_CHALLENGE=1`)                       |
 | `npm run market-creator`                     | Run only the market-creator                                                        |
@@ -1134,7 +1152,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run deploy:contract`                    | Build, deploy and initialize the Soroban contracts on Stellar Testnet              |
 | `npm run verify:deployment`                  | Check the deployed contract ids, WASM hash and initialized config                  |
 | `npm run verify:artifacts`                   | Verify / pin Soroban Wasm digests against `deploy/contract-artifacts.manifest.json` (no secrets) |
-| `npm run verify:analytics`                   | Check the analytics gates the launch gate requires                                 |
+| `npm run verify:analytics`                   | Check exported analytics quality; privacy/release runbook: [`docs/ANALYTICS_PRIVACY.md`](./docs/ANALYTICS_PRIVACY.md) |
 | `npm run backup:read-index`                  | Dump the Neon read-index cache to a self-verified checksummed archive (`--out <path>` or stdout; needs `DATABASE_URL`, no seeds) |
 | `npm run verify:cache-backup`                | Verify a cache-backup archive offline — no `DATABASE_URL`, no network, byte-reproducible |
 | `npm run restore:read-index`                 | Restore a *verified* archive into the Neon read-index and fingerprint-check the result (`--dry-run` to preview) |
@@ -1146,12 +1164,14 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run test:research`                      | Research adapters, categories, SSRF guard, x402 discovery suites                   |
 | `npm run test:baskets`                       | Basket validation, virtual NAV and high-water fee suites                           |
 | `npm run test:squad`                         | Squad view and pool suites                                                         |
-| `npm run test:schema`                        | Schema backlog suites                                                              |
+| `npm run test:schema`                        | Schema backlog + schema snapshot gate suites                                       |
 | `npm run test:kill-switches`                 | Every incident kill switch at its enforcement point, offline                       |
 | `npm run warm:vs-index`                      | Rebuild the Neon read-index from current on-chain state                            |
 | `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run)                                                  |
 | `npx tsx scripts/demo-full-cycle.ts`         | Full create -> challenge -> settle demo in ~90s                                    |
 | `npx tsx scripts/check-claim.ts <id>`        | Print a claim's state and deadline                                                 |
+| `npm run rollback:rehearsal`                 | Dry-run the full deployment rollback against a deterministic fixture (no secrets needed, runs in CI) |
+| `npm run rollback:rehearsal:live`            | Same rehearsal against your local `.env.local` (does not touch the chain)          |
 
 ---
 
@@ -1186,6 +1206,62 @@ These show up in PR review and shape what we accept:
 7. **Refund the ambiguous.** `Draw` and `Unresolvable` are first-class verdicts that return stakes. Better to be inconclusive and refund than to be wrong and pay out.
 8. **A pull is not a worse push.** Challenger settlement, parked payouts and accrued fees are all collected by their owner, because a transaction's ledger-entry footprint cannot fit 100 payouts and because one frozen trustline must not be able to fail everyone else's settlement. Nothing expires, and the last claimant absorbs the dust.
 9. **Strkeys are compared exactly.** `G…`/`C…` addresses are case-sensitive base32. Never lowercase one to normalise it — that is the EVM reflex, and in an allowlist written the wrong way round it fails open.
+
+---
+
+## Running tests & coverage
+
+Mimir's money-moving paths are gated by a coverage step that runs in CI and locally without any production secrets.
+
+### Quick start
+
+```sh
+# Run all node tests (same as CI test:smoke)
+npm run test:smoke
+
+# Run the coverage-gated subset and print a summary
+npm run test:coverage
+
+# If PASS_SECRET is not set in your environment, set any non-empty value:
+PASS_SECRET=test npm run test:coverage
+```
+
+`DATABASE_URL` is **not required** — `lib/paid-revenue.ts` falls back to an in-memory ring buffer when the variable is unset, which is the default test path.
+
+### Covered modules and thresholds
+
+`npm run test:coverage` enforces the following minimums via [c8](https://github.com/bcoe/c8) on each of the 8 money-moving modules:
+
+| Module | Lines | Branches |
+|---|---|---|
+| `lib/fees.ts` | 80% | 70% |
+| `lib/payout.ts` | 80% | 70% |
+| `lib/money.ts` | 80% | 70% |
+| `lib/paid-pass.ts` | 80% | 70% |
+| `lib/paid-revenue.ts` | 80% | 70% |
+| `lib/x402/buyer.ts` | 80% | 70% |
+| `lib/agents/registry.ts` | 80% | 70% |
+| `lib/agents/spend-permissions.ts` | 80% | 70% |
+
+Thresholds are declared in `.c8rc` at the workspace root. The step fails the build when any threshold is breached.
+
+### Test suites
+
+New test files covering the previously-untested modules live in `tests/node/`:
+
+- `money.test.ts` — `formatUsdc` / `formatUsdcBare` edge cases
+- `paid-pass.test.ts` — HMAC round-trip, expiry, tamper detection
+- `paid-revenue.test.ts` — in-memory ledger idempotency, ring-buffer eviction, aggregation
+- `x402-buyer.test.ts` — kill-switch fail-closed, `PaymentBudgetExceeded` properties
+
+All tests use the Node built-in test runner (`node --test`). No additional test framework is required.
+
+### When to update this section
+
+Update this section in the same PR if you:
+- add a new environment variable that the `test:coverage` step requires
+- rename or remove the `npm run test:coverage` command
+- add, remove, or reorder steps in `.github/workflows/ci.yml`
 
 ---
 

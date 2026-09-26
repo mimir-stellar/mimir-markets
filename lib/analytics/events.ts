@@ -137,6 +137,65 @@ export interface EventInput {
   properties?: EventProperties;
 }
 
+type PropertyKind = "string" | "number" | "boolean";
+
+/**
+ * Runtime property contract. Browser input is untrusted even when its call site
+ * is TypeScript, so undeclared and mistyped fields are removed before capture.
+ */
+export const EVENT_PROPERTY_SCHEMA: Record<AnalyticsEvent, Readonly<Record<string, PropertyKind>>> = {
+  market_viewed: { unsupported_mode: "boolean" },
+  create_started: { is_rematch: "boolean" },
+  create_mode_selected: { is_rematch: "boolean" },
+  create_submitted: { stake_bucket: "string", is_rematch: "boolean" },
+  create_confirmed: { stake_bucket: "string", is_rematch: "boolean" },
+  stake_previewed: { stake_bucket: "string", upside_bps: "number", is_low_upside: "boolean", total_return_multiple: "number" },
+  stake_started: { stake_bucket: "string" },
+  stake_confirmed: { stake_bucket: "string" },
+  stake_failed: { failure_stage: "string" },
+  settlement_return_viewed: {},
+  payout_preview_seen: { stake_bucket: "string", upside_bps: "number", is_low_upside: "boolean", total_return_multiple: "number" },
+  low_upside_warning_seen: { stake_bucket: "string", upside_bps: "number", is_low_upside: "boolean", total_return_multiple: "number" },
+  agent_viewed: {},
+  agent_followed: {},
+  agent_unfollowed: {},
+  reasoning_opened: {},
+  reasoning_x402_purchased: {},
+  share_card_generated: { card_kind: "string", card_size: "string", locked: "boolean" },
+  share_card_clicked: {},
+  rematch_started: { parent_claim_id: "number", best_of: "number" },
+  rematch_confirmed: { parent_claim_id: "number", best_of: "number" },
+  copy_permission_created: {},
+  copy_executed: {},
+  copy_skipped: {},
+  copy_revoked: {},
+};
+
+export function conformEventProperties(
+  event: AnalyticsEvent,
+  input: unknown,
+): { properties: EventProperties; dropped: string[] } {
+  const schema = EVENT_PROPERTY_SCHEMA[event];
+  const properties: EventProperties = {};
+  const dropped: string[] = [];
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { properties, dropped: ["$payload"] };
+  }
+  for (const [key, value] of Object.entries(input)) {
+    const expected = schema[key];
+    const valid =
+      (expected === "string" && typeof value === "string") ||
+      (expected === "boolean" && typeof value === "boolean") ||
+      (expected === "number" && typeof value === "number" && Number.isFinite(value));
+    if (!valid) {
+      dropped.push(key);
+      continue;
+    }
+    properties[key] = value as string | number | boolean;
+  }
+  return { properties, dropped };
+}
+
 /** Fill in the parts of the envelope that are the same for every event. */
 export function buildEnvelope(
   partial: Partial<EventEnvelope> & Pick<EventEnvelope, "actor_type" | "source_surface">,
@@ -169,12 +228,21 @@ export function buildEnvelope(
  */
 export function hasRequiredEnvelope(properties: Record<string, unknown>): boolean {
   return (
-    typeof properties.event_version === "number" &&
+    properties.event_version === EVENT_VERSION &&
     typeof properties.network === "string" &&
-    typeof properties.actor_type === "string" &&
-    typeof properties.source_surface === "string"
+    properties.network.length > 0 &&
+    properties.network.length <= 32 &&
+    (properties.actor_type === "human" ||
+      properties.actor_type === "agent" ||
+      properties.actor_type === "anonymous") &&
+    (ANALYTICS_SURFACES as readonly unknown[]).includes(properties.source_surface)
   );
 }
+
+const ANALYTICS_SURFACES: readonly SourceSurface[] = [
+  "home", "explorer", "vs_detail", "vs_create", "dashboard", "council",
+  "agents", "revenue", "stats", "share_card", "messages", "api", "worker",
+];
 
 /**
  * Build a deterministic idempotency key. Same inputs → same key, so a retried

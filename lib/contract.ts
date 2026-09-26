@@ -59,6 +59,7 @@ import { guardChallenge, toCanonicalMode } from "./market-modes";
 import { checkWriteAllowed } from "./ops/flags";
 import { availableCreatorLiquidityUnits } from "./payout";
 import { decodeHash32Hex } from "./content-hash";
+import { getDemoSecret } from "./demo-signers";
 import type { VSCacheFreshness } from "./vs-freshness";
 
 export type { StellarSigner } from "./stellar";
@@ -199,6 +200,8 @@ export interface VSData {
   challenger_addresses?: string[];
   remaining_escrow?: number;
   challenger_claims?: number;
+  evidence_hash?: string;
+  context_hash?: string;
   // Resolution-request flow (optional, surfaces off-chain UI state)
   creator_requested_resolve?: boolean;
   challenger_requested_resolve?: boolean;
@@ -1405,26 +1408,6 @@ function buildCreateParams(p: CreateClaimParams): MimirMarket.CreateParams {
 // ── Demo mode helpers ─────────────────────────────────────────────────────────
 function isDemoMode(): boolean {
   return process.env.NEXT_PUBLIC_DEMO_MODE === "1";
-}
-
-function getDemoSecret(action: string): string | undefined {
-  if (action === "create_claim" || action === "create_rematch") {
-    return (
-      process.env.DEMO_CREATOR_STELLAR_SECRET ||
-      process.env.DEMO_SIGNER_STELLAR_SECRET ||
-      process.env.DEMO_CREATOR_PRIVATE_KEY ||
-      process.env.DEMO_SIGNER_PRIVATE_KEY
-    );
-  }
-  if (action === "challenge_claim") {
-    return (
-      process.env.DEMO_CHALLENGER_STELLAR_SECRET ||
-      process.env.DEMO_SIGNER_STELLAR_SECRET ||
-      process.env.DEMO_CHALLENGER_PRIVATE_KEY ||
-      process.env.DEMO_SIGNER_PRIVATE_KEY
-    );
-  }
-  return process.env.DEMO_SIGNER_STELLAR_SECRET || process.env.DEMO_SIGNER_PRIVATE_KEY;
 }
 
 async function getDemoSigner(action: string): Promise<StellarSigner | null> {

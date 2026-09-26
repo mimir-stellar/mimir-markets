@@ -653,6 +653,8 @@
     "receiptOutcomeNone": "No outcome recorded",
     "receiptValueUnavailable": "—",
     "receiptChainNote": "Amounts and outcome come from the on-chain claim record. Challenger payouts stay pull-based after settlement.",
+    "receiptCitations": "Research Citations",
+    "receiptEvidenceHash": "Evidence Hash",
     "receiptStatus": {
       "loading": "Loading",
       "invalid": "Not settled",
