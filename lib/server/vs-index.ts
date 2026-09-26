@@ -50,6 +50,7 @@ type ReconcileResult = {
 export type VSFeedSnapshot = {
   items: VSData[];
   cache: VSCacheFreshness;
+  nextCursor?: number | null;
 };
 
 export type VSDetailSnapshot = {
@@ -566,13 +567,21 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
 }
 
 export async function getVsFeedSnapshot(
-  options: { forceRefresh?: boolean } = {}
+  options: { forceRefresh?: boolean; cursor?: number; limit?: number } = {}
 ): Promise<VSFeedSnapshot> {
   try {
+    const { cursor, limit = 50 } = options;
     const rows = await getClaimsByFilter({
       visibility: "public",
       orderBy: "id_desc",
+      cursor,
+      limit: limit + 1, // Fetch one extra to determine if there's a next page
     });
+    
+    const hasMore = rows.length > limit;
+    const paginatedRows = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? paginatedRows[paginatedRows.length - 1].id : null;
+
     const lastSyncAt = Number((await getSyncMeta("last_sync_at")) ?? "0");
     const shouldRefresh =
       options.forceRefresh ||
@@ -585,14 +594,21 @@ export async function getVsFeedSnapshot(
       const refreshedRows = await getClaimsByFilter({
         visibility: "public",
         orderBy: "id_desc",
+        cursor,
+        limit: limit + 1,
       });
+      const refreshedHasMore = refreshedRows.length > limit;
+      const refreshedPaginatedRows = refreshedHasMore ? refreshedRows.slice(0, limit) : refreshedRows;
+      const refreshedNextCursor = refreshedHasMore ? refreshedPaginatedRows[refreshedPaginatedRows.length - 1].id : null;
+
       return {
-        items: refreshedRows.map((row) => claimRowToVSData(row)),
+        items: refreshedPaginatedRows.map((row) => claimRowToVSData(row)),
         cache: buildVSCacheFreshness({
           updatedAtMs: Date.now(),
           freshnessWindowMs: LIST_FRESHNESS_MS,
           source: "index",
         }),
+        nextCursor: refreshedNextCursor,
       };
     }
 
@@ -601,8 +617,9 @@ export async function getVsFeedSnapshot(
     }
 
     return {
-      items: rows.map((row) => claimRowToVSData(row)),
-      cache: await buildListCacheFreshness(rows),
+      items: paginatedRows.map((row) => claimRowToVSData(row)),
+      cache: await buildListCacheFreshness(paginatedRows),
+      nextCursor,
     };
   } catch (err) {
     // Silent before: a DB outage (unset/expired DATABASE_URL, paused Neon) here

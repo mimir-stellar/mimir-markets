@@ -244,6 +244,7 @@ export interface ClaimWriteResult extends ContractWriteResult {
 export interface VSFeedSnapshot {
   items: VSData[];
   cache: VSCacheFreshness | null;
+  nextCursor?: number | null;
 }
 
 export interface VSDetailSnapshot {
@@ -820,16 +821,28 @@ export async function getAllVSFast(): Promise<VSFeedSnapshot> {
   return getAllVSDirect();
 }
 
-export async function getAllVSDirect(): Promise<VSFeedSnapshot> {
+export async function getAllVSDirect(opts?: { cursor?: number; limit?: number }): Promise<VSFeedSnapshot> {
   const count = await getClaimCount();
-  if (count <= 0) return { items: [], cache: makeLiveFreshness() };
+  if (count <= 0) return { items: [], cache: makeLiveFreshness(), nextCursor: null };
 
   const all = await readClaimsRange(1, count);
+  let sortedItems = (all.filter(Boolean) as ClaimData[])
+    .map(mapClaimToVS)
+    .sort((a, b) => b.id - a.id);
+  
+  if (opts?.cursor) {
+    sortedItems = sortedItems.filter(item => item.id < opts.cursor!);
+  }
+
+  const limit = opts?.limit ?? 50;
+  const hasMore = sortedItems.length > limit;
+  const paginatedItems = hasMore ? sortedItems.slice(0, limit) : sortedItems;
+  const nextCursor = hasMore ? paginatedItems[paginatedItems.length - 1].id : null;
+
   return {
-    items: (all.filter(Boolean) as ClaimData[])
-      .map(mapClaimToVS)
-      .sort((a, b) => b.id - a.id),
+    items: paginatedItems,
     cache: makeLiveFreshness(),
+    nextCursor,
   };
 }
 
@@ -1681,18 +1694,24 @@ export async function getUserClaimSummaries(address: string): Promise<ClaimData[
 
 /** @deprecated use getAllVSFast */
 export async function getAllVSSnapshot(
-  opts?: { forceRefresh?: boolean }
+  opts?: { forceRefresh?: boolean; cursor?: number; limit?: number }
 ): Promise<VSFeedSnapshot> {
   // In the browser this MUST go through /api/vs (the indexed cache): simulating
   // two invocations per claim against the public Soroban RPC trips its
   // per-client rate limit and the whole feed comes back empty.
   if (typeof window !== "undefined") {
-    const res = await fetch(opts?.forceRefresh ? "/api/vs?refresh=1" : "/api/vs");
+    const searchParams = new URLSearchParams();
+    if (opts?.forceRefresh) searchParams.set("refresh", "1");
+    if (opts?.cursor) searchParams.set("cursor", String(opts.cursor));
+    if (opts?.limit) searchParams.set("limit", String(opts.limit));
+    const qs = searchParams.toString();
+
+    const res = await fetch(qs ? `/api/vs?${qs}` : "/api/vs");
     if (!res.ok) throw new Error(`/api/vs returned ${res.status}`);
     const data = await res.json();
-    return { items: data.items ?? [], cache: data.cache ?? null };
+    return { items: data.items ?? [], cache: data.cache ?? null, nextCursor: data.nextCursor ?? null };
   }
-  return getAllVSDirect();
+  return getAllVSDirect(opts);
 }
 
 /** @deprecated use getUserVSFast */
