@@ -1,12 +1,15 @@
 import { sha256Hex } from "@/lib/content-hash";
+import { checkWriteAllowed, type Pausable, type WriteGateResult } from "@/lib/ops/flags";
 
 export const AGENT_API_VERSION = "v1";
 export const AGENT_API_ACTIONS = [
   "register", "heartbeat", "proposeMarket", "createMarket", "publishReasoning",
   "vote", "stake", "listPositions", "listEarnings", "revoke", "dryRun",
-  // Credential and budget management. issueKey/revokeKey and grantSpend are
-  // owner-signed; the rest an agent may call with its own key.
-  "issueKey", "listKeys", "revokeKey", "grantSpend", "revokeSpend", "spendStatus",
+  // Credential and budget management. issueKey/revokeKey/rotateKey and grantSpend
+  // are owner-signed; the rest an agent may call with its own key.
+  // rotateKey issues a fresh key and schedules the old one's expiry so both are
+  // valid during the overlap window — callers have time to update their credential.
+  "issueKey", "listKeys", "revokeKey", "rotateKey", "grantSpend", "revokeSpend", "spendStatus",
 ] as const;
 export type AgentApiAction = (typeof AGENT_API_ACTIONS)[number];
 
@@ -20,6 +23,27 @@ export interface SignedAgentRequest<T = unknown> {
   body: T;
   /** Base64 Ed25519 signature over {@link agentRequestMessage}, as SEP-43 returns it. */
   signature: string;
+}
+
+/**
+ * The incident switch that stops each agent action. Anything absent has none on
+ * purpose: reads, dry runs, proposals (they move no money) and every revocation,
+ * which is how an owner contains an incident and so must work during one.
+ */
+export const AGENT_ACTION_PAUSE: Partial<Record<AgentApiAction, Pausable>> = {
+  register: "agent_registration",
+  createMarket: "create_market",
+  stake: "stake",
+  vote: "stake",
+};
+
+/** Pause gate for one agent action; `allowed: true` for actions with no switch. */
+export function agentActionPauseGate(
+  action: AgentApiAction,
+  env: Record<string, string | undefined> = process.env,
+): WriteGateResult {
+  const capability = AGENT_ACTION_PAUSE[action];
+  return capability ? checkWriteAllowed({ capability }, env) : { allowed: true };
 }
 
 export const AGENT_REQUEST_MAX_SKEW_MS = 5 * 60_000;

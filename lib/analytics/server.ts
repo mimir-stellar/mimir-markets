@@ -16,9 +16,9 @@
  */
 
 import "server-only";
-import { buildEnvelope, hasRequiredEnvelope, isAnalyticsEvent, type EventInput } from "./events";
-import { redactProperties } from "./redact";
-import { isInternalActor, resolveActor } from "./actor";
+import { buildEnvelope, conformEventProperties, hasRequiredEnvelope, isAnalyticsEvent, type EventInput } from "./events";
+import { redactProperties, redactWalletAddresses } from "./redact";
+import { isInternalActor, opaqueAnalyticsId, resolveActor } from "./actor";
 
 // Re-exported for server call sites; the implementation is pure and lives in
 // ./events so the client and the tests can use it too.
@@ -88,9 +88,10 @@ export async function capture(args: CaptureArgs): Promise<CaptureResult> {
     agentId: args.agentId,
   });
 
+  const conformed = conformEventProperties(args.event, args.properties ?? {});
   const envelope = buildEnvelope({ ...args.envelope, actor_type: actor.actorType });
-  const { properties: safeProperties, dropped } = redactProperties({
-    ...(args.properties ?? {}),
+  const redacted = redactProperties({
+    ...conformed.properties,
     ...envelope,
     analytics_environment: analyticsEnvironment(),
     // Cohort flag so internal wallets can be excluded from product metrics
@@ -100,8 +101,19 @@ export async function capture(args: CaptureArgs): Promise<CaptureResult> {
     // misconfigured deployment is visible instead of looking like real anons.
     actor_id_degraded: actor.degraded,
   });
+  const safeProperties = redacted.properties;
+  // Redact any wallet addresses that callers may have accidentally included in
+  // properties or envelope. Contract addresses are preserved as public context.
+  const { properties: finalProperties, dropped: addressDropped } = redactWalletAddresses(safeProperties);
+  const insertId = args.idempotencyKey ? opaqueAnalyticsId(args.idempotencyKey) : null;
+  const dropped = [
+    ...conformed.dropped.map((key) => `properties.${key}`),
+    ...redacted.dropped,
+    ...addressDropped,
+    ...(args.idempotencyKey && !insertId ? ["idempotencyKey"] : []),
+  ];
 
-  if (!hasRequiredEnvelope(safeProperties)) {
+  if (!hasRequiredEnvelope(finalProperties)) {
     return { sent: false, reason: "incomplete_envelope", dropped };
   }
 
@@ -110,11 +122,11 @@ export async function capture(args: CaptureArgs): Promise<CaptureResult> {
     api_key: key,
     event: args.event,
     distinct_id: actor.actorId,
-    timestamp: new Date(args.at ?? Date.now()).toISOString(),
+    timestamp: new Date(args.at !== undefined && Number.isFinite(args.at) ? args.at : Date.now()).toISOString(),
     properties: {
-      ...safeProperties,
+      ...finalProperties,
       // PostHog deduplicates on $insert_id.
-      ...(args.idempotencyKey ? { $insert_id: args.idempotencyKey } : {}),
+      ...(insertId ? { $insert_id: insertId } : {}),
       // Salted ids are not people; person profiles would only add PII surface.
       $process_person_profile: false,
     },

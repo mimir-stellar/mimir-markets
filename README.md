@@ -38,6 +38,14 @@ The agents that run Mimir each sign with their own locally held Stellar seed, pr
 
 ---
 
+## Read-index ledger replay
+
+Run `npm run check:ledger-fixture` to replay the funded-market fixture without
+a database, RPC endpoint, wallet seed, or production secret. It emits a JSON
+reconciliation artifact and fails closed on partial history, conflicting
+positions, unsafe money values, or fingerprint drift. Release and rollback
+guidance is in [`docs/LEDGER_REPLAY.md`](docs/LEDGER_REPLAY.md).
+
 ## Table of contents
 
 - [What it does](#what-it-does)
@@ -60,6 +68,7 @@ The agents that run Mimir each sign with their own locally held Stellar seed, pr
 - [Production deploy (Vercel + Railway)](#production-deploy-vercel--railway)
 - [Configuration reference](#configuration-reference)
 - [Scripts](#scripts)
+- [Running tests & coverage](#running-tests--coverage)
 - [Game modes roadmap](#game-modes-roadmap)
 - [Design principles](#design-principles)
 - [License](#license)
@@ -152,6 +161,27 @@ The diagram shows three independent runtime tiers:
 1. **Frontend tier (Vercel).** Next.js App Router with API routes. Pure read paths talk to Soroban RPC and Horizon directly; writes are user-signed through Stellar Wallets Kit. The BYOA endpoint `/api/agents/v1/{action}` lives here.
 2. **Worker tier (Railway).** Long-lived Node processes that poll the ledger, evaluate claims with an LLM, and submit settlement transactions. Each agent signs with its own locally held Stellar seed.
 3. **Data tier (Neon Postgres).** A denormalised read-index of the on-chain state. Optional; the app boots without it and the contract remains the source of truth.
+
+### Read-index cache backups
+
+The read-index is a cache, so its backup workflow is built to be verifiable *offline* — no Soroban RPC, no Stellar seeds, just the archive itself:
+
+1. `npm run backup:read-index -- --out backups/read-index.json` — `DATABASE_URL` only; dumps the projection tables (`claims`, `challengers`, `sync_meta`, settlement/fee projection) into a self-checked archive. The dump refuses to write a byte unless its own checksum and privacy invariants pass.
+2. `npm run verify:cache-backup -- backups/read-index.json` — pure SHA-256 checksum verification, byte-reproducible on a clean checkout (also the CI gate). Fails closed on tampering, unsupported schema, unknown tables, empty snapshots, and any private-claim content leak.
+3. `npm run restore:read-index -- backups/read-index.json --dry-run` then without `--dry-run` — an unverified archive is refused *before* any write; writes run in one transaction; the cache is re-read afterwards and fingerprint-compared to the archive's checksum.
+
+Rollback is two-layered: restore any verified archive, or — because the chain is the source of truth — re-warm from chain (`npm run warm:vs-index`, or the `sync` worker) to rebuild a cache that drifted. Restoration never writes to the chain.
+
+### Schema snapshot gate
+
+The Postgres schema is the ordered `SCHEMA_STATEMENTS` list in `lib/db.ts`, applied on cold start — there is no separate migration runner, so a schema edit ships the moment it merges. That is why it is gated:
+
+```bash
+npm run check:schema-snapshot            # fail-closed drift check (no DATABASE_URL, no network, no secrets)
+npm run check:schema-snapshot -- --write # regenerate after a reviewed change
+```
+
+The committed snapshot `schemas/db-schema.snapshot.json` pins the SHA-256 fingerprint of every statement, the tables and indexes the schema creates, and every row registered in `schema_migrations`. A table, index, or migration that exists in code but not in the snapshot fails CI, so schema changes cannot land unnoticed. See [`docs/SCHEMA_SNAPSHOTS.md`](./docs/SCHEMA_SNAPSHOTS.md) for failure, rollback, artifact, secret, and environment policy.
 
 ---
 
@@ -800,14 +830,21 @@ mimir-markets/
 │   ├── x402/                             # config.ts (prices) · stellar-scheme.ts · server.ts · buyer.ts
 │   ├── paid-revenue.ts                   # atomic USDC settlement ledger
 │   ├── contract.ts                       # high-level TypeScript contract client
+│   ├── ops/                              # offline verifiers & gates (projection, artifact provenance, cache backup)
+│   │   ├── projection.ts                 # pure chain-events → read-index fold
+│   │   ├── artifact-provenance.ts        # fail-closed Wasm digest verification
+│   │   ├── schema-snapshot.ts            # fail-closed schema fingerprint + migration drift gate
+│   │   └── cache-backup.ts               # offline cache-backup verification (checksum + privacy, no network)
+│   ├── series.ts / scoring.ts / etc.     # read-index-derived product logic (pure where possible)
 │   ├── db.ts                             # Neon read-index
 │   ├── llm.ts                            # model-routed LLM call
 │   ├── wallet.tsx                        # frontend wallet context (Stellar Wallets Kit)
 │   ├── wallet-connectors.ts              # connector list + per-wallet capability matrix
 │   ├── xmtp/                             # optional encrypted chat (see docs/xmtp-integration.md)
-│   └── server/                           # server-only modules (DB writers, etc.)
+│   └── server/                           # server-only modules (DB writers, read-index backup/restore, etc.)
 ├── schemas/
-│   └── agent-api-v1.schema.json          # BYOA request schema
+│   ├── agent-api-v1.schema.json          # BYOA request schema
+│   └── db-schema.snapshot.json           # pinned Postgres schema + migration snapshot
 ├── scripts/
 │   ├── stellar-keys.ts                   # keypairs + Friendbot + USDC trustline
 │   ├── stellar-usdc-faucet.ts            # testnet USDC helper
@@ -816,6 +853,10 @@ mimir-markets/
 │   ├── fund-agents.ts                    # fund agents from a master seed
 │   ├── verify-deployment.ts              # assert the deployed contracts match this repo
 │   ├── verify-artifact-provenance.ts     # fail-closed Wasm digest / manifest checks
+│   ├── check-schema-snapshot.ts          # verify / write the Postgres schema snapshot (no DATABASE_URL)
+│   ├── verify-cache-backup.ts            # offline cache-backup verification (no DATABASE_URL)
+│   ├── backup-read-index.ts              # dump the Neon read-index to a verified archive
+│   ├── restore-read-index.ts             # restore a verified archive (dry-run capable)
 │   ├── onchain-smoke.ts                  # end-to-end on-chain smoke
 │   ├── x402-stellar-smoke.ts             # payment-scheme smoke against live Testnet
 │   ├── demo-full-cycle.ts                # full create -> challenge -> settle in 90s
@@ -837,7 +878,7 @@ mimir-markets/
 
 - Node.js 22+
 - A Stellar wallet (Freighter, xBull, Lobstr or Hana) **switched to Testnet**, funded with XLM from [Friendbot via Stellar Lab](https://lab.stellar.org/account/fund) and test USDC from [Circle's faucet](https://faucet.circle.com) — both free
-- Rust + the `stellar` CLI, only if you intend to build or deploy the contracts
+- Rust (via rustup) + the `stellar` CLI, only if you intend to build or deploy the contracts. rustup installs the pinned toolchain from `rust-toolchain.toml` on first use; see [`docs/CONTRACT_TOOLCHAINS.md`](docs/CONTRACT_TOOLCHAINS.md)
 - At least one LLM API key configured in `.env.local`
 - Optional: a Neon account at [console.neon.tech](https://console.neon.tech) for the read-index
 
@@ -1035,7 +1076,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `MIMIR_FEATURE_COPY_TRADING`      | copy routes              | `1` enables copy-trading execution                                                  |
 | `MIMIR_FEATURE_AGENT_BASKETS`     | basket routes            | `1` enables basket composition and following                                        |
 | `MIMIR_FEATURE_FEE_POLICY`        | settlement               | `1` enforces the fee policy; needs the audited `mimir-market` escrow deployed first |
-| `MIMIR_PAUSE_<CAPABILITY>`        | ops                      | `1` pauses one capability (`stake`, `create_market`, `copy_execution`, `x402_selling`, ...); `MIMIR_PAUSE_ALL=1` for all. Withdrawals are never pausable |
+| `MIMIR_PAUSE_<CAPABILITY>`        | ops                      | `1` pauses one capability (`stake`, `create_market`, `copy_execution`, `x402_selling`, ...); `MIMIR_PAUSE_ALL=1` for all. Withdrawals are never pausable. Full list and behavior: [`docs/INCIDENT_KILL_SWITCHES.md`](docs/INCIDENT_KILL_SWITCHES.md) |
 | `MIMIR_DISABLE_CATEGORY_<ID>`     | ops                      | `1` stops new markets in one category without a deploy                              |
 | `SPEND_PERMISSION_SPENDER`        | agent API                | Mimir's spender (`G…` or `C…`) for BYOA spend permissions; unset means funded actions cannot be delegated |
 | `DATABASE_URL`                    | optional (Neon)          | Read-index cache. Pages that need it fail gracefully if absent                     |
@@ -1092,6 +1133,8 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run typecheck`                          | `tsc --noEmit` across app, workers and scripts                                     |
 | `npm run check:terms`                        | Forbidden-terms lint (keeps pre-Stellar chain names and bespoke-402 residue out)   |
 | `npm run test:contracts`                     | `cargo test --release` over `contracts-soroban`                                     |
+| `npm run check:toolchains`                   | Pinned release toolchain, contract MSRV and CI toolchain matrix agree (no Rust needed) |
+| `npm run check:schema-snapshot`              | Fail-closed Postgres schema / migration drift check; `-- --write` regenerates the snapshot (no secrets) |
 | `npm run workers`                            | Run all agent workers in parallel (Railway entry point: oracle + market-creator + council + sync + traders) |
 | `npm run oracle`                             | Run only the oracle (settler; optionally `AUTO_CHALLENGE=1`)                       |
 | `npm run market-creator`                     | Run only the market-creator                                                        |
@@ -1107,7 +1150,10 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run deploy:contract`                    | Build, deploy and initialize the Soroban contracts on Stellar Testnet              |
 | `npm run verify:deployment`                  | Check the deployed contract ids, WASM hash and initialized config                  |
 | `npm run verify:artifacts`                   | Verify / pin Soroban Wasm digests against `deploy/contract-artifacts.manifest.json` (no secrets) |
-| `npm run verify:analytics`                   | Check the analytics gates the launch gate requires                                 |
+| `npm run verify:analytics`                   | Check exported analytics quality; privacy/release runbook: [`docs/ANALYTICS_PRIVACY.md`](./docs/ANALYTICS_PRIVACY.md) |
+| `npm run backup:read-index`                  | Dump the Neon read-index cache to a self-verified checksummed archive (`--out <path>` or stdout; needs `DATABASE_URL`, no seeds) |
+| `npm run verify:cache-backup`                | Verify a cache-backup archive offline — no `DATABASE_URL`, no network, byte-reproducible |
+| `npm run restore:read-index`                 | Restore a *verified* archive into the Neon read-index and fingerprint-check the result (`--dry-run` to preview) |
 | `npm run smoke:onchain`                      | On-chain smoke test against the live deployment (`:full` adds resolve + squad)     |
 | `npm run smoke:x402` / `:http`               | Payment-scheme smoke against live Testnet / a full HTTP round trip                 |
 | `npm run load:x402`                          | Offline load test: fixture verification + settle/replay limits                      |
@@ -1116,7 +1162,8 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run test:research`                      | Research adapters, categories, SSRF guard, x402 discovery suites                   |
 | `npm run test:baskets`                       | Basket validation, virtual NAV and high-water fee suites                           |
 | `npm run test:squad`                         | Squad view and pool suites                                                         |
-| `npm run test:schema`                        | Schema backlog suites                                                              |
+| `npm run test:schema`                        | Schema backlog + schema snapshot gate suites                                       |
+| `npm run test:kill-switches`                 | Every incident kill switch at its enforcement point, offline                       |
 | `npm run warm:vs-index`                      | Rebuild the Neon read-index from current on-chain state                            |
 | `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run)                                                  |
 | `npx tsx scripts/demo-full-cycle.ts`         | Full create -> challenge -> settle demo in ~90s                                    |
@@ -1158,6 +1205,62 @@ These show up in PR review and shape what we accept:
 
 ---
 
+## Running tests & coverage
+
+Mimir's money-moving paths are gated by a coverage step that runs in CI and locally without any production secrets.
+
+### Quick start
+
+```sh
+# Run all node tests (same as CI test:smoke)
+npm run test:smoke
+
+# Run the coverage-gated subset and print a summary
+npm run test:coverage
+
+# If PASS_SECRET is not set in your environment, set any non-empty value:
+PASS_SECRET=test npm run test:coverage
+```
+
+`DATABASE_URL` is **not required** — `lib/paid-revenue.ts` falls back to an in-memory ring buffer when the variable is unset, which is the default test path.
+
+### Covered modules and thresholds
+
+`npm run test:coverage` enforces the following minimums via [c8](https://github.com/bcoe/c8) on each of the 8 money-moving modules:
+
+| Module | Lines | Branches |
+|---|---|---|
+| `lib/fees.ts` | 80% | 70% |
+| `lib/payout.ts` | 80% | 70% |
+| `lib/money.ts` | 80% | 70% |
+| `lib/paid-pass.ts` | 80% | 70% |
+| `lib/paid-revenue.ts` | 80% | 70% |
+| `lib/x402/buyer.ts` | 80% | 70% |
+| `lib/agents/registry.ts` | 80% | 70% |
+| `lib/agents/spend-permissions.ts` | 80% | 70% |
+
+Thresholds are declared in `.c8rc` at the workspace root. The step fails the build when any threshold is breached.
+
+### Test suites
+
+New test files covering the previously-untested modules live in `tests/node/`:
+
+- `money.test.ts` — `formatUsdc` / `formatUsdcBare` edge cases
+- `paid-pass.test.ts` — HMAC round-trip, expiry, tamper detection
+- `paid-revenue.test.ts` — in-memory ledger idempotency, ring-buffer eviction, aggregation
+- `x402-buyer.test.ts` — kill-switch fail-closed, `PaymentBudgetExceeded` properties
+
+All tests use the Node built-in test runner (`node --test`). No additional test framework is required.
+
+### When to update this section
+
+Update this section in the same PR if you:
+- add a new environment variable that the `test:coverage` step requires
+- rename or remove the `npm run test:coverage` command
+- add, remove, or reorder steps in `.github/workflows/ci.yml`
+
+---
+
 ## License
 
 AGPL-3.0: see [`LICENSE`](./LICENSE).
@@ -1166,3 +1269,4 @@ Mimir is source-available. You can use, study, modify, and share it freely.
 The catch (the *A* in AGPL): if you run a modified version as a hosted
 service, you must publish your changes under the same license. That keeps
 oracle-side modifications visible to users staking USDC against the agent.
+- **Malformed evidence fails closed.** A supplied `evidence_hash` must be exactly 32 bytes (64 hexadecimal characters, with an optional `0x` prefix) or the client rejects it before signing and submission. Omission keeps the existing zero-hash sentinel for compatible callers, while the Soroban ABI independently enforces `BytesN<32>`. This is a client validation-only rollout: it changes no storage, fees, escrow, payouts, permissions, or secrets; requires no migration or redeployment; and can be rolled back with the client change alone.
