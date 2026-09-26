@@ -196,6 +196,33 @@ export function checkSettlementGuards(ctx: VerdictGuardContext): VerdictParseErr
 // ── Primary entry point ───────────────────────────────────────────────────────
 
 /**
+ * Defensive fallback for injected extractors that return a greedy concatenation
+ * of JSON objects. The production extractor already returns the first balanced
+ * object, but keeping this boundary defensive makes malformed-output handling
+ * deterministic for every caller and fixture.
+ */
+function firstBalancedObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}" && --depth === 0) return text.slice(start, i + 1);
+  }
+  return null;
+}
+
+/**
  * Parse and validate a raw LLM text response into a typed `VerdictPayload`.
  *
  * Steps:
@@ -234,11 +261,28 @@ export function parseVerdictPayload(
   try {
     parsed = JSON.parse(jsonStr);
   } catch (err) {
-    return {
-      ok: false,
-      reason: "invalid-json",
-      detail: `JSON.parse threw: ${err instanceof Error ? err.message : String(err)}. Extracted: ${jsonStr.slice(0, 120)}`,
-    };
+    // Some adapters use a greedy extractor. If it returned two adjacent JSON
+    // objects, parse only the first balanced object so the normal missing-field
+    // classification remains available; never salvage prose or a truncated
+    // object.
+    const first = firstBalancedObject(jsonStr);
+    if (first && first !== jsonStr) {
+      try {
+        parsed = JSON.parse(first);
+      } catch {
+        return {
+          ok: false,
+          reason: "invalid-json",
+          detail: `JSON.parse threw: ${err instanceof Error ? err.message : String(err)}. Extracted: ${jsonStr.slice(0, 120)}`,
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        reason: "invalid-json",
+        detail: `JSON.parse threw: ${err instanceof Error ? err.message : String(err)}. Extracted: ${jsonStr.slice(0, 120)}`,
+      };
+    }
   }
 
   // ── Field validation ──────────────────────────────────────────────────────

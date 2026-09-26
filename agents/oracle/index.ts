@@ -101,6 +101,15 @@ import {
   type CouncilVote,
 } from "./council-vote";
 import { normalizeQuorum } from "../../lib/council/quorum";
+import { pauseState } from "../../lib/ops/flags";
+import {
+  classifySettlementError,
+  loadSettlementRetryConfig,
+  settlementRetryDecision,
+  settlementSnapshotIsReady,
+  type SettlementRetryConfig,
+  type SettlementErrorInfo,
+} from "../../lib/settlement-retry";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -138,6 +147,8 @@ const COUNCIL_SELF_RESOLVING = COUNCIL_SETTLEMENT && process.env.COUNCIL_SELF_RE
 const COUNCIL_ALPHA          = Number(process.env.COUNCIL_ALPHA ?? "0.25");
 const COUNCIL_BONUS_ATOMIC   = parseCouncilBonusPool(process.env.COUNCIL_BONUS_USDC ?? "0.01");
 const SETTLEMENT_DELAY_MS = Number(process.env.ORACLE_SETTLEMENT_DELAY_MS ?? "900000");
+const SETTLEMENT_RETRY_CONFIG_RESULT = loadSettlementRetryConfig();
+const SETTLEMENT_RETRY_CONFIG: SettlementRetryConfig = SETTLEMENT_RETRY_CONFIG_RESULT.config;
 
 // Free-tier Gemini is 5 RPM on new accounts and the oracle has no other rate
 // limiter — every claim in a poll fires an LLM call back-to-back.
@@ -189,6 +200,8 @@ interface EvidenceResult {
   /** Epoch ms the fetch completed, when one was fetched. */
   fetchedAt?: number;
   payment?: EvidencePayment;
+  /** A source failure is not evidence for an on-chain refund. */
+  failure?: SettlementErrorInfo;
 }
 
 /**
@@ -209,7 +222,8 @@ function evidenceBudgetUsdc(claim: ClaimOnChain): number {
 async function fetchEvidence(claim: ClaimOnChain): Promise<EvidenceResult> {
   const url = claim.resolution_url;
   if (!url?.startsWith("http")) {
-    return { text: "(No resolution URL provided)", fetcher: "none" };
+    const failure = classifySettlementError(new Error("Invalid URL or missing resolution URL"));
+    return { text: "(No resolution URL provided)", fetcher: "none", failure };
   }
 
   // Wire the budgeted paying fetch only when payment is enabled. Evidence-fetcher
@@ -248,7 +262,8 @@ async function fetchEvidence(claim: ClaimOnChain): Promise<EvidenceResult> {
     const msg = err instanceof EvidenceFetchError
       ? err.message
       : (err?.message ?? "unknown");
-    return { text: `(Failed to fetch: ${msg})`, fetcher: "none" };
+    const failure = classifySettlementError(err);
+    return { text: `(Failed to fetch: ${msg})`, fetcher: "none", failure };
   }
 }
 
@@ -447,12 +462,107 @@ Reply JSON only: { "final": true | false }
 }
 
 // ── ROLE 1: Settle expired claim ──────────────────────────────────────────────
-// Returns true if resolved on-chain, false if deferred (e.g. match not final yet).
+
+/**
+ * A transaction submission is a separate concern from evidence evaluation. The
+ * verdict is prepared once, then this boundary handles only the funded write.
+ * That prevents a retry from buying evidence or asking the LLM for a different
+ * money decision while a previous Soroban submission is still being reconciled.
+ */
+async function submitSettlementWithRetry(
+  claimId: number,
+  payload: {
+    winner_side: "creator" | "challengers" | "draw" | "unresolvable";
+    summary: string;
+    confidence: number;
+    evidence_hash: string;
+  },
+): Promise<Awaited<ReturnType<typeof resolveClaim>> | null> {
+  for (let attempt = 1; attempt <= SETTLEMENT_RETRY_CONFIG.maxAttempts; attempt += 1) {
+    const pause = pauseState("oracle_settlement");
+    if (pause.paused) {
+      console.warn(`[settle] Claim #${claimId}: settlement paused — ${pause.reason ?? "operator pause"}; deferring without a write.`);
+      return null;
+    }
+
+    // Never submit from the stale snapshot that was collected during the poll.
+    // Reads are intentionally repeated after a cooldown or an uncertain RPC
+    // response; Soroban, not the worker, decides whether the claim is still live.
+    const current = await fetchClaim(claimId);
+    if (!current) {
+      const info = classifySettlementError(new Error("chain read unavailable while refreshing claim"));
+      const decision = settlementRetryDecision(info, attempt, SETTLEMENT_RETRY_CONFIG);
+      console.warn(`[settle] Claim #${claimId}: ${info.kind} — ${decision.reason}`);
+      if (decision.action === "retry" && attempt < SETTLEMENT_RETRY_CONFIG.maxAttempts) {
+        if (decision.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, decision.delayMs));
+        continue;
+      }
+      return null;
+    }
+
+    if (current.state === "resolved") {
+      console.log(`[settle] Claim #${claimId}: duplicate avoided — chain is already resolved.`);
+      return null;
+    }
+    if (current.state === "cancelled") {
+      console.log(`[settle] Claim #${claimId}: cancelled on chain — no settlement submitted.`);
+      return null;
+    }
+    if (!settlementSnapshotIsReady(current, Math.floor(Date.now() / 1000))) {
+      const reason = current.state !== "active"
+        ? `state=${current.state}`
+        : `deadline=${current.deadline} is still in the future`;
+      console.log(`[settle] Claim #${claimId}: stale snapshot (${reason}) — deferring.`);
+      return null;
+    }
+
+    try {
+      return await resolveClaim(ORACLE.signer, claimId, payload);
+    } catch (error) {
+      const info = classifySettlementError(error);
+      const decision = settlementRetryDecision(info, attempt, SETTLEMENT_RETRY_CONFIG);
+      const tx = info.txHash ? ` tx=${info.txHash}` : "";
+      console.warn(`[settle] Claim #${claimId}: ${info.kind}${tx} — ${decision.reason}: ${info.detail}`);
+
+      // duplicate/cancelled/stale/malformed/paused all stop here. In particular,
+      // a malformed verdict or a lifecycle race must never be replayed as a
+      // funded transaction. A dependency failure is the only retryable class.
+      if (decision.action !== "retry" || attempt >= SETTLEMENT_RETRY_CONFIG.maxAttempts) {
+        return null;
+      }
+      if (decision.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, decision.delayMs));
+    }
+  }
+  return null;
+}
+
+// Returns true if resolved on-chain, false if deferred or safely skipped.
 async function settle(claim: ClaimOnChain): Promise<boolean> {
+  const pause = pauseState("oracle_settlement");
+  if (pause.paused) {
+    console.warn(`[settle] Claim #${claim.id}: settlement paused — ${pause.reason ?? "operator pause"}; no evidence or funds spent.`);
+    return false;
+  }
+  if (claim.state === "resolved" || claim.state === "cancelled") {
+    console.log(`[settle] Claim #${claim.id}: ${claim.state} on chain — no-op.`);
+    return false;
+  }
+  if (!settlementSnapshotIsReady(claim, Math.floor(Date.now() / 1000))) {
+    console.log(`[settle] Claim #${claim.id}: stale settlement snapshot — deferring.`);
+    return false;
+  }
+
   console.log(`\n[settle] Claim #${claim.id}: "${claim.question.slice(0, 60)}..."`);
 
   const evidence     = await fetchEvidence(claim);
   console.log(`[settle] Evidence fetcher: ${evidence.fetcher}`);
+  if (evidence.failure) {
+    // A missing source is a dependency/malformed input failure, not proof of an
+    // UNRESOLVABLE outcome. Defer and let the next poll retry the dependency;
+    // otherwise an outage could incorrectly trigger a funded refund.
+    console.warn(`[settle] Claim #${claim.id}: ${evidence.failure.kind} evidence failure — ${evidence.failure.detail}; deferring.`);
+    return false;
+  }
 
   // Sports: betting closed at kickoff, so don't resolve until the match is final
   // (unless we're past the grace window, to avoid locking funds on a data outage).
@@ -558,13 +668,15 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   // Resolution ESCROWS the challenger side rather than paying it: a Stellar
   // transaction cannot carry ~100 payouts inside its ledger-entry footprint, so
   // each challenger pulls with `claim_challenger_payout` afterwards. The oracle's
-  // job ends here and the market is final.
-  const settled = await resolveClaim(ORACLE.signer, claim.id, {
+  // job ends here and the market is final. The submission helper retries only
+  // dependency failures and refreshes the claim before every attempt.
+  const settled = await submitSettlementWithRetry(claim.id, {
     winner_side:   verdictToSide(verdict.verdict),
     summary:       verdict.explanation,
     confidence:    verdict.confidence,
     evidence_hash: evidenceHash,
   });
+  if (!settled) return false;
 
   console.log(`[settle] ✓ Resolved — ${settled.explorerUrl ?? settled.txHash}`);
 
@@ -747,7 +859,11 @@ async function poll(): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, SETTLEMENT_DELAY_MS));
       }
     } catch (err) {
-      console.error(`[oracle] Error settling claim ${claim.id}:`, err);
+      const classified = classifySettlementError(err);
+      console.error(
+        `[oracle] Error settling claim ${claim.id} [${classified.kind}]${classified.txHash ? ` tx=${classified.txHash}` : ""}:`,
+        classified.detail,
+      );
     }
   }
 
@@ -778,6 +894,10 @@ async function main(): Promise<void> {
   console.log(`  LLM        : ${activeLLMProvider()} / ${activeLLMModel()} · key=${activeLLMKeyFingerprint()}`);
   console.log(`  Throttle   : ${LLM_THROTTLE_MS > 0 ? `${LLM_THROTTLE_MS}ms (${(60_000 / LLM_THROTTLE_MS).toFixed(1)} RPM cap)` : "OFF"}`);
   console.log(`  Settle gap : ${SETTLEMENT_DELAY_MS / 1000}s`);
+  console.log(`  Tx retries : ${SETTLEMENT_RETRY_CONFIG.maxAttempts} attempts, ${SETTLEMENT_RETRY_CONFIG.baseDelayMs}–${SETTLEMENT_RETRY_CONFIG.maxDelayMs}ms backoff`);
+  for (const warning of SETTLEMENT_RETRY_CONFIG_RESULT.warnings) {
+    console.warn(`[oracle] settlement retry config: ${warning}`);
+  }
   console.log(`  Poll every : ${POLL_INTERVAL_MS / 1000}s`);
   console.log(`  Auto-challenge: ${AUTO_CHALLENGE ? `YES (≥${CHALLENGE_CONFIDENCE}% confidence, ${CHALLENGE_STAKE_USDC} USDC/claim)` : "OFF (set AUTO_CHALLENGE=1 to enable)"}`);
   console.log("═══════════════════════════════════════════════\n");

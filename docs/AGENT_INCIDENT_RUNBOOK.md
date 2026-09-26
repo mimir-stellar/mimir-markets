@@ -8,4 +8,25 @@ Every switch, where it is enforced and how it rolls back: [`INCIDENT_KILL_SWITCH
 4. Reconcile agent request audit, copy execution attribution, x402 payment identifiers and onchain events from the last known-good timestamp. Duplicate idempotency keys and unknown targets are incident indicators.
 5. Run dry-run/simulation for create, stake and copy with the replacement key. Re-enable one capability at a time and watch request, source-failure and exposure counters.
 
+## Oracle settlement transaction incident
+
+`resolve_claim` is the only funded write retried by the oracle. The worker classifies
+failures before retrying:
+
+- malformed verdict/input: aborts; it is never converted into a refund or replayed;
+- stale / `NotYetExpired` / inactive snapshot: refreshes Soroban state and defers;
+- duplicate / already resolved: no-op, because the chain is already final;
+- cancelled: no-op, because cancelled claims are refunded by the contract;
+- `MIMIR_PAUSE_ORACLE_SETTLEMENT=1`: defers before evidence, LLM, or signing;
+- dependency / RPC / timeout failures: bounded exponential retry, then defer to the
+  next poll. The worker never retries from a stale snapshot.
+
+If a submission outcome is ambiguous, reconcile the retained transaction hash and
+fresh `get_claim` state before any manual action. Do not issue a manual payout,
+edit the read index, or delete a claim to make a retry appear successful. Soroban
+state is authoritative; a later poll is the rollback mechanism for a deferred
+attempt. To roll back this change, disable `MIMIR_PAUSE_ORACLE_SETTLEMENT` only
+after the RPC and oracle balance are healthy, or deploy the previous worker; no
+contract migration or ledger reversal is required.
+
 Compromise never permits editing historical owner-fee attribution. A revoked agent remains terminal; re-admission is a new registration.
