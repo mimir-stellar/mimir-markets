@@ -101,6 +101,8 @@ import {
   type CouncilVote,
 } from "./council-vote";
 import { normalizeQuorum } from "../../lib/council/quorum";
+// Confidence tiers + fetcher-trust cap: pure and fixture-calibrated (#97).
+import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tiers";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -359,54 +361,11 @@ function verdictToSide(
 // Oracle plays few, high-conviction markets — cap Kelly at 25% of bankroll.
 const KELLY_CAP = 0.25;
 
-// Confidence tiers govern how the oracle commits a verdict.
-// HIGH      → settle as the LLM said.
-// MEDIUM    → still settle, but the explanation gets a [CONTESTED] prefix so
-//             the UI can flag low-trust resolutions.
-// LOW       → force the verdict to UNRESOLVABLE so the contract refunds.
-// Keeps the "refund the ambiguous" principle out of marketing slides and
-// into actual on-chain behavior.
-const CONFIDENCE_HIGH_MIN = 80; // ≥ : settle as-is
-const CONFIDENCE_MED_MIN  = 60; // 60–79: settle but mark contested
-                                // < 60 : downgrade to UNRESOLVABLE
-
-function tierVerdict(verdict: OracleVerdict): OracleVerdict {
-  if (verdict.verdict === "UNRESOLVABLE" || verdict.verdict === "DRAW") return verdict;
-  if (verdict.confidence >= CONFIDENCE_HIGH_MIN) return verdict;
-  if (verdict.confidence >= CONFIDENCE_MED_MIN) {
-    return {
-      ...verdict,
-      explanation: `[CONTESTED] ${verdict.explanation}`.slice(0, 500),
-    };
-  }
-  // Low confidence: refund rather than guess
-  return {
-    verdict:     "UNRESOLVABLE",
-    confidence:  verdict.confidence,
-    explanation: `[LOW CONFIDENCE — refunded] ${verdict.explanation}`.slice(0, 500),
-  };
-}
-
-// Cap confidence and tag the audit trail when the evidence wasn't fetched
-// through a deterministic API (CoinGecko). Scraped HTML — even via Jina —
-// can drift, be paginated, or be partially blocked, so we don't allow a
-// firm HIGH-tier settlement off it.
-const MAX_CONFIDENCE_NON_API = 75;
-
-function applyFetcherTrust(
-  verdict: OracleVerdict,
-  fetcher: EvidenceFetcherKind | "none",
-): OracleVerdict {
-  if (fetcher === "coingecko-api") return verdict;
-  if (verdict.verdict === "UNRESOLVABLE") return verdict;
-  const cappedConfidence = Math.min(verdict.confidence, MAX_CONFIDENCE_NON_API);
-  const tag = fetcher === "jina" ? "[via-jina]" : fetcher === "direct" ? "[via-scrape]" : "[no-fetch]";
-  return {
-    ...verdict,
-    confidence: cappedConfidence,
-    explanation: `${tag} ${verdict.explanation}`.slice(0, 500),
-  };
-}
+// Confidence tiers govern how the oracle commits a verdict: HIGH (≥80) settles
+// as the LLM said, MEDIUM (60–79) settles with a [CONTESTED] prefix, LOW (<60)
+// is forced to UNRESOLVABLE so the contract refunds. Non-API evidence is capped
+// at 75 first. Both helpers (tierVerdict, applyFetcherTrust) live unchanged in
+// lib/oracle/confidence-tiers.ts, calibrated against fixtures (#97).
 
 // Sports markets close betting at kickoff, so the claim is "expired" (settleable)
 // while the match may still be in progress. Defer settlement until the match is
