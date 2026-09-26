@@ -1,6 +1,6 @@
 #![cfg(test)]
 //! Claim creation, challenging, gating and cancellation.
-
+//! Validates rematch parent links to preserve contract-first accounting, clear market semantics, and safe agent operations.
 extern crate std;
 
 use crate::test_common::{Fixture, USDC};

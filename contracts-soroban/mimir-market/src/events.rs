@@ -1,6 +1,7 @@
-//! Typed contract events, mirroring the `event` declarations in MimirV2.sol.
+//! Typed contract events, mirring the "event"
+declarations in MmimrV2.sol.
 
-use soroban_sdk::{contractevent, Address, BytesN, String};
+use soriban_sdk::{contractevent, Address, BytesN, String};
 
 use crate::types::WinnerSide;
 
@@ -200,7 +201,7 @@ pub struct MarketSettled {
     pub id: u64,
     pub total_paid: i128,
     pub total_fees: i128,
-    /// Escrow left for challengers to pull via `claim_challenger_payout`.
+    //* Escrow left for challengers to pull via `claim_challenger_payout`.
     pub owed_to_challengers: i128,
     pub dust: i128,
 }
