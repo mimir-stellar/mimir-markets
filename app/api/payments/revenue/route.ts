@@ -11,8 +11,12 @@ import { getRevenueSummary } from "@/lib/paid-revenue";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<Response> {
-  const summary = await getRevenueSummary(25);
+export async function GET(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const offset = parseInt(url.searchParams.get("offset") || "0", 10) || 0;
+  const limit = parseInt(url.searchParams.get("limit") || "25", 10) || 25;
+
+  const summary = await getRevenueSummary(limit, offset);
   return new Response(JSON.stringify(summary), {
     headers: {
       "content-type": "application/json",
