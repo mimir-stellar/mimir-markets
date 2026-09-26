@@ -33,7 +33,7 @@ import type { AgentApiAction } from "./api";
  * must be initiated by the owner, not by whatever credential is being replaced.
  */
 export const OWNER_SIGNED_ACTIONS: readonly AgentApiAction[] = [
-  "register", "revoke", "issueKey", "revokeKey", "rotateKey", "grantSpend", "revokeSpend",
+  "register", "revoke", "revokeKey", "grantSpend", "revokeSpend",
 ];
 
 export function requiresOwnerSignature(action: AgentApiAction): boolean {
@@ -41,7 +41,7 @@ export function requiresOwnerSignature(action: AgentApiAction): boolean {
 }
 
 export type AgentAuth =
-  | { kind: "api_key"; agentId: string; keyId: string }
+  | { kind: "api_key"; agentId: string; keyId: string; scopes?: readonly string[] }
   | { kind: "signature" };
 
 export interface AuthenticateResult {
@@ -94,6 +94,10 @@ export async function authenticateAgentRequest(args: {
     return { error: apiError("forbidden", "key does not belong to this agent") };
   }
 
+  if (checked.record.scopes && checked.record.scopes.length > 0 && !checked.record.scopes.includes(args.action)) {
+    return { error: apiError("forbidden", `API key is not scoped for action: ${args.action}`) };
+  }
+
   if (requiresOwnerSignature(args.action)) {
     return {
       error: apiError(
@@ -112,5 +116,5 @@ export async function authenticateAgentRequest(args: {
   // request that was otherwise authorised.
   void touchAgentApiKey(checked.record.keyId, Date.now()).catch(() => undefined);
 
-  return { auth: { kind: "api_key", agentId: checked.record.agentId, keyId: checked.record.keyId } };
+  return { auth: { kind: "api_key", agentId: checked.record.agentId, keyId: checked.record.keyId, scopes: checked.record.scopes } };
 }
