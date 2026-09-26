@@ -24,6 +24,10 @@ pub fn create_claim(env: &Env, creator: Address, params: CreateParams) -> Result
     if params.question.is_empty() {
         return Err(Error::EmptyQuestion);
     }
+    // Bound the metadata this claim will commit to persistent storage BEFORE
+    // any money moves: an over-long claim is refused with nothing escrowed and
+    // no claim id consumed, so a rejected caller can retry with less text.
+    util::validate_create_metadata(env, &params)?;
 
     let usdc = storage::usdc(env)?;
     escrow::pull(env, &usdc, &creator, params.stake_amount)?;
