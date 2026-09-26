@@ -10,6 +10,15 @@ pub const RESULT_CANCELLED: u32 = 3;
 
 pub const MAX_FEE_BPS: u32 = 1_000;
 pub const MAX_PARTICIPANTS_PER_SIDE: u32 = 200;
+/// Hard ceiling on the total number of members across **both** sides of a single
+/// squad market.  This is distinct from [`MAX_PARTICIPANTS_PER_SIDE`], which
+/// caps each side independently.  A squad may never have more than
+/// `MAX_SQUAD_MEMBERS` unique addresses with an open position at any given time.
+///
+/// With two sides of 200 each the combined ceiling is 400, which equals 2 ×
+/// [`MAX_PARTICIPANTS_PER_SIDE`] — the tightest consistent bound without further
+/// restricting the per-side limit.
+pub const MAX_SQUAD_MEMBERS: u32 = 400;
 pub const MIN_DURATION: u64 = 600; // 10 minutes
 pub const MAX_DURATION: u64 = 31_536_000; // 365 days
 
@@ -91,4 +100,10 @@ pub enum Error {
     /// The market question exceeded `MAX_QUESTION_BYTES`. Refused rather than
     /// truncated.
     QuestionTooLong = 27,
+    /// All [`MAX_SQUAD_MEMBERS`] slots across both sides have been filled.
+    /// Distinct from [`Error::SideFull`], which fires when a single side reaches
+    /// [`MAX_PARTICIPANTS_PER_SIDE`].  A new depositor is rejected once
+    /// `participants_a + participants_b == MAX_SQUAD_MEMBERS` even if the target
+    /// side still has room.
+    SquadFull = 28,
 }

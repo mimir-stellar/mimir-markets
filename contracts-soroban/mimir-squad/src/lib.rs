@@ -29,4 +29,6 @@ mod test_fee_rounding;
 #[cfg(test)]
 mod test_lifecycle;
 #[cfg(test)]
+mod test_membership_cap;
+#[cfg(test)]
 mod test_payouts;

@@ -68,3 +68,19 @@ pub struct FeesClaimed {
     pub recipient: Address,
     pub amount: i128,
 }
+
+/// Emitted on the deposit that fills the squad to [`crate::types::MAX_SQUAD_MEMBERS`]
+/// total participants.  Subsequent deposits from new addresses will be rejected
+/// with [`crate::types::Error::SquadFull`] until existing members withdraw.
+///
+/// This event fires on the *last accepted* deposit rather than on the rejected
+/// attempt: Soroban discards all events emitted by a transaction that returns an
+/// error, so a "cap hit" event can only be reliably indexed from a successful
+/// invocation.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SquadFull {
+    #[topic]
+    pub market_id: u64,
+    pub total_members: u32,
+}
