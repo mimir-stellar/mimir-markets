@@ -28,6 +28,13 @@ const HEX_65_BYTES = /^0x[0-9a-fA-F]{130}$/;
 const MAX_STRING_LENGTH = 200;
 /** JWT / base64url token shape. */
 const TOKEN_LIKE = /^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/;
+/** Stellar account/contract identities and secret seeds. */
+const STELLAR_PUBLIC_ID = /^[GCM][A-Z2-7]{55}$/;
+const STELLAR_SECRET_SEED = /^S[A-Z2-7]{55}$/;
+
+const MAX_DEPTH = 5;
+const MAX_PROPERTIES = 64;
+const MAX_ARRAY_ITEMS = 32;
 
 export interface RedactionResult {
   properties: Record<string, unknown>;
@@ -39,7 +46,12 @@ function isSecretValue(value: unknown): boolean {
   if (typeof value !== "string") return false;
   if (HEX_32_BYTES.test(value) || HEX_65_BYTES.test(value)) return true;
   if (TOKEN_LIKE.test(value)) return true;
+  if (STELLAR_SECRET_SEED.test(value.trim())) return true;
   return value.length > MAX_STRING_LENGTH;
+}
+
+function isRawActorIdentity(value: unknown): boolean {
+  return typeof value === "string" && STELLAR_PUBLIC_ID.test(value.trim());
 }
 
 /**
@@ -49,11 +61,27 @@ function isSecretValue(value: unknown): boolean {
 export function redactProperties(input: Record<string, unknown>): RedactionResult {
   const properties: Record<string, unknown> = {};
   const dropped: string[] = [];
+  let visited = 0;
+  const ancestors = new WeakSet<object>();
 
-  const walk = (source: Record<string, unknown>, target: Record<string, unknown>, path: string) => {
+  const walk = (
+    source: Record<string, unknown>,
+    target: Record<string, unknown>,
+    path: string,
+    depth: number,
+  ) => {
+    if (depth > MAX_DEPTH || ancestors.has(source)) {
+      dropped.push(path || "$");
+      return;
+    }
+    ancestors.add(source);
     for (const [key, value] of Object.entries(source)) {
       const full = path ? `${path}.${key}` : key;
 
+      if (++visited > MAX_PROPERTIES) {
+        dropped.push(full);
+        continue;
+      }
       if (FORBIDDEN_KEY_PATTERN.test(key)) {
         dropped.push(full);
         continue;
@@ -63,23 +91,40 @@ export function redactProperties(input: Record<string, unknown>): RedactionResul
         dropped.push(full);
         continue;
       }
+      if (isRawActorIdentity(value) && !(path === "" && key === "contract" && value.startsWith("C"))) {
+        dropped.push(full);
+        continue;
+      }
       if (Array.isArray(value)) {
-        const kept = value.filter((item) => !isSecretValue(item));
+        const kept = value
+          .slice(0, MAX_ARRAY_ITEMS)
+          .filter(
+            (item) =>
+              (typeof item === "string" || typeof item === "boolean" ||
+                (typeof item === "number" && Number.isFinite(item))) &&
+              !isSecretValue(item) &&
+              !isRawActorIdentity(item),
+          );
         if (kept.length !== value.length) dropped.push(full);
         target[key] = kept;
         continue;
       }
       if (typeof value === "object") {
         const nested: Record<string, unknown> = {};
-        walk(value as Record<string, unknown>, nested, full);
+        walk(value as Record<string, unknown>, nested, full, depth + 1);
         target[key] = nested;
         continue;
       }
-      target[key] = value;
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        target[key] = value;
+      } else {
+        dropped.push(full);
+      }
     }
+    ancestors.delete(source);
   };
 
-  walk(input, properties, "");
+  walk(input, properties, "", 0);
   return { properties, dropped };
 }
 
@@ -96,7 +141,7 @@ export function redactProperties(input: Record<string, unknown>): RedactionResul
  * The `/^0x[0-9a-fA-F]{40}$/` this replaced matched no Stellar address at all,
  * which meant the one check standing between a raw wallet and PostHog never fired.
  */
-const ADDRESS_LIKE = /^[GC][A-Z2-7]{55}$/;
+const ADDRESS_LIKE = /^[GCM][A-Z2-7]{55}$/;
 
 export function containsRawAddress(properties: Record<string, unknown>): boolean {
   const seen = (value: unknown): boolean => {
@@ -108,10 +153,9 @@ export function containsRawAddress(properties: Record<string, unknown>): boolean
   // The contract address is a public constant, not a user identity. Compared
   // verbatim — a strkey is case-sensitive, so folding it here could excuse a
   // different address from the check.
-  const contract = String(properties.contract ?? "");
   return Object.entries(properties).some(
     ([key, value]) =>
-      key !== "contract" && seen(value) && String(value) !== contract,
+      !(key === "contract" && typeof value === "string" && value.startsWith("C")) && seen(value),
   );
 }
 

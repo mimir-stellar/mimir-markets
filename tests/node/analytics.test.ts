@@ -5,6 +5,7 @@ import {
   ANALYTICS_EVENTS,
   EVENT_VERSION,
   buildEnvelope,
+  conformEventProperties,
   hasRequiredEnvelope,
   isAnalyticsEvent,
 } from "../../lib/analytics/events";
@@ -12,6 +13,7 @@ import { containsRawAddress, redactProperties, redactWalletAddresses } from "../
 import {
   ANON_ACTOR_ID,
   actorIdForAddress,
+  opaqueAnalyticsId,
   resolveActor,
 } from "../../lib/analytics/actor";
 import { idempotencyKey } from "../../lib/analytics/events";
@@ -91,6 +93,15 @@ test("the envelope carries mode and claim context when supplied", () => {
 test("an incomplete envelope is detectable rather than shipped", () => {
   assert.equal(hasRequiredEnvelope({ network: "testnet", actor_type: "human" }), false);
   assert.equal(hasRequiredEnvelope({ event_version: 1, actor_type: "human" }), false);
+  assert.equal(
+    hasRequiredEnvelope({
+      event_version: EVENT_VERSION,
+      network: "testnet",
+      actor_type: "human",
+      source_surface: "attacker-controlled",
+    }),
+    false,
+  );
 });
 
 test("only declared event names are accepted", () => {
@@ -231,7 +242,59 @@ test("a raw wallet address in the payload is detectable", () => {
 });
 
 test("the contract address is public context, not a user identity", () => {
-  assert.equal(containsRawAddress({ contract: ADDRESS }), false);
+  assert.equal(containsRawAddress({ contract: `C${"A".repeat(55)}` }), false);
+  assert.equal(containsRawAddress({ contract: ADDRESS }), true);
+});
+
+test("raw Stellar identities are removed before capture", () => {
+  const contract = `C${"A".repeat(55)}`;
+  const { properties, dropped } = redactProperties({
+    wallet: ADDRESS,
+    nested: { owner: OTHER },
+    list: ["pool", ADDRESS],
+    contract,
+  });
+  assert.deepEqual(properties, { nested: {}, list: ["pool"], contract });
+  assert.deepEqual(dropped, ["wallet", "nested.owner", "list"]);
+});
+
+test("Stellar secret seeds are removed even under an innocent key", () => {
+  assert.deepEqual(redactProperties({ value: `S${"A".repeat(55)}` }).properties, {});
+});
+
+test("redaction bounds cyclic payloads without throwing", () => {
+  const cyclic: Record<string, unknown> = { claim_id: 1 };
+  cyclic.self = cyclic;
+  const result = redactProperties(cyclic);
+  assert.deepEqual(result.properties, { claim_id: 1, self: {} });
+  assert.deepEqual(result.dropped, ["self"]);
+});
+
+test("event schemas drop unknown, mistyped, and non-finite values", () => {
+  const result = conformEventProperties("stake_previewed", {
+    stake_bucket: "2-5",
+    upside_bps: 1200,
+    is_low_upside: false,
+    total_return_multiple: 2.2,
+    wallet: ADDRESS,
+    exact_stake: 2.3456789,
+    unsupported_mode: "false",
+  });
+  assert.deepEqual(result.properties, {
+    stake_bucket: "2-5",
+    upside_bps: 1200,
+    is_low_upside: false,
+    total_return_multiple: 2.2,
+  });
+  assert.deepEqual(result.dropped, ["wallet", "exact_stake", "unsupported_mode"]);
+  assert.deepEqual(
+    conformEventProperties("stake_previewed", { upside_bps: Number.POSITIVE_INFINITY }),
+    { properties: {}, dropped: ["upside_bps"] },
+  );
+  assert.deepEqual(
+    conformEventProperties("market_viewed", null),
+    { properties: {}, dropped: ["$payload"] },
+  );
 });
 
 // ── Wallet address redaction ──────────────────────────────────────────────────
@@ -376,7 +439,7 @@ test("different addresses get different actor ids", () => {
 });
 
 test("rotating the salt severs the link to the old id", () => {
-  assert.notEqual(actorIdForAddress(ADDRESS, SALT), actorIdForAddress(ADDRESS, "rotated"));
+  assert.notEqual(actorIdForAddress(ADDRESS, SALT), actorIdForAddress(ADDRESS, "rotated-salt-value"));
 });
 
 test("the actor id never contains the address", () => {
@@ -398,6 +461,7 @@ test("a malformed address yields no actor id", () => {
 
 test("without a salt the actor degrades to anonymous, never to a raw address", () => {
   assert.equal(actorIdForAddress(ADDRESS, null), null);
+  assert.equal(actorIdForAddress(ADDRESS, "too-short"), null);
   const actor = resolveActor({ address: ADDRESS, salt: null });
   assert.equal(actor.actorId, ANON_ACTOR_ID);
   assert.equal(actor.actorType, "anonymous");
@@ -425,6 +489,16 @@ test("an agent id is used verbatim and is not a wallet address", () => {
   assert.equal(containsRawAddress({ distinct_id: agent.actorId }), false);
 });
 
+test("unsafe agent ids degrade to anonymous before reaching distinct_id", () => {
+  for (const agentId of [undefined, ADDRESS, "oracle@example.com", "x".repeat(65)]) {
+    assert.deepEqual(resolveActor({ isAgent: true, agentId }), {
+      actorId: ANON_ACTOR_ID,
+      actorType: "anonymous",
+      degraded: true,
+    });
+  }
+});
+
 // ── Idempotency ───────────────────────────────────────────────────────────────
 
 test("the idempotency key is deterministic for the same logical step", () => {
@@ -444,6 +518,16 @@ test("the idempotency key distinguishes different steps", () => {
 test("undefined and empty parts are skipped so the key stays stable", () => {
   assert.equal(idempotencyKey(["a", undefined, "b"]), "a:b");
   assert.equal(idempotencyKey(["a", "", "b"]), "a:b");
+});
+
+test("capture idempotency ids are opaque and fail closed without a strong salt", () => {
+  const raw = `stake_confirmed:12:${ADDRESS}`;
+  const opaque = opaqueAnalyticsId(raw, SALT);
+  assert.equal(opaque?.length, 32);
+  assert.equal(opaque?.includes(ADDRESS), false);
+  assert.equal(opaqueAnalyticsId(raw, null), null);
+  assert.equal(opaqueAnalyticsId(raw, "too-short"), null);
+  assert.equal(opaqueAnalyticsId("x".repeat(513), SALT), null);
 });
 test("every roadmap success metric has an owned, non-financial-analytics source", () => {
   assert.equal(SUCCESS_METRICS.length, 11);
