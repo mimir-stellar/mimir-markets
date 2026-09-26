@@ -13,6 +13,7 @@
     "build": "next build",
     "typecheck": "tsc --noEmit",
     "check:terms": "node scripts/check-forbidden-terms.mjs",
+    "check:lockfile": "git diff --exit-code package-lock.json",
     "sbom:release": "node scripts/generate-release-sbom.mjs",
     "test:contracts": "cargo test --manifest-path contracts-soroban/Cargo.toml --release",
     "check:toolchains": "tsx scripts/check-contract-toolchains.ts",
