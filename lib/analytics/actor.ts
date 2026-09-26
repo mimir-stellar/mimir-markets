@@ -21,6 +21,18 @@ import type { ActorType } from "./events";
 
 export const ANON_ACTOR_ID = "anon";
 const SAFE_AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+/**
+ * A Stellar strkey in the account, muxed or contract flavours.
+ *
+ * Checked separately from {@link SAFE_AGENT_ID} because that pattern is
+ * case-insensitive, which makes it blind to exactly the value that must never
+ * reach `distinct_id`: `G…` matches `[a-z0-9]` and the remaining base32 characters
+ * match too, so a wallet address used as an agent id sails through a length and
+ * charset check while being a permanent cross-site identity. The id is used
+ * verbatim, and `distinct_id` sits outside the properties redactor, so nothing
+ * downstream would catch it.
+ */
+const RAW_IDENTITY = /^[GCM][A-Z2-7]{55}$/;
 
 /**
  * Salt for the actor hash. Server-side only — a public salt would make the hash
@@ -77,7 +89,7 @@ export function resolveActor(args: {
     // Agents are already public identities with published addresses, so their
     // registry id needs no salting. Reject missing or arbitrary values:
     // distinct_id is outside the properties redactor and has its own contract.
-    if (!args.agentId || !SAFE_AGENT_ID.test(args.agentId)) {
+    if (!args.agentId || !SAFE_AGENT_ID.test(args.agentId) || RAW_IDENTITY.test(args.agentId.trim())) {
       return { actorId: ANON_ACTOR_ID, actorType: "anonymous", degraded: true };
     }
     return { actorId: `agent:${args.agentId}`, actorType, degraded: false };

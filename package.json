@@ -53,6 +53,7 @@
     "test:coverage": "node scripts/run-coverage.mjs",
     "replay:ledger": "tsx scripts/replay-ledger-fixture.ts",
     "check:ledger-fixture": "tsx scripts/replay-ledger-fixture.ts fixtures/ledger/funded-market-v1.json",
+    "check:trace": "tsx scripts/check-trace-correlation.ts",
     "test:research": "node --import tsx --test tests/node/research-adapters.test.ts tests/node/research-allowlist.test.ts tests/node/categories.test.ts tests/node/context-pack.test.ts tests/node/research-ssrf.test.ts tests/node/research-redirects.test.ts tests/node/source-fallback.test.ts tests/node/research-gateway.test.ts tests/node/x402-discovery.test.ts tests/node/evidence-fetcher-redirects.test.ts",
     "test:squad": "node --import tsx --test tests/node/squad-view.test.ts tests/node/squad-pool.test.ts",
     "test:baskets": "node --import tsx --test tests/node/baskets.test.ts",
