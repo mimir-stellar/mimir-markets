@@ -200,6 +200,8 @@ export interface VSData {
   challenger_addresses?: string[];
   remaining_escrow?: number;
   challenger_claims?: number;
+  evidence_hash?: string;
+  context_hash?: string;
   // Resolution-request flow (optional, surfaces off-chain UI state)
   creator_requested_resolve?: boolean;
   challenger_requested_resolve?: boolean;

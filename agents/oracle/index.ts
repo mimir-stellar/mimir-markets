@@ -53,7 +53,13 @@ applyWorkerGeminiKey("ORACLE_GEMINI_API_KEY");
 
 import { requireEnv, requireAnyLLMKey, applyWorkerGeminiKey, createThrottle } from "../../lib/agent-bootstrap";
 import { kellyFraction } from "../../lib/kelly";
-import { type VerdictPayload } from "../../lib/verdict";
+import {
+  type VerdictPayload,
+  type ResearchCitation,
+  validateResearchCitation,
+  validateCitationsList,
+  MAX_VERDICT_CITATIONS,
+} from "../../lib/verdict";
 import {
   parseLLMVerdictWithRetry,
   VERDICT_LLM_SCHEMA,
@@ -512,6 +518,36 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   // instead of settling a side on it (#99).
   const decision     = applySettlementPolicy(trusted, tierVerdict);
   const verdict      = decision.verdict;
+
+  // Attach canonical research citations to the verdict payload
+  const citations: ResearchCitation[] = [];
+  if (claim.resolution_url && claim.resolution_url.startsWith("http")) {
+    const canonical = validateResearchCitation({
+      url: claim.resolution_url,
+      contentHash: evidenceHash,
+      capturedAt: Date.now(),
+      trustTier: evidence.fetcher === "coingecko-api" ? "primary" : evidence.fetcher === "none" ? "unverified" : "corroborating",
+      fetcher: evidence.fetcher,
+      title: claim.question ? claim.question.slice(0, 100) : undefined,
+    });
+    if (canonical) {
+      citations.push(canonical);
+    }
+  }
+  if (Array.isArray(rawVerdict.citations) && rawVerdict.citations.length > 0) {
+    const validatedLlmCitations = validateCitationsList(rawVerdict.citations);
+    if (validatedLlmCitations.ok && validatedLlmCitations.citations) {
+      for (const c of validatedLlmCitations.citations) {
+        if (!citations.some((existing) => existing.url === c.url)) {
+          citations.push(c);
+        }
+      }
+    }
+  }
+  if (citations.length > 0) {
+    verdict.citations = citations.slice(0, MAX_VERDICT_CITATIONS);
+    console.log(`[settle] Citations (${verdict.citations.length}): ${verdict.citations.map((c) => c.domain).join(", ")}`);
+  }
 
   console.log(`[settle] Verdict: ${verdict.verdict} (${verdict.confidence}%) [${describeDecision(decision)}]`);
   console.log(`[settle] Evidence hash: ${evidenceHash}`);
