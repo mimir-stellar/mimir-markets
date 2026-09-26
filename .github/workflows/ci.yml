@@ -33,6 +33,10 @@ jobs:
       - run: npm run check:toolchains
       - run: npm run check:schema-snapshot
       - run: npm run typecheck
+      - run: npm run test:contracts
+      - run: cargo build --manifest-path contracts-soroban/Cargo.toml --release --target wasm32v1-none
+      - run: npm run test:agent-api:drift
+      - run: npm run verify:artifacts -- --require-built
       - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
       - run: npm run test:smoke
       - name: test:coverage
