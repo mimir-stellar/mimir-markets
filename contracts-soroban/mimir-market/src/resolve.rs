@@ -252,6 +252,12 @@ fn gross_for(
 
 /// Settle one challenger's position. Callable once per challenger once the claim
 /// is resolved, and O(1) in the number of challengers.
+///
+/// Duplicate prevention: each roster entry carries a `claimed` marker, and a
+/// second pull by the same challenger is rejected with
+/// [`Error::AlreadyClaimedPayout`]. The guard runs before any state is read for
+/// payout, so a duplicate can never draw the escrow down twice or advance the
+/// last-claimant branch.
 pub fn claim_challenger_payout(
     env: &Env,
     challenger: Address,
@@ -272,7 +278,12 @@ pub fn claim_challenger_payout(
     let (index, mut entry) =
         find_challenger(&roster, &challenger).ok_or(Error::NotAChallenger)?;
     if entry.claimed {
-        return Ok(0);
+        // Duplicate payout claim: this challenger has already pulled their
+        // settlement. Fail closed with the explicit error instead of a silent
+        // `Ok(0)`, so a retried or replayed pull is distinguishable from a
+        // genuinely zero payout and cannot be mistaken for a fresh settlement.
+        // No state is written and no funds move either way.
+        return Err(Error::AlreadyClaimedPayout);
     }
 
     let claim_number = claim
