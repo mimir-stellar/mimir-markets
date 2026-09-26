@@ -32,7 +32,7 @@ test("fixed seed anchors and deadlines reproduce exact seconds", () => {
   const anchor = parseSeedAnchor("2030-01-01T00:00:00Z");
   assert.equal(anchor, 1_893_456_000);
   assert.equal(seedDeadline(anchor, 3_600), 1_893_459_600);
-  assert.equal(parseSeedAnchor(undefined, 1_893_456_999), anchor);
+  assert.equal(parseSeedAnchor(undefined, 1_893_456_000_999), anchor);
 });
 
 test("seed anchor rejects ambiguous or invalid timestamps", () => {
