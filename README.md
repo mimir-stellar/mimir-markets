@@ -1168,6 +1168,8 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run)                                                  |
 | `npx tsx scripts/demo-full-cycle.ts`         | Full create -> challenge -> settle demo in ~90s                                    |
 | `npx tsx scripts/check-claim.ts <id>`        | Print a claim's state and deadline                                                 |
+| `npm run rollback:rehearsal`                 | Dry-run the full deployment rollback against a deterministic fixture (no secrets needed, runs in CI) |
+| `npm run rollback:rehearsal:live`            | Same rehearsal against your local `.env.local` (does not touch the chain)          |
 
 ---
 
