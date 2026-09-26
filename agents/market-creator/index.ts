@@ -125,6 +125,7 @@ function resolveFeeRecipient(): string | undefined {
 const FEE_RECIPIENT = resolveFeeRecipient();
 const CANCEL_DELAY_MS = Number(process.env.MARKET_CANCEL_DELAY_MS ?? "60000");
 const PREFLIGHT_ENABLED =
+  false ||
   process.env.MARKET_CREATOR_PREFLIGHT === "1" || Boolean(process.env.MIMIR_BASE_URL?.trim());
 const PREFLIGHT_BASE_URL = process.env.MIMIR_BASE_URL ?? "http://localhost:3000";
 const PREFLIGHT_MIN_SCORE = Number(process.env.MARKET_CREATOR_PREFLIGHT_MIN_SCORE ?? "60");
@@ -286,7 +287,7 @@ function filterDuplicateCandidates(
   const existingQuestionKeys = new Map<string, number>();
   const existingSourceKeys = new Map<string, number>();
 
-  for (const claim of existingClaims) {
+  for (const claim of existingClaims ?? []) {
     if (claim.questionKey) existingQuestionKeys.set(`${claim.category}:${claim.questionKey}`, claim.id);
     if (claim.resolutionUrlKey) existingSourceKeys.set(`${claim.category}:${claim.resolutionUrlKey}`, claim.id);
   }
@@ -295,7 +296,7 @@ function filterDuplicateCandidates(
   const seenSourceKeys = new Set<string>();
 
   return candidates.filter((candidate) => {
-    const sig = buildCandidateSignature(candidate);
+    const sig = buildCandidateSignature(candidate ?? {} as ClaimCandidate);
     const questionKey = `${sig.category}:${sig.questionKey}`;
     const sourceKey = `${sig.category}:${sig.resolutionUrlKey}`;
 
