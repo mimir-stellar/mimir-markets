@@ -2,8 +2,8 @@
  * Mimir Oracle Agent — AI economic actor on Stellar
  *
  * Two roles:
- * 1. SETTLER: resolves expired active claims
- * 2. CHALLENGER: evaluates open claims early and auto-stakes on mispriced ones
+ *   1. SETTLER: resolves expired active claims
+ *   2. CHALLENGER: evaluates open claims early and auto-stakes on mispriced ones
  *
  * This makes the oracle a genuine economic participant — not just a judge,
  * but a player that puts USDC on the line when it's confident.
@@ -16,32 +16,32 @@
  * window, Kelly sizing and the council-as-jury mechanism are all untouched. What
  * moved underneath them:
  *
- * - Claims are read through `readClaimRaw` (a NAMED struct from the generated
- * bindings) instead of the positional-tuple decoder. Amounts arrive as display
- * USDC, so the `unitsToUsdc` conversions on the pot are gone rather than
- * reapplied to already-converted numbers.
- * - `resolve_claim` no longer pays the challengers. It escrows and each
- * challenger pulls with `claim_challenger_payout`, because a Stellar
- * transaction is capped on its ledger-entry footprint. Settlement is still
- * complete and final from the oracle's side; the money moves when a winner
- * asks for it.
- * - Staking needs no `approve`: `challenge_claim` carries auth for exactly the
- * stake, so the two-step allowance dance is gone.
- * - `hasChallenged` has no Soroban counterpart, and needs none — `get_claim`
- * returns the challenger roster, so "am I already in" is a field on data
- * already in hand rather than an extra call per claim.
- * - The evidence hash is SHA-256 (`env.crypto().sha256()`'s client-side twin),
- * not keccak256, so a contract could verify it.
+ *  - Claims are read through `readClaimRaw` (a NAMED struct from the generated
+ *    bindings) instead of the positional-tuple decoder. Amounts arrive as display
+ *    USDC, so the `unitsToUsdc` conversions on the pot are gone rather than
+ *    reapplied to already-converted numbers.
+ *  - `resolve_claim` no longer pays the challengers. It escrows and each
+ *    challenger pulls with `claim_challenger_payout`, because a Stellar
+ *    transaction is capped on its ledger-entry footprint. Settlement is still
+ *    complete and final from the oracle's side; the money moves when a winner
+ *    asks for it.
+ *  - Staking needs no `approve`: `challenge_claim` carries auth for exactly the
+ *    stake, so the two-step allowance dance is gone.
+ *  - `hasChallenged` has no Soroban counterpart, and needs none — `get_claim`
+ *    returns the challenger roster, so "am I already in" is a field on data
+ *    already in hand rather than an extra call per claim.
+ *  - The evidence hash is SHA-256 (`env.crypto().sha256()`'s client-side twin),
+ *    not keccak256, so a contract could verify it.
  *
  * Run: npx tsx agents/oracle/index.ts
  * Env: ORACLE_SECRET, NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID
- * + one of: GEMINI_API_KEY (preferred) OR ANTHROPIC_API_KEY
- * AUTO_CHALLENGE=1 (enable auto-challenger, default off)
- * CHALLENGE_STAKE_USDC=2 (stake per challenge, default 2 USDC)
- * CHALLENGE_CONFIDENCE=80 (min confidence to challenge, default 80)
- * ORACLE_LLM_THROTTLE_MS=0 (min ms between LLM calls; raise to stay
- * under free-tier RPM, e.g. 5000 ≈ 12 RPM)
- * ORACLE_POLL_INTERVAL_MS=60000 (poll cadence in ms, default 60s)
+ *      + one of: GEMINI_API_KEY (preferred) OR ANTHROPIC_API_KEY
+ *      AUTO_CHALLENGE=1        (enable auto-challenger, default off)
+ *      CHALLENGE_STAKE_USDC=2 (stake per challenge, default 2 USDC)
+ *      CHALLENGE_CONFIDENCE=80 (min confidence to challenge, default 80)
+ *      ORACLE_LLM_THROTTLE_MS=0 (min ms between LLM calls; raise to stay
+ *                                under free-tier RPM, e.g. 5000 ≈ 12 RPM)
+ *      ORACLE_POLL_INTERVAL_MS=60000 (poll cadence in ms, default 60s)
  */
 
 // Worker-scoped Gemini key. When ORACLE_GEMINI_API_KEY is set we override the
@@ -49,9 +49,9 @@
 // and council each consume from their own 20 RPM free-tier bucket. Trimmed on
 // assignment so trailing whitespace pasted into the Railway UI can't slip into
 // the Authorization header and trigger API_KEY_INVALID.
-import { requireEnv, requireAnyLLMKey, applyWorkerGeminiKey, createThrottle } from "../../lib/agent-bootstrap";
 applyWorkerGeminiKey("ORACLE_GEMINI_API_KEY");
 
+import { requireEnv, requireAnyLLMKey, applyWorkerGeminiKey, createThrottle } from "../../lib/agent-bootstrap";
 import { kellyFraction } from "../../lib/kelly";
 import { type VerdictPayload } from "../../lib/verdict";
 import {
@@ -82,7 +82,6 @@ import {
 } from "../../lib/stellar";
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll } from "../../lib/ops/heartbeat";
-import { isPaused } from "../../lib/ops/flags";
 import { unitsToUsdc, usdcToUnits, formatAtomicUsdc } from "../../lib/usdc";
 import {
   fetchEvidence as fetchEvidenceShared,
@@ -102,43 +101,42 @@ import {
 } from "./council-vote";
 import { normalizeQuorum } from "../../lib/council/quorum";
 import { checkRiskBounds, isStakeAllowed, recordChallenge } from "../../lib/oracle-risk";
-
 // ── Config ────────────────────────────────────────────────────────────────────
-const POLL_INTERVAL_MS = Number(process.env.ORACLE_POLL_INTERVAL_MS?? "60000");
-const MAX_CONTENT_CHARS = 8_000;
-const CONTRACT_ID = requireMarketContractId();
-const AUTO_CHALLENGE = process.env.AUTO_CHALLENGE === "1";
+const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
+const MAX_CONTENT_CHARS     = 8_000;
+const CONTRACT_ID           = requireMarketContractId();
+const AUTO_CHALLENGE        = process.env.AUTO_CHALLENGE === "1";
 const CHALLENGE_STAKE_USDC = Number(
-  process.env.CHALLENGE_STAKE_USDC?? "2"
+  process.env.CHALLENGE_STAKE_USDC ?? "2"
 );
-const CHALLENGE_CONFIDENCE = Number(process.env.CHALLENGE_CONFIDENCE?? "80");
-const LLM_THROTTLE_MS = Number(process.env.ORACLE_LLM_THROTTLE_MS?? "8000");
+const CHALLENGE_CONFIDENCE  = Number(process.env.CHALLENGE_CONFIDENCE ?? "80");
+const LLM_THROTTLE_MS       = Number(process.env.ORACLE_LLM_THROTTLE_MS ?? "8000");
 
 // HTTP 402 paid-evidence config. The oracle becomes a PAYING agent: when a
 // resolution source answers 402, it buys the data with a sub-cent USDC
 // nanopayment — only up to a budget tied to what's actually at stake.
-const PAY_EVIDENCE = process.env.PAY_EVIDENCE!== "0"; // on by default
-const EVIDENCE_POOL_BPS = Number(process.env.EVIDENCE_POOL_BPS?? "50"); // 0.5% of pot
-const EVIDENCE_MAX_USDC = Number(process.env.EVIDENCE_MAX_USDC?? "0.05"); // hard ceiling
-const EVIDENCE_MIN_USDC = Number(process.env.EVIDENCE_MIN_USDC?? "0.001");// floor (still pay tiny sources)
+const PAY_EVIDENCE        = process.env.PAY_EVIDENCE !== "0"; // on by default
+const EVIDENCE_POOL_BPS   = Number(process.env.EVIDENCE_POOL_BPS ?? "50");   // 0.5% of pot
+const EVIDENCE_MAX_USDC   = Number(process.env.EVIDENCE_MAX_USDC ?? "0.05"); // hard ceiling
+const EVIDENCE_MIN_USDC   = Number(process.env.EVIDENCE_MIN_USDC ?? "0.001");// floor (still pay tiny sources)
 
 // Council-as-jury settlement. When on, the oracle buys each eligible persona's
 // verdict via x402 USDC payment (into the persona's wallet) and settles by
 // their tally — multi-agent consensus, on-chain. Falls back to the solo verdict
 // if too few jurors vote. Off by default so a missing web server never blocks settlement.
-const COUNCIL_SETTLEMENT = process.env.COUNCIL_SETTLEMENT === "1";
-const COUNCIL_BASE_URL = process.env.MIMIR_BASE_URL?? "http://localhost:3000";
-const COUNCIL_QUORUM = normalizeQuorum(process.env.COUNCIL_QUORUM?? "3");
-const COUNCIL_VOTE_CAP = Number(process.env.COUNCIL_VOTE_CAP_USDC?? "0.005");
+const COUNCIL_SETTLEMENT  = process.env.COUNCIL_SETTLEMENT === "1";
+const COUNCIL_BASE_URL    = process.env.MIMIR_BASE_URL ?? "http://localhost:3000";
+const COUNCIL_QUORUM      = normalizeQuorum(process.env.COUNCIL_QUORUM ?? "3");
+const COUNCIL_VOTE_CAP    = Number(process.env.COUNCIL_VOTE_CAP_USDC ?? "0.005");
 
 // Self-resolving jury (arXiv:2306.04305): jurors vote sequentially in random
 // order seeing prior reports, the market stops with probability ALPHA per vote
 // once quorum is met, and positive cross-entropy scorers (judged against the
 // oracle's terminal, history-informed assessment) split a bonus pool.
 const COUNCIL_SELF_RESOLVING = COUNCIL_SETTLEMENT && process.env.COUNCIL_SELF_RESOLVING === "1";
-const COUNCIL_ALPHA = Number(process.env.COUNCIL_ALPHA?? "0.25");
-const COUNCIL_BONUS_ATOMIC = parseCouncilBonusPool(process.env.COUNCIL_BONUS_USDC?? "0.01");
-const SETTLEMENT_DELAY_MS = Number(process.env.ORACLE_SETTLEMENT_DELAY_MS?? "900000");
+const COUNCIL_ALPHA          = Number(process.env.COUNCIL_ALPHA ?? "0.25");
+const COUNCIL_BONUS_ATOMIC   = parseCouncilBonusPool(process.env.COUNCIL_BONUS_USDC ?? "0.01");
+const SETTLEMENT_DELAY_MS = Number(process.env.ORACLE_SETTLEMENT_DELAY_MS ?? "900000");
 
 // Free-tier Gemini is 5 RPM on new accounts and the oracle has no other rate
 // limiter — every claim in a poll fires an LLM call back-to-back.
@@ -146,7 +144,7 @@ const SETTLEMENT_DELAY_MS = Number(process.env.ORACLE_SETTLEMENT_DELAY_MS?? "900
 // (e.g. 5000ms ≈ 12 RPM, fits a 15 RPM bucket with headroom).
 const llmGate = createThrottle(LLM_THROTTLE_MS);
 async function throttledLLM(
- ...args: Parameters<typeof callLLM>
+  ...args: Parameters<typeof callLLM>
 ): Promise<string> {
   await llmGate();
   return callLLM(...args);
@@ -161,9 +159,9 @@ requireEnv(["ORACLE_SECRET"]);
 requireAnyLLMKey();
 
 // ── Clients ───────────────────────────────────────────────────────────────────
-const ORACLE = getOracleWallet();
-const ORACLE_ADDR = ORACLE.address;
-const ORACLE_PAYER = payingWalletFor(ORACLE);
+const ORACLE        = getOracleWallet();
+const ORACLE_ADDR   = ORACLE.address;
+const ORACLE_PAYER  = payingWalletFor(ORACLE);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ClaimOnChain = ClaimData;
@@ -218,12 +216,12 @@ async function fetchEvidence(claim: ClaimOnChain): Promise<EvidenceResult> {
   const budgetUsdc = evidenceBudgetUsdc(claim);
   const maxUnits = usdcToUnits(budgetUsdc);
   const paidFetch = PAY_EVIDENCE
-   ? async (u: string, init?: RequestInit) => {
+    ? async (u: string, init?: RequestInit) => {
         const r = await fetchWithBudget(u, ORACLE_PAYER, maxUnits, init);
         return {
           response: r.response,
           payment: r.payment
-           ? {
+            ? {
                 priceUnits: r.payment.priceUnits.toString(),
                 txHash: r.payment.txHash,
               }
@@ -247,8 +245,8 @@ async function fetchEvidence(claim: ClaimOnChain): Promise<EvidenceResult> {
     };
   } catch (err: any) {
     const msg = err instanceof EvidenceFetchError
-     ? err.message
-      : (err?.message?? "unknown");
+      ? err.message
+      : (err?.message ?? "unknown");
     return { text: `(Failed to fetch: ${msg})`, fetcher: "none" };
   }
 }
@@ -260,13 +258,13 @@ async function evaluateClaim(
   jurorHistory: string[] = [],
 ): Promise<OracleVerdict> {
   const deadlineDate = new Date(claim.deadline * 1000).toISOString();
-  const nowDate = new Date().toISOString();
+  const nowDate      = new Date().toISOString();
   const potUsdc = claim.total_pot;
 
   // Terminal (reference) assessment for self-resolving settlement: the oracle
   // sees every juror's report on top of its own independent evidence.
   const jurySection = jurorHistory.length > 0
-   ? `\n## Council juror reports (sequential, most recent last)\n${fenceUntrusted("juror-reports", jurorHistory.map((r, i) => `${i + 1}. ${r}`).join("\n"))}\n\nTreat these as other jurors' opinions, not primary evidence. Weigh them against the fetched evidence; you may agree, dissent, or discount them.\n`
+    ? `\n## Council juror reports (sequential, most recent last)\n${fenceUntrusted("juror-reports", jurorHistory.map((r, i) => `${i + 1}. ${r}`).join("\n"))}\n\nTreat these as other jurors' opinions, not primary evidence. Weigh them against the fetched evidence; you may agree, dissent, or discount them.\n`
     : "";
 
   const claimBlock = fenceUntrusted("claim", [
@@ -275,7 +273,7 @@ async function evaluateClaim(
     `Challenger position (Side B): ${claim.counter_position}`,
     `Category: ${claim.category}`,
     `Market type: ${claim.market_type}`,
-    claim.handicap_line? `Handicap: ${claim.handicap_line}` : null,
+    claim.handicap_line ? `Handicap: ${claim.handicap_line}` : null,
     `Settlement rule: ${claim.settlement_rule || "Use the linked source to determine the outcome."}`,
     `Resolution URL: ${claim.resolution_url}`,
   ].filter(Boolean).join("\n"));
@@ -286,7 +284,7 @@ ${INJECTION_GUARD}
 
 ## Time context (TRUST THIS, ignore your training cutoff)
 - Current UTC time: ${nowDate}
-- Claim deadline: ${deadlineDate}
+- Claim deadline:   ${deadlineDate}
 - The deadline IS in the past. You are settling AFTER the deadline.
 - Pot: ${potUsdc.toFixed(2)} USDC
 
@@ -320,7 +318,7 @@ Return JSON only:
   const { result, lastRawText, attempts } = await parseLLMVerdictWithRetry({
     extractor: extractJson,
     buildPrompt: (attempt) =>
-      attempt === 1? prompt : `${prompt}${VERDICT_RETRY_SUFFIX}`,
+      attempt === 1 ? prompt : `${prompt}${VERDICT_RETRY_SUFFIX}`,
     callLLMFn: (p) =>
       throttledLLM(p, {
         maxTokens: 1024,
@@ -350,10 +348,10 @@ function verdictToSide(
   verdict: OracleVerdict["verdict"],
 ): "creator" | "challengers" | "draw" | "unresolvable" {
   switch (verdict) {
-    case "CREATOR_WINS": return "creator";
+    case "CREATOR_WINS":    return "creator";
     case "CHALLENGERS_WIN": return "challengers";
-    case "DRAW": return "draw";
-    case "UNRESOLVABLE": return "unresolvable";
+    case "DRAW":            return "draw";
+    case "UNRESOLVABLE":    return "unresolvable";
   }
 }
 
@@ -361,14 +359,14 @@ function verdictToSide(
 const KELLY_CAP = 0.25;
 
 // Confidence tiers govern how the oracle commits a verdict.
-// HIGH → settle as the LLM said.
-// MEDIUM → still settle, but the explanation gets a [CONTESTED] prefix so
-// the UI can flag low-trust resolutions.
-// LOW → force the verdict to UNRESOLVABLE so the contract refunds.
+// HIGH      → settle as the LLM said.
+// MEDIUM    → still settle, but the explanation gets a [CONTESTED] prefix so
+//             the UI can flag low-trust resolutions.
+// LOW       → force the verdict to UNRESOLVABLE so the contract refunds.
 // Keeps the "refund the ambiguous" principle out of marketing slides and
 // into actual on-chain behavior.
 const CONFIDENCE_HIGH_MIN = 80; // ≥ : settle as-is
-const CONFIDENCE_MED_MIN = 60; // 60–79: settle but mark contested
+const CONFIDENCE_MED_MIN  = 60; // 60–79: settle but mark contested
                                 // < 60 : downgrade to UNRESOLVABLE
 
 function tierVerdict(verdict: OracleVerdict): OracleVerdict {
@@ -376,14 +374,14 @@ function tierVerdict(verdict: OracleVerdict): OracleVerdict {
   if (verdict.confidence >= CONFIDENCE_HIGH_MIN) return verdict;
   if (verdict.confidence >= CONFIDENCE_MED_MIN) {
     return {
-     ...verdict,
+      ...verdict,
       explanation: `[CONTESTED] ${verdict.explanation}`.slice(0, 500),
     };
   }
   // Low confidence: refund rather than guess
   return {
-    verdict: "UNRESOLVABLE",
-    confidence: verdict.confidence,
+    verdict:     "UNRESOLVABLE",
+    confidence:  verdict.confidence,
     explanation: `[LOW CONFIDENCE — refunded] ${verdict.explanation}`.slice(0, 500),
   };
 }
@@ -401,9 +399,9 @@ function applyFetcherTrust(
   if (fetcher === "coingecko-api") return verdict;
   if (verdict.verdict === "UNRESOLVABLE") return verdict;
   const cappedConfidence = Math.min(verdict.confidence, MAX_CONFIDENCE_NON_API);
-  const tag = fetcher === "jina"? "[via-jina]" : fetcher === "direct"? "[via-scrape]" : "[no-fetch]";
+  const tag = fetcher === "jina" ? "[via-jina]" : fetcher === "direct" ? "[via-scrape]" : "[no-fetch]";
   return {
-   ...verdict,
+    ...verdict,
     confidence: cappedConfidence,
     explanation: `${tag} ${verdict.explanation}`.slice(0, 500),
   };
@@ -413,7 +411,7 @@ function applyFetcherTrust(
 // while the match may still be in progress. Defer settlement until the match is
 // final — but never longer than this grace window past the deadline, so a data
 // outage can't lock funds forever. Override with SPORTS_SETTLE_GRACE_HOURS.
-const SPORTS_SETTLE_GRACE_SECS = Math.max(1, Number(process.env.SPORTS_SETTLE_GRACE_HOURS?? 12)) * 3600;
+const SPORTS_SETTLE_GRACE_SECS = Math.max(1, Number(process.env.SPORTS_SETTLE_GRACE_HOURS ?? 12)) * 3600;
 
 /** True if the evidence shows the sports event has definitively concluded. */
 async function isSportsEventFinal(claim: ClaimOnChain, evidenceText: string): Promise<boolean> {
@@ -440,7 +438,7 @@ Reply JSON only: { "final": true | false }
       model: pickGeminiModel("oracle"),
       jsonSchema: { type: "object", properties: { final: { type: "boolean" } }, required: ["final"] },
     });
-    const parsed = JSON.parse(extractJson(text)?? "{}");
+    const parsed = JSON.parse(extractJson(text) ?? "{}");
     return parsed.final === true;
   } catch {
     return false; // unknown → defer (safe); the grace window prevents a permanent lock
@@ -452,7 +450,7 @@ Reply JSON only: { "final": true | false }
 async function settle(claim: ClaimOnChain): Promise<boolean> {
   console.log(`\n[settle] Claim #${claim.id}: "${claim.question.slice(0, 60)}..."`);
 
-  const evidence = await fetchEvidence(claim);
+  const evidence     = await fetchEvidence(claim);
   console.log(`[settle] Evidence fetcher: ${evidence.fetcher}`);
 
   // Sports: betting closed at kickoff, so don't resolve until the match is final
@@ -460,7 +458,7 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   if (claim.category.toLowerCase() === "sports") {
     const now = Math.floor(Date.now() / 1000);
     const pastGrace = now > claim.deadline + SPORTS_SETTLE_GRACE_SECS;
-    if (!pastGrace &&!(await isSportsEventFinal(claim, evidence.text))) {
+    if (!pastGrace && !(await isSportsEventFinal(claim, evidence.text))) {
       console.log(`[settle] Claim #${claim.id}: match not final yet — deferring to a later poll.`);
       return false;
     }
@@ -483,44 +481,44 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   let bonusVotes: CouncilVote[] | null = null;
   if (COUNCIL_SETTLEMENT) {
     const council = await gatherCouncilVerdict({
-      claimId: claim.id,
-      category: claim.category,
-      baseUrl: COUNCIL_BASE_URL,
-      payer: ORACLE_PAYER,
-      capUsdc: COUNCIL_VOTE_CAP,
-      quorum: COUNCIL_QUORUM,
-      claimState: claim.state,
-     ...(COUNCIL_SELF_RESOLVING
-       ? { selfResolving: { alpha: COUNCIL_ALPHA, minVotes: COUNCIL_QUORUM } }
+      claimId:       claim.id,
+      category:      claim.category,
+      baseUrl:       COUNCIL_BASE_URL,
+      payer:         ORACLE_PAYER,
+      capUsdc:       COUNCIL_VOTE_CAP,
+      quorum:        COUNCIL_QUORUM,
+      claimState:    claim.state,
+      ...(COUNCIL_SELF_RESOLVING
+        ? { selfResolving: { alpha: COUNCIL_ALPHA, minVotes: COUNCIL_QUORUM } }
         : {}),
     }).catch((err) => {
-      console.warn(`[settle] council vote failed, falling back to solo:`, err instanceof Error? err.message : err);
+      console.warn(`[settle] council vote failed, falling back to solo:`, err instanceof Error ? err.message : err);
       return null;
     });
     if (council && COUNCIL_SELF_RESOLVING) {
       const paidUsdc = unitsToUsdc(council.totalPaidUnits);
-      console.log(`[settle] 🏛️ Self-resolving jury: q=[${(council.qHistory?? []).map((q) => q.toFixed(2)).join(", ")}] · paid ${paidUsdc.toFixed(6)} USDC in vote fees`);
+      console.log(`[settle] 🏛️  Self-resolving jury: q=[${(council.qHistory ?? []).map((q) => q.toFixed(2)).join(", ")}] · paid ${paidUsdc.toFixed(6)} USDC in vote fees`);
       // Terminal (reference) report: full juror history + independent evidence.
-      const reference = await evaluateClaim(claim, evidence.text, council.reports?? []);
+      const reference  = await evaluateClaim(claim, evidence.text, council.reports ?? []);
       const referenceQ = verdictToProbability(reference.verdict, reference.confidence, Q_PRIOR);
       council.votes = scoreCouncilVotes(council.votes, referenceQ);
-      console.log(`[settle] 🏛️ Reference q_T=${referenceQ.toFixed(2)} · CE scores: ${council.votes.map((v) => `${v.slug}=${(v.score?? 0).toFixed(3)}`).join(" ")}`);
+      console.log(`[settle] 🏛️  Reference q_T=${referenceQ.toFixed(2)} · CE scores: ${council.votes.map((v) => `${v.slug}=${(v.score ?? 0).toFixed(3)}`).join(" ")}`);
       rawVerdict = reference;
       councilCommitment = {
         tally: council.tally,
-        qChain: council.qHistory?? [],
+        qChain: council.qHistory ?? [],
         referenceQ: Number(referenceQ.toFixed(4)),
         // Aligned with the q-chain: only reports that moved q were scored against
         // the reference (abstainers score zero and carry no q), and the commitment
         // rejects misaligned arrays rather than committing a corrupt ballot.
         scores: council.votes
-         .filter((v) => v.probability!== undefined)
-         .map((v) => Number((v.score?? 0).toFixed(4))),
+          .filter((v) => v.probability !== undefined)
+          .map((v) => Number((v.score ?? 0).toFixed(4))),
       };
       bonusVotes = council.votes;
     } else if (council) {
       const paidUsdc = unitsToUsdc(council.totalPaidUnits);
-      console.log(`[settle] 🏛️ Council ${council.tally.creator}–${council.tally.challengers} (${council.tally.draw + council.tally.unresolvable} abstain) · paid ${paidUsdc.toFixed(6)} USDC to jurors`);
+      console.log(`[settle] 🏛️  Council ${council.tally.creator}–${council.tally.challengers} (${council.tally.draw + council.tally.unresolvable} abstain) · paid ${paidUsdc.toFixed(6)} USDC to jurors`);
       rawVerdict = { verdict: council.verdict, confidence: council.confidence, explanation: council.explanation };
       councilCommitment = { tally: council.tally };
     } else {
@@ -537,19 +535,19 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   // A malformed or stale snapshot throws here and the poll loop retries next
   // round — no on-chain write is attempted for evidence we cannot commit.
   const evidenceHash = evidenceCommitmentHash({
-    evidence: evidence.text,
-    fetcher: evidence.fetcher,
-    sourceUrl: evidence.sourceUrl,
-    fetchedAt: evidence.fetchedAt,
-    now: Date.now(),
-    council: councilCommitment,
+    evidence:        evidence.text,
+    fetcher:         evidence.fetcher,
+    sourceUrl:       evidence.sourceUrl,
+    fetchedAt:       evidence.fetchedAt,
+    now:             Date.now(),
+    council:         councilCommitment,
   });
-  const trusted = applyFetcherTrust(rawVerdict, evidence.fetcher);
-  const verdict = tierVerdict(trusted);
+  const trusted      = applyFetcherTrust(rawVerdict, evidence.fetcher);
+  const verdict      = tierVerdict(trusted);
 
   const tierTag =
-    verdict.verdict!== rawVerdict.verdict? "REFUND" :
-    verdict.explanation!== rawVerdict.explanation? "CONTESTED" :
+    verdict.verdict !== rawVerdict.verdict ? "REFUND" :
+    verdict.explanation !== rawVerdict.explanation ? "CONTESTED" :
     "FIRM";
 
   console.log(`[settle] Verdict: ${verdict.verdict} (${verdict.confidence}%) [${tierTag}]`);
@@ -561,13 +559,13 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   // each challenger pulls with `claim_challenger_payout` afterwards. The oracle's
   // job ends here and the market is final.
   const settled = await resolveClaim(ORACLE.signer, claim.id, {
-    winner_side: verdictToSide(verdict.verdict),
-    summary: verdict.explanation,
-    confidence: verdict.confidence,
+    winner_side:   verdictToSide(verdict.verdict),
+    summary:       verdict.explanation,
+    confidence:    verdict.confidence,
     evidence_hash: evidenceHash,
   });
 
-  console.log(`[settle] ✓ Resolved — ${settled.explorerUrl?? settled.txHash}`);
+  console.log(`[settle] ✓ Resolved — ${settled.explorerUrl ?? settled.txHash}`);
 
   // Cross-entropy bonuses AFTER the on-chain settle: informative jurors split
   // the pool, parrots and dissenters-from-evidence get nothing. Best-effort —
@@ -576,7 +574,7 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
     try {
       // The send response may be pending. Soroban, not the worker or DB, is the
       // authority on whether this claim really resolved to this evidence hash.
-      const confirmed = settled.pending? null : await fetchClaim(claim.id);
+      const confirmed = settled.pending ? null : await fetchClaim(claim.id);
       if (!isConfirmedCouncilSettlement(confirmed, verdictToSide(verdict.verdict), evidenceHash, Boolean(settled.pending))) {
         console.warn(`[settle] Bonus for claim #${claim.id} withheld: resolution not confirmed on chain`);
       } else {
@@ -585,7 +583,7 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
           claimId: claim.id, contractId: CONTRACT_ID, settlementTxHash: settled.txHash,
         });
         for (const r of receipts) {
-          console.log(`[settle] Bonus ${formatAtomicUsdc(r.amountAtomic)} USDC to ${r.slug}: ${r.status}${r.txHash? ` (${getExplorerTxUrl(r.txHash)})` : ""}`);
+          console.log(`[settle] Bonus ${formatAtomicUsdc(r.amountAtomic)} USDC to ${r.slug}: ${r.status}${r.txHash ? ` (${getExplorerTxUrl(r.txHash)})` : ""}`);
         }
         if (receipts.length === 0) console.log(`[settle] No eligible positive-score jurors for claim #${claim.id}`);
       }
@@ -613,7 +611,7 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
 
   // Skip: oracle is already in. No `hasChallenged` call — `get_claim` returned the
   // whole roster, so this is a field on data already in hand.
-  if ((claim.challenger_addresses?? []).includes(ORACLE_ADDR)) {
+  if ((claim.challenger_addresses ?? []).includes(ORACLE_ADDR)) {
     evaluatedClaimIds.add(claim.id);
     return;
   }
@@ -658,7 +656,7 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
   console.log(`[challenge] Early verdict: ${verdict.verdict} (${verdict.confidence}%) [fetcher=${evidence.fetcher}]`);
 
   // Only challenge if highly confident challengers will win
-  if (verdict.verdict!== "CHALLENGERS_WIN" || verdict.confidence < CHALLENGE_CONFIDENCE) {
+  if (verdict.verdict !== "CHALLENGERS_WIN" || verdict.confidence < CHALLENGE_CONFIDENCE) {
     console.log(`[challenge] Not confident enough to stake — skipping`);
     return;
   }
@@ -672,8 +670,7 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
   const stakeUsdc = Math.round(kellyStake * 100) / 100;
 
   console.log(`[challenge] Kelly: ${(kelly * 100).toFixed(1)}% of USDC bankroll → ${stakeUsdc} USDC stake`);
-
-  // ── RISK BOUNDS (Issue #111) ──
+    // ── RISK BOUNDS (Issue #111) ──
   if (!isStakeAllowed(stakeUsdc)) {
     console.log(`[challenge] Risk blocked: stake ${stakeUsdc} exceeds MAX_STAKE_PCT`);
     return;
@@ -683,16 +680,14 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
     console.log(`[challenge] Risk blocked: ${riskCheck.reason}`);
     return;
   }
-
   console.log(`[challenge] Staking ${stakeUsdc} USDC on challenger side...`);
 
   // One call, one signature. No `approve` leg: the invocation carries auth for
   // exactly this transfer of exactly this amount.
   const staked = await challengeClaim(ORACLE.signer, claim.id, stakeUsdc);
-
   recordChallenge(stakeUsdc);
   challengedClaimIds.add(claim.id);
-  console.log(`[challenge] ✓ Staked ${stakeUsdc} USDC — ${staked.explorerUrl?? staked.txHash}`);
+  console.log(`[challenge] ✓ Staked ${stakeUsdc} USDC — ${staked.explorerUrl ?? staked.txHash}`);
   console.log(`[challenge] Oracle: "${verdict.explanation.slice(0, 120)}"`);
 }
 
@@ -710,7 +705,7 @@ async function poll(): Promise<void> {
 
   console.log(`\n[oracle] ── Poll at ${new Date().toISOString()} ── ${total} claims`);
 
-  const settled: number[] = [];
+  const settled: number[]   = [];
   const challenged: number[] = [];
   const expiredActive: ClaimOnChain[] = [];
 
@@ -739,16 +734,6 @@ async function poll(): Promise<void> {
     }
   }
 
-  // Checked here as well as in resolveClaim: settle() researches and calls the LLM
-  // (and may buy evidence over x402) before it ever reaches the gated write.
-  // Challenges above are left to the stake switch, so the two pause independently.
-  if (expiredActive.length > 0 && isPaused("oracle_settlement")) {
-    console.warn(
-      `[oracle] Settlement is paused — ${expiredActive.length} expired claim(s) wait for the next poll.`,
-    );
-    expiredActive.length = 0;
-  }
-
   expiredActive.sort((a, b) => a.deadline - b.deadline);
   for (let i = 0; i < expiredActive.length; i++) {
     const claim = expiredActive[i];
@@ -766,11 +751,11 @@ async function poll(): Promise<void> {
   }
 
   const summary = [
-    settled.length? `Settled: [${settled.join(", ")}]` : null,
-    challenged.length? `Challenged: [${challenged.join(", ")}]` : null,
+    settled.length    ? `Settled: [${settled.join(", ")}]`    : null,
+    challenged.length ? `Challenged: [${challenged.join(", ")}]` : null,
   ].filter(Boolean).join(" | ");
 
-  console.log(summary? `[oracle] ${summary}` : "[oracle] Nothing to do this round.");
+  console.log(summary ? `[oracle] ${summary}` : "[oracle] Nothing to do this round.");
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -783,17 +768,17 @@ async function main(): Promise<void> {
   }
 
   console.log("═══════════════════════════════════════════════");
-  console.log(" Mimir Oracle Agent (local Stellar keypair signer)");
-  console.log(` Contract : ${CONTRACT_ID}`);
-  console.log(` Oracle : ${ORACLE_ADDR}`);
-  console.log(` Fees : ${(balances.xlm?? 0).toFixed(4)} XLM`);
-  console.log(` Bankroll : ${balances.usdc === null? "no USDC trustline" : `${balances.usdc.toFixed(4)} USDC`}`);
-  console.log(` Network : Stellar ${STELLAR_NETWORK}`);
-  console.log(` LLM : ${activeLLMProvider()} / ${activeLLMModel()} · key=${activeLLMKeyFingerprint()}`);
-  console.log(` Throttle : ${LLM_THROTTLE_MS > 0? `${LLM_THROTTLE_MS}ms (${(60_000 / LLM_THROTTLE_MS).toFixed(1)} RPM cap)` : "OFF"}`);
-  console.log(` Settle gap : ${SETTLEMENT_DELAY_MS / 1000}s`);
-  console.log(` Poll every : ${POLL_INTERVAL_MS / 1000}s`);
-  console.log(` Auto-challenge: ${AUTO_CHALLENGE? `YES (≥${CHALLENGE_CONFIDENCE}% confidence, ${CHALLENGE_STAKE_USDC} USDC/claim)` : "OFF (set AUTO_CHALLENGE=1 to enable)"}`);
+  console.log("  Mimir Oracle Agent (local Stellar keypair signer)");
+  console.log(`  Contract   : ${CONTRACT_ID}`);
+  console.log(`  Oracle     : ${ORACLE_ADDR}`);
+  console.log(`  Fees       : ${(balances.xlm ?? 0).toFixed(4)} XLM`);
+  console.log(`  Bankroll   : ${balances.usdc === null ? "no USDC trustline" : `${balances.usdc.toFixed(4)} USDC`}`);
+  console.log(`  Network    : Stellar ${STELLAR_NETWORK}`);
+  console.log(`  LLM        : ${activeLLMProvider()} / ${activeLLMModel()} · key=${activeLLMKeyFingerprint()}`);
+  console.log(`  Throttle   : ${LLM_THROTTLE_MS > 0 ? `${LLM_THROTTLE_MS}ms (${(60_000 / LLM_THROTTLE_MS).toFixed(1)} RPM cap)` : "OFF"}`);
+  console.log(`  Settle gap : ${SETTLEMENT_DELAY_MS / 1000}s`);
+  console.log(`  Poll every : ${POLL_INTERVAL_MS / 1000}s`);
+  console.log(`  Auto-challenge: ${AUTO_CHALLENGE ? `YES (≥${CHALLENGE_CONFIDENCE}% confidence, ${CHALLENGE_STAKE_USDC} USDC/claim)` : "OFF (set AUTO_CHALLENGE=1 to enable)"}`);
   console.log("═══════════════════════════════════════════════\n");
 
   // Reports a heartbeat either way, so a crash-looping oracle shows as alive and
