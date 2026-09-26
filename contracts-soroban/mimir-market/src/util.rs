@@ -60,6 +60,15 @@ fn metadata_sum(values: &[&String]) -> Result<u32, Error> {
     Ok(total)
 }
 
+/// Sum raw byte lengths of stored strings, failing only on overflow.
+fn raw_len_sum(values: &[&String]) -> Result<u32, Error> {
+    let mut total = 0u32;
+    for value in values {
+        total = total.checked_add(value.len()).ok_or(Error::Overflow)?;
+    }
+    Ok(total)
+}
+
 /// Bound every free-text field a `create_claim` caller commits to storage.
 ///
 /// Each field is checked against [`MAX_METADATA_BYTES`] and their sum against
@@ -87,8 +96,11 @@ pub fn validate_create_metadata(env: &Env, params: &CreateParams) -> Result<(), 
 }
 
 /// The combined metadata length of an already-stored claim.
+///
+/// Stored fields are summed without the per-field cap: a legacy claim created
+/// before the bound may hold longer strings and must still be able to resolve.
 pub fn stored_metadata_len(claim: &Claim) -> Result<u32, Error> {
-    metadata_sum(&[
+    raw_len_sum(&[
         &claim.question,
         &claim.creator_position,
         &claim.counter_position,
