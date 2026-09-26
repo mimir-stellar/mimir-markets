@@ -158,6 +158,27 @@ Explorer: https://stellar.expert/explorer/testnet
 Public endpoints (rate-limited): https://soroban-testnet.stellar.org and
 https://horizon-testnet.stellar.org
 
+## Demo seed claims
+
+Preview the fixed demo claim set without a signer, contract id, or network access:
+
+```bash
+npm run seed:dry -- --at 2030-01-01T00:00:00Z
+```
+
+`--at` requires an explicit timezone and is accepted only with `--dry-run`; every
+preview then has stable absolute deadlines. A live `npm run seed` uses the current
+clock and requires `CREATOR_SECRET`, a configured Testnet market contract, and
+sufficient creator USDC. It does not use `STELLAR_DEPLOYER_SECRET`: demo market
+stakes must be signed by the dedicated creator wallet, not a deployment authority.
+
+Live writes are chain-first and cannot be rolled back as a batch. The script reports
+each failed transaction and continues, so inspect the resulting claim IDs/transactions
+before rerunning to avoid duplicate markets. Cancel an untouched claim only when the
+contract permits it; once challenged, resolve and settle it through the normal
+contract flow rather than editing or deleting read-index data. Generated signer
+seeds remain private in local environment files and must never be committed.
+
 ## Read-index cache backup / restore (devx)
 
 The Neon read-index is a cache, so its backup workflow is deliberately
