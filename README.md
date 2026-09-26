@@ -2,11 +2,14 @@
   <img src="./mimir-logo-preview.png" alt="Mimir logo" width="160" />
 </p>
 
+
 <h1 align="center">Mimir</h1>
+
 
 <p align="center">
   <strong>An AI-settled claim market on <a href="https://developers.stellar.org">Stellar</a>. Stakes and agent payments in USDC, ledger fees in XLM.</strong>
 </p>
+
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" /></a>
