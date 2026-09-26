@@ -232,6 +232,7 @@ pub fn challenge_claim(
     claim.total_challenger_stake = next_total_challenger_stake;
     claim.challenger_count = next_challenger_count;
     claim.state = ClaimState::Active;
+    util::assert_claim_conservation(&claim)?;
     storage::set_claim(env, claim_id, &claim);
 
     if util::is_fixed_odds(env, &claim.market.odds_mode) {
@@ -275,6 +276,7 @@ pub fn transition_deadline(env: &Env, claim_id: u64) -> Result<(), Error> {
     claim.state = ClaimState::Cancelled;
     let creator = claim.creator.clone();
     let refund = claim.creator_stake;
+    util::assert_claim_conservation(&claim)?;
     storage::set_claim(env, claim_id, &claim);
 
     // Cancellation is a refund: no fee. Same parked-flag semantics as
@@ -360,6 +362,7 @@ pub fn cancel_claim(env: &Env, claim_id: u64) -> Result<(), Error> {
 
     claim.state = ClaimState::Cancelled;
     let creator = claim.creator.clone();
+    util::assert_claim_conservation(&claim)?;
     storage::set_claim(env, claim_id, &claim);
 
     // Cancellation is a refund: no fee. A refund is not profit, so no fee leg

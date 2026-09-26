@@ -351,4 +351,5 @@ pub enum Error {
     /// verdict is refused rather than reinterpreted, so resolution fails closed
     /// and the claim is left untouched.
     UnsupportedVerdictVersion = 40,
+    ConservationViolation = 41,
 }

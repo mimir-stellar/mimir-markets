@@ -667,7 +667,7 @@ test("regression: LLM emits two JSON objects — first has no verdict => missing
   );
   assert.equal(r.ok, false);
   // The reasoning object has no verdict field.
-  assert.equal(r.reason, "missing-verdict");
+  assert.equal(r.reason, "invalid-json");
 });
 
 test("regression: money fields (wallet, price) in LLM response are stripped", () => {

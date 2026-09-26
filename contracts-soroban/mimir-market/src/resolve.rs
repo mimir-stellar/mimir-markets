@@ -58,6 +58,10 @@ pub fn resolve_claim_versioned(
 ) -> Result<(), Error> {
     storage::oracle(env)?.require_auth();
 
+    // Decode first: an unknown version must never be written, and `None` is not
+    // a settled verdict. Both refusals leave the claim untouched.
+    let winner_side = verdict.decode()?;
+
     let mut claim = storage::get_claim(env, claim_id)?;
     if claim.state == ClaimState::Resolved {
         // Idempotent replay: same decoded verdict and inputs is a no-op.
@@ -75,9 +79,6 @@ pub fn resolve_claim_versioned(
     if env.ledger().timestamp() < claim.deadline {
         return Err(Error::NotYetExpired);
     }
-    // Decode first: an unknown version must never be written, and `None` is not
-    // a settled verdict. Both refusals leave the claim untouched.
-    let winner_side = verdict.decode()?;
     if confidence > 100 {
         return Err(Error::InvalidConfidence);
     }
@@ -114,7 +115,7 @@ pub fn resolve_claim_versioned(
                 // challenger's profit, accumulated with the same formula at
                 // challenge time — so the unspent liability is known without
                 // walking the roster.
-                let refund = claim.creator_stake - claim.reserved_creator_liability;
+                let refund = claim.creator_stake.checked_sub(claim.reserved_creator_liability).ok_or(Error::InsufficientCreatorLiquidity)?;
                 if refund > 0 {
                     // Unspent liability returning to a LOSING creator is a
                     // partial refund of principal, not profit, so it carries no
@@ -153,6 +154,7 @@ pub fn resolve_claim_versioned(
     }
 
     let dust = inflow.checked_sub(committed).ok_or(Error::PayoutExceedsEscrow)?;
+    util::assert_claim_conservation(&claim)?;
     storage::set_claim(env, claim_id, &claim);
     // Persist the verdict with its explicit version tag. `claim.winner_side`
     // remains the compatibility mirror for callers that read the claim struct.
@@ -311,6 +313,7 @@ pub fn claim_challenger_payout(
         .checked_sub(gross)
         .ok_or(Error::PayoutExceedsEscrow)?;
     claim.challenger_claims = claim_number;
+    util::assert_claim_conservation(&claim)?;
     storage::set_claim(env, claim_id, &claim);
 
     let usdc = storage::usdc(env)?;

@@ -54,6 +54,8 @@ import {
 import type { VSData } from "@/lib/contract";
 import type { VSCacheFreshness } from "@/lib/vs-freshness";
 
+import type { VsDetailPhase } from "@/lib/vs-detail-state";
+
 // Re-export so consumers only need to import from one place.
 export { VS_DETAIL_POLL_INTERVAL_MS, VS_DETAIL_MAX_ATTEMPTS } from "@/lib/vs-detail-state";
 import type { VsDetailPhase } from "@/lib/vs-detail-state";

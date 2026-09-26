@@ -2,7 +2,7 @@
 
 use soroban_sdk::{Bytes, BytesN, Env, String};
 
-use crate::types::{Error, MAX_INVITE_KEY_BYTES};
+use crate::types::{Error, MAX_INVITE_KEY_BYTES, Claim, ClaimState};
 
 /// keccak256 of a `String`'s UTF-8 bytes.
 ///
@@ -33,4 +33,30 @@ pub fn or_default(env: &Env, value: &String, fallback: &str) -> String {
     } else {
         value.clone()
     }
+}
+
+
+pub fn assert_claim_conservation(claim: &Claim) -> Result<(), Error> {
+    if claim.remaining_escrow < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    if claim.total_challenger_stake < 0 || claim.creator_stake < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    if claim.reserved_creator_liability < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    if claim.reserved_creator_liability > claim.creator_stake {
+        return Err(Error::ConservationViolation);
+    }
+    if claim.state == ClaimState::Resolved {
+        let total = claim
+            .creator_stake
+            .checked_add(claim.total_challenger_stake)
+            .ok_or(Error::Overflow)?;
+        if claim.remaining_escrow > total {
+            return Err(Error::ConservationViolation);
+        }
+    }
+    Ok(())
 }

@@ -493,7 +493,7 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
     if (!gate.allowed) {
       await audit(request, "rejected", gate.reason);
-      return errorResponse(actionVerdictToError(gate, "researcher"));
+      return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
     }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
   } else {
