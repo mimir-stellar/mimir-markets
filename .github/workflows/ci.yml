@@ -31,6 +31,8 @@ jobs:
         with:
           targets: wasm32v1-none
       - run: npm ci
+      - name: Verify lockfile reproducibility
+        run: git diff --exit-code package-lock.json
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run check:terms
       - run: npm run typecheck
@@ -57,6 +59,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify lockfile reproducibility
+        run: git diff --exit-code package-lock.json
       - run: npm run check:terms
       - run: npm run typecheck
       - run: npm run test:smoke
