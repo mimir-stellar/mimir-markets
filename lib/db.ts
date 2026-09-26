@@ -2099,6 +2099,7 @@ function toApiKeyRecord(row: Record<string, unknown>): AgentApiKeyRecord {
     expiresAt: row.expires_at == null ? undefined : getNumber(row.expires_at),
     revokedAt: row.revoked_at == null ? undefined : getNumber(row.revoked_at),
     revokedReason: row.revoked_reason == null ? undefined : getString(row.revoked_reason),
+    scopes: row.scopes_json ? JSON.parse(getString(row.scopes_json)) : undefined,
   };
 }
 

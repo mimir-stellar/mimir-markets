@@ -317,7 +317,17 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
       }
       expiresAt = Date.now() + Math.floor(ttl) * 1000;
     }
-    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    let scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    if (auth.auth?.kind === "api_key" && auth.auth.scopes) {
+      if (!scopes) {
+        scopes = [...auth.auth.scopes];
+      } else {
+        const unauthorized = scopes.filter((s) => !auth.auth!.scopes!.includes(s));
+        if (unauthorized.length > 0) {
+          return json({ error: { message: `Cannot grant scopes not possessed by calling key: ${unauthorized.join(", ")}` } }, 403);
+        }
+      }
+    }
     const record: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(key),
       keyPrefix: apiKeyPrefix(key), label: String(body.label ?? "").slice(0, 80),
@@ -370,7 +380,17 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     // Issue the new key first — if the DB is unavailable we do nothing rather
     // than scheduling an expiry on the old key without a replacement.
     const newKey = generateApiKey(body.environment === "test" ? "test" : "live");
-    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    let scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    if (auth.auth?.kind === "api_key" && auth.auth.scopes) {
+      if (!scopes) {
+        scopes = [...auth.auth.scopes];
+      } else {
+        const unauthorized = scopes.filter((s) => !auth.auth!.scopes!.includes(s));
+        if (unauthorized.length > 0) {
+          return json({ error: { message: `Cannot grant scopes not possessed by calling key: ${unauthorized.join(", ")}` } }, 403);
+        }
+      }
+    }
     const newRecord: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(newKey),
       keyPrefix: apiKeyPrefix(newKey), label: String(body.label ?? "").slice(0, 80),
