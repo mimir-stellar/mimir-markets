@@ -1884,7 +1884,7 @@ export async function getAgentEarningsSummary(payoutWallet: string): Promise<{
   return { ownerFeesAtomic: getBigInt(row.owner_fees), unclaimedAtomic: getBigInt(row.unclaimed), x402Atomic: getBigInt(row.x402) };
 }
 
-export async function getPaymentsRevenueSummary(limit = 25): Promise<PaymentsRevenueSummary> {
+export async function getPaymentsRevenueSummary(limit = 25, offset = 0): Promise<PaymentsRevenueSummary> {
   const pool = await getDb();
   const [totals, byResource, bySeller, recent] = await Promise.all([
     execute(pool, {
@@ -1908,8 +1908,8 @@ export async function getPaymentsRevenueSummary(limit = 25): Promise<PaymentsRev
       sql: `SELECT resource, scheme, network, asset_address, asset_symbol, asset_decimals,
               amount_atomic, payer, seller, transaction_hash, payment_identifier,
               facilitator, settled_at, created_at
-            FROM payments_v2 ORDER BY settled_at DESC, id DESC LIMIT ?`,
-      args: [limit],
+            FROM payments_v2 ORDER BY settled_at DESC, id DESC LIMIT ? OFFSET ?`,
+      args: [limit, offset],
     }),
   ]);
   const t = totals.rows[0] ?? {};
