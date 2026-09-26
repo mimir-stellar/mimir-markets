@@ -100,7 +100,7 @@ import {
   type CouncilVote,
 } from "./council-vote";
 import { normalizeQuorum } from "../../lib/council/quorum";
-import { checkRiskBounds, isStakeAllowed, recordChallenge } from "../../lib/oracle-risk";
+import { RiskManager } from "../../lib/oracle-risk";
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
 const MAX_CONTENT_CHARS     = 8_000;
@@ -162,7 +162,7 @@ requireAnyLLMKey();
 const ORACLE        = getOracleWallet();
 const ORACLE_ADDR   = ORACLE.address;
 const ORACLE_PAYER  = payingWalletFor(ORACLE);
-
+const riskManager = new RiskManager();
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ClaimOnChain = ClaimData;
 
@@ -671,8 +671,9 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
 
   console.log(`[challenge] Kelly: ${(kelly * 100).toFixed(1)}% of USDC bankroll → ${stakeUsdc} USDC stake`);
     // ── RISK BOUNDS (Issue #111) ──
-  if (!isStakeAllowed(stakeUsdc)) {
-    console.log(`[challenge] Risk blocked: stake ${stakeUsdc} exceeds MAX_STAKE_PCT`);
+  const riskCheck = riskManager.checkRisk(claim, stakeUsdc);
+  if (!riskCheck.allowed) {
+    console.log(`[challenge] Risk blocked: ${riskCheck.reason}`);
     return;
   }
   const riskCheck = checkRiskBounds(claim);
@@ -685,7 +686,7 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
   // One call, one signature. No `approve` leg: the invocation carries auth for
   // exactly this transfer of exactly this amount.
   const staked = await challengeClaim(ORACLE.signer, claim.id, stakeUsdc);
-  recordChallenge(stakeUsdc);
+  riskManager.recordChallenge(stakeUsdc);
   challengedClaimIds.add(claim.id);
   console.log(`[challenge] ✓ Staked ${stakeUsdc} USDC — ${staked.explorerUrl ?? staked.txHash}`);
   console.log(`[challenge] Oracle: "${verdict.explanation.slice(0, 120)}"`);
