@@ -62,7 +62,8 @@
     "load:rate-limit": "tsx scripts/load-rate-limit.ts",
     "warm:vs-index": "tsx scripts/warm-vs-index.ts",
     "backup:read-index": "tsx --env-file-if-exists=.env.local scripts/backup-read-index.ts",
-    "restore:read-index": "tsx --env-file-if-exists=.env.local scripts/restore-read-index.ts"
+    "restore:read-index": "tsx --env-file-if-exists=.env.local scripts/restore-read-index.ts",
+    "check:openapi": "tsx scripts/generate-agent-openapi.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
