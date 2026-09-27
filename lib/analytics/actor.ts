@@ -20,7 +20,7 @@ import { parseAddressParam } from "@/lib/server/api-validation";
 import type { ActorType } from "./events";
 
 export const ANON_ACTOR_ID = "anon";
-const SAFE_AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+const SAFE_AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /**
  * Salt for the actor hash. Server-side only — a public salt would make the hash

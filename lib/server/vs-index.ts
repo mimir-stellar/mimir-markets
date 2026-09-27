@@ -390,10 +390,11 @@ async function loadStoredUserVs(address: string) {
   const withChallengers = await Promise.all(
     rows.map(async (row) => {
       const challengerRows = await getChallengersByClaimId(row.id);
+      const claim = claimRowToClaimData(row, challengerRows);
       return {
         row,
         challengerRows,
-        vs: claimRowToVSData(row, challengerRows),
+        vs: mapClaimToVS(sanitizeClaimForPublicRead(claim)),
       };
     })
   );
@@ -615,7 +616,9 @@ export async function getVsFeedSnapshot(
       };
     }
     return {
-      items: await getVsFeedFromCache(),
+      items: (await getVsFeedFromCache()).filter(
+        (c) => !c.is_private && c.visibility !== "private"
+      ),
       cache: buildVSCacheFreshness({
         updatedAtMs: null,
         freshnessWindowMs: LIST_FRESHNESS_MS,
@@ -712,6 +715,17 @@ export async function getVsDetailSnapshot(vsId: number): Promise<VSDetailSnapsho
   }
 
   const fallbackItem = await getVsByIdFromCache(vsId);
+  if (fallbackItem && (fallbackItem.visibility === "private" || fallbackItem.is_private)) {
+    return {
+      item: null,
+      cache: buildVSCacheFreshness({
+        updatedAtMs: null,
+        freshnessWindowMs: DETAIL_FRESHNESS_MS,
+        source: "index",
+      }),
+    };
+  }
+
   return {
     item: fallbackItem,
     cache: buildVSCacheFreshness({
@@ -810,7 +824,9 @@ export async function getUserVsSnapshot(
     }
 
     return {
-      items: await getUserVsFromCache(address),
+      items: (await getUserVsFromCache(address)).filter(
+        (c) => !c.is_private && c.visibility !== "private"
+      ),
       cache: buildVSCacheFreshness({
         updatedAtMs: null,
         freshnessWindowMs: LIST_FRESHNESS_MS,

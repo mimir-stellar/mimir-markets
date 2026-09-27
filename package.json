@@ -63,6 +63,11 @@
     "warm:vs-index": "tsx scripts/warm-vs-index.ts",
     "backup:read-index": "tsx --env-file-if-exists=.env.local scripts/backup-read-index.ts",
     "restore:read-index": "tsx --env-file-if-exists=.env.local scripts/restore-read-index.ts",
+    "test:migrations": "node --import tsx --test tests/node/migrations.test.ts",
+    "migrate:status": "tsx scripts/migrate.ts status --fixture",
+    "migrate:up": "tsx scripts/migrate.ts up --fixture",
+    "migrate:down": "tsx scripts/migrate.ts down --fixture",
+    "migrate:verify": "tsx scripts/migrate.ts verify --fixture",
     "check:openapi": "tsx scripts/generate-agent-openapi.ts"
   },
   "dependencies": {

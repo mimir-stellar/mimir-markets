@@ -169,6 +169,7 @@ export const EVENT_PROPERTY_SCHEMA: Record<AnalyticsEvent, Readonly<Record<strin
   copy_executed: {},
   copy_skipped: {},
   copy_revoked: {},
+  basket_ownership_transferred: {},
 };
 
 export function conformEventProperties(
