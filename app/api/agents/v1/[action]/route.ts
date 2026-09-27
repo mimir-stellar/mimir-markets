@@ -217,7 +217,7 @@ function clientIp(req: Request): string | undefined {
   return forwarded?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || undefined;
 }
 
-export async function handleAgentApiPost(
+async function handleAgentApiPost(
   req: Request,
   context: { params: Promise<{ action: string }> },
 ): Promise<Response> {
