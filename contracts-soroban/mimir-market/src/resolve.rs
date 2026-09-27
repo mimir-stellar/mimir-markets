@@ -81,6 +81,10 @@ pub fn resolve_claim_versioned(
     if confidence > 100 {
         return Err(Error::InvalidConfidence);
     }
+    // Bound the summary before any state is written. A claim created under the
+    // metadata budget must stay under it after resolution; an over-long summary
+    // is refused with the claim still Active and the escrow untouched.
+    util::validate_resolution_summary(&claim, &summary)?;
 
     claim.state = ClaimState::Resolved;
     claim.winner_side = winner_side;

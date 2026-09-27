@@ -687,6 +687,19 @@ const SCHEMA_STATEMENTS: SqlStatement[] = [
   },
 ];
 
+/**
+ * The ordered schema definition applied by `ensureSchema`. Exposed so the
+ * snapshot gate (`lib/ops/schema-snapshot.ts`, `npm run check:schema-snapshot`)
+ * can fingerprint the exact statements a deployment will run — no database and
+ * no secrets required.
+ */
+export function getSchemaStatements(): ReadonlyArray<{
+  sql: string;
+  args?: ReadonlyArray<unknown>;
+}> {
+  return SCHEMA_STATEMENTS;
+}
+
 declare global {
   // eslint-disable-next-line no-var
   var __mimirDbPool:  Pool | undefined;

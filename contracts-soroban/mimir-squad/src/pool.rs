@@ -7,7 +7,7 @@ use crate::events;
 use crate::storage;
 use crate::types::{
     ClaimResult, Error, Market, BPS_DIVISOR, MAX_DURATION, MAX_FEE_BPS, MAX_PARTICIPANTS_PER_SIDE,
-    MIN_DURATION, RESULT_CANCELLED, SIDE_A, SIDE_B,
+    MAX_QUESTION_BYTES, MIN_DURATION, RESULT_CANCELLED, SIDE_A, SIDE_B,
 };
 
 /// The fee on one winning claim: `floor(profit * fee_bps / BPS_DIVISOR)`.
@@ -89,6 +89,9 @@ pub fn create_market(
 
     if question.is_empty() {
         return Err(Error::EmptyQuestion);
+    }
+    if question.len() > MAX_QUESTION_BYTES {
+        return Err(Error::QuestionTooLong);
     }
     let now = env.ledger().timestamp();
     let earliest = now.checked_add(MIN_DURATION).ok_or(Error::Overflow)?;

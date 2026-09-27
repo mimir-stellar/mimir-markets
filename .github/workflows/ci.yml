@@ -31,6 +31,7 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run check:terms
       - run: npm run check:toolchains
+      - run: npm run check:schema-snapshot
       - run: npm run typecheck
       - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
       - run: npm run test:smoke
