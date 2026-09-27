@@ -24,6 +24,8 @@ pub use contract::{MimirMarket, MimirMarketClient};
 pub use types::*;
 
 #[cfg(test)]
+mod test_challenge_lock;
+#[cfg(test)]
 mod test_common;
 #[cfg(test)]
 mod test_decimals;
