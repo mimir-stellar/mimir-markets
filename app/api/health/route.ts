@@ -17,6 +17,8 @@ import { NextResponse } from "next/server";
 import { getSettlementBacklog, getSyncMeta, isDbConfigured } from "@/lib/db";
 import { evaluateHealth, healthHttpStatus, type HealthSnapshot } from "@/lib/ops/health";
 import { readFailureWindow, readWorkerBeats } from "@/lib/ops/heartbeat";
+import { readAgentBalances } from "@/lib/agent-wallets";
+import { isAccountAddress } from "@/lib/stellar";
 
 export const dynamic = "force-dynamic";
 
@@ -34,13 +36,29 @@ export async function GET() {
     );
   }
 
-  const [workers, lastSyncAt, backlog, rpc, facilitator, sources] = await Promise.all([
+  const agentRoles = [
+    { name: "oracle", pub: process.env.ORACLE_PUBLIC ?? process.env.STELLAR_ORACLE_PUBLIC },
+    { name: "market_creator", pub: process.env.CREATOR_PUBLIC ?? process.env.STELLAR_CREATOR_PUBLIC },
+  ];
+
+  const [workers, lastSyncAt, backlog, rpc, facilitator, sources, agentBalancesList] = await Promise.all([
     readWorkerBeats(),
     getSyncMeta("last_sync_at").catch(() => null),
     getSettlementBacklog().catch(() => null),
     readFailureWindow("rpc", nowMs),
     readFailureWindow("facilitator", nowMs),
     readFailureWindow("sources", nowMs),
+    Promise.all(
+      agentRoles.map(async (role) => {
+        if (!role.pub || !isAccountAddress(role.pub)) return { name: role.name, balance: null };
+        try {
+          const bal = await readAgentBalances(role.pub);
+          return { name: role.name, balance: bal.usdc };
+        } catch {
+          return { name: role.name, balance: null };
+        }
+      })
+    ),
   ]);
 
   const lastSyncMs = Number(lastSyncAt ?? "0");
@@ -58,6 +76,7 @@ export async function GET() {
     rpc,
     facilitator,
     sources: sources ?? EMPTY_WINDOW,
+    agentBalancesUsdc: Object.fromEntries(agentBalancesList.map((a) => [a.name, a.balance])),
   };
 
   const report = evaluateHealth(snapshot, nowMs);

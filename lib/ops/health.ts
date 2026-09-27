@@ -73,6 +73,11 @@ export interface HealthSnapshot {
   facilitator: FailureWindow;
   /** Research source fetches — a soft dependency, so warn only. */
   sources: FailureWindow;
+  /**
+   * Decimal USDC balances for the worker agents.
+   * Keyed by the worker role (e.g., "oracle").
+   */
+  agentBalancesUsdc: Record<string, number | null>;
 }
 
 export interface Thresholds {
@@ -91,6 +96,8 @@ export interface Thresholds {
   facilitatorFailureWarn: number;
   facilitatorFailureCritical: number;
   sourceFailureWarn: number;
+  agentBalanceWarnUsdc: number;
+  agentBalanceCriticalUsdc: number;
 }
 
 /**
@@ -116,6 +123,8 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   facilitatorFailureWarn: 0.05,
   facilitatorFailureCritical: 0.25,
   sourceFailureWarn: 0.3,
+  agentBalanceWarnUsdc: 1,
+  agentBalanceCriticalUsdc: 0.1,
 };
 
 /**
@@ -182,6 +191,7 @@ export interface HealthReport {
     facilitatorFailureRatio: number;
     sourceFailureRatio: number;
     workerAgesSec: Record<string, number | null>;
+    agentBalancesUsdc: Record<string, number | null>;
   };
 }
 
@@ -317,6 +327,35 @@ export function evaluateHealth(
   );
   if (sources) alarms.push(sources);
 
+  for (const [name, balance] of Object.entries(snapshot.agentBalancesUsdc)) {
+    if (balance === null) {
+      alarms.push({
+        id: `agent.${name}.untrusted`,
+        severity: "critical",
+        message: `agent ${name} has no USDC trustline or account`,
+        observed: 0,
+        threshold: t.agentBalanceCriticalUsdc,
+        unit: "count",
+      });
+    } else {
+      const balanceAlarm = threshold(
+        `agent.${name}.balance`,
+        -balance,
+        -t.agentBalanceWarnUsdc,
+        -t.agentBalanceCriticalUsdc,
+        "count",
+        (level) => `agent ${name} USDC balance is low: ${balance.toFixed(2)} (${level})`,
+      );
+      if (balanceAlarm) {
+        alarms.push({
+          ...balanceAlarm,
+          observed: balance,
+          threshold: balanceAlarm.severity === "critical" ? t.agentBalanceCriticalUsdc : t.agentBalanceWarnUsdc,
+        });
+      }
+    }
+  }
+
   return {
     status: worstSeverity(alarms),
     // Critical first so a truncated pager message still carries the worst news.
@@ -330,6 +369,7 @@ export function evaluateHealth(
       facilitatorFailureRatio: failureRatio(snapshot.facilitator),
       sourceFailureRatio: failureRatio(snapshot.sources),
       workerAgesSec,
+      agentBalancesUsdc: snapshot.agentBalancesUsdc,
     },
   };
 }
