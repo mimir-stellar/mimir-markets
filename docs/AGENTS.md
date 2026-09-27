@@ -158,6 +158,27 @@ Explorer: https://stellar.expert/explorer/testnet
 Public endpoints (rate-limited): https://soroban-testnet.stellar.org and
 https://horizon-testnet.stellar.org
 
+## Demo seed claims
+
+Preview the fixed demo claim set without a signer, contract id, or network access:
+
+```bash
+npm run seed:dry -- --at 2030-01-01T00:00:00Z
+```
+
+`--at` requires an explicit timezone and is accepted only with `--dry-run`; every
+preview then has stable absolute deadlines. A live `npm run seed` uses the current
+clock and requires `CREATOR_SECRET`, a configured Testnet market contract, and
+sufficient creator USDC. It does not use `STELLAR_DEPLOYER_SECRET`: demo market
+stakes must be signed by the dedicated creator wallet, not a deployment authority.
+
+Live writes are chain-first and cannot be rolled back as a batch. The script reports
+each failed transaction and continues, so inspect the resulting claim IDs/transactions
+before rerunning to avoid duplicate markets. Cancel an untouched claim only when the
+contract permits it; once challenged, resolve and settle it through the normal
+contract flow rather than editing or deleting read-index data. Generated signer
+seeds remain private in local environment files and must never be committed.
+
 ## Read-index cache backup / restore (devx)
 
 The Neon read-index is a cache, so its backup workflow is deliberately
@@ -191,31 +212,24 @@ property testable on a clean checkout and in CI.
 - Never commit real archives to the repo. The committed fixture in
   `tests/fixtures/cache-backup/valid.json` is synthetic.
 
-## Agent API contract (devx)
+## Schema snapshot gate (devx)
 
-`docs/openapi-agent-v1.yaml` and `schemas/agent-api-v1.schema.json` are generated
-from the modules that serve the agent API, so the published contract cannot drift
-from the route. Never edit them by hand.
+The Postgres schema is the ordered `SCHEMA_STATEMENTS` list in `lib/db.ts`; there
+is no separate migration runner, so a schema edit ships on merge. The gate makes
+that change reviewable:
 
-- **Verify** (`npm run check:openapi`) needs no credentials, no network and no
-  database. It regenerates both artifacts in memory, audits them against the live
-  action list, credential rules, error catalogue, registry authority levels,
-  feature flags and pause switches, scans the text for credential and
-  non-synthetic-wallet shapes, and compares the result with what is committed.
-  A mismatch is a failure, not a warning.
-- **Regenerate** (`npm run check:openapi -- --write`) writes the same two files and
-  then re-checks them from disk. The diff is the review of a contract change.
-- **Examples are executed, not illustrated**: every request example is validated by
-  the live `validateAgentRequestEnvelope` and by a fail-closed JSON Schema subset
-  validator, and the negative examples must still be refused for their stated
-  reason.
-- **Secrets and environment**: examples use synthetic addresses derived from
-  `sha256("mimir-openapi-example/" + role)`, a zero signature and a placeholder
-  API key. Generation reads no environment variable; a canary test proves it.
-  Findings report a code, a location and a reason — never a value.
-- **Regression fixture**: the hand-maintained files from before generation are kept
-  verbatim in `tests/fixtures/agent-openapi/` so the drift that shipped (11 of 18
-  actions, 409 for a nonce replay) stays testable.
-
-See `docs/AGENT_API_OPENAPI.md` for the full failure, artifact, secret, environment
-and rollback policy.
+- **Verify** (`npm run check:schema-snapshot`) rebuilds the snapshot from
+  `getSchemaStatements()` and compares it with
+  `schemas/db-schema.snapshot.json` (`lib/ops/schema-snapshot.ts`). Pure — no
+  `DATABASE_URL`, no network, no secrets. It is a CI gate.
+- **Update** a schema, index, or `schema_migrations` row, then run
+  `npm run check:schema-snapshot -- --write` and commit the snapshot in the same
+  pull request. Fail-closed findings: `SNAPSHOT_MISSING`, `SNAPSHOT_INVALID`,
+  `EMPTY_SCHEMA`, `FINGERPRINT_MISMATCH`, `TABLE_DRIFT`, `INDEX_DRIFT`,
+  `MIGRATION_DRIFT`, `MIGRATION_DUPLICATE_VERSION`, `MIGRATION_UNREGISTERED`.
+- **Rollback**: revert the schema change and the snapshot together, then rerun
+  the check; reverting only one leaves the gate failing by design. The read index
+  is disposable and can be rebuilt from chain (`npm run warm:vs-index`).
+- Every new table or index must ship with a `schema_migrations` registration; a
+  schema with no registered migration fails `MIGRATION_UNREGISTERED`.
+- Policy: [`docs/SCHEMA_SNAPSHOTS.md`](./SCHEMA_SNAPSHOTS.md).

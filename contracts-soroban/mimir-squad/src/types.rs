@@ -13,6 +13,14 @@ pub const MAX_PARTICIPANTS_PER_SIDE: u32 = 200;
 pub const MIN_DURATION: u64 = 600; // 10 minutes
 pub const MAX_DURATION: u64 = 31_536_000; // 365 days
 
+/// Upper bound on the byte length of a market question.
+///
+/// The question is free text supplied by the captain and carried on the
+/// `MarketCreated` event; it is bounded at the boundary rather than truncated,
+/// so a rejected caller knows to shorten it. Mirrors
+/// `mimir-market::MAX_METADATA_BYTES`.
+pub const MAX_QUESTION_BYTES: u32 = 512;
+
 pub const BPS_DIVISOR: i128 = 10_000;
 
 /// Decimals of the escrow token. A Stellar Asset Contract exposes every classic
@@ -80,4 +88,7 @@ pub enum Error {
     Overflow = 24,
     UnsupportedDecimals = 25,
     ConservationViolation = 26,
+    /// The market question exceeded `MAX_QUESTION_BYTES`. Refused rather than
+    /// truncated.
+    QuestionTooLong = 27,
 }

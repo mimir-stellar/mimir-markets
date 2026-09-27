@@ -31,6 +31,7 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run check:terms
       - run: npm run check:toolchains
+      - run: npm run check:schema-snapshot
       - run: npm run typecheck
       # The published agent API contract must be what the live code serves. Fails
       # if docs/openapi-agent-v1.yaml or schemas/agent-api-v1.schema.json drift;
