@@ -26,6 +26,7 @@ import {
   MIN_STAKE_OPTIONS,
   normalizeExploreMinStake,
   type ExploreSort,
+  type ExplorerView,
 } from "@/lib/exploreFilters";
 import type {
   ChallengeOpportunitiesResponse,
@@ -54,8 +55,6 @@ const filterPillBase =
 const filterPillActive = "border-pv-emerald/50 bg-pv-emerald text-pv-bg";
 const filterPillInactive =
   "border-pv-ink/[0.15] bg-transparent text-pv-muted hover:border-pv-ink/[0.28] hover:text-pv-text";
-
-type ArenaViewMode = "open" | "ai" | "closed";
 
 function getOpportunitySearchBlob(opportunity: ChallengeOpportunity) {
   return [
@@ -150,7 +149,6 @@ export default function ExploreClient() {
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [quickFilterMenuOpen, setQuickFilterMenuOpen] = useState(false);
   const [minDraft, setMinDraft] = useState("");
-  const [activeView, setActiveView] = useState<ArenaViewMode>("open");
   const [, startViewTransition] = useTransition();
   const sortMenuRef = useRef<HTMLDivElement>(null);
   const quickFilterMenuRef = useRef<HTMLDivElement>(null);
@@ -365,7 +363,7 @@ export default function ExploreClient() {
     opportunities,
   ]);
 
-  const { cat, sort, search, minStake, needsChallengers, expiringSoon, underdogOnly } =
+  const { cat, sort, search, minStake, needsChallengers, expiringSoon, underdogOnly, view: activeView } =
     filters;
 
   useEffect(() => {
@@ -480,12 +478,13 @@ export default function ExploreClient() {
   }, [quickFilterMenuOpen, sortMenuOpen]);
 
   const switchView = useCallback(
-    (nextView: ArenaViewMode) => {
+    (nextView: ExplorerView) => {
       startViewTransition(() => {
         if (nextView === "ai") {
-          updateFilters({ needsChallengers: false });
+          updateFilters({ needsChallengers: false, view: nextView });
+        } else {
+          updateFilters({ view: nextView });
         }
-        setActiveView(nextView);
       });
     },
     [startViewTransition, updateFilters]
