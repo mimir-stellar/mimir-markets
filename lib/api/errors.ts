@@ -12,6 +12,9 @@
  * keep working.
  */
 
+import { TRACE_HEADER } from "../ops/trace-http";
+import { currentTraceId } from "../ops/trace";
+import { isTraceId } from "../ops/trace-id";
 import { createApiError, type ApiErrorShape } from "../server/api-validation";
 
 export type ApiErrorCode =
@@ -86,6 +89,15 @@ export interface ApiError extends ApiErrorShape {
     retryAfterSeconds?: number;
     /** Field that caused a validation failure, when there is one. */
     field?: string;
+    /**
+     * The trace this failure happened under, when the route ran inside a traced
+     * request.
+     *
+     * An agent reading only its own logs would otherwise have to guess which of
+     * its many in-flight calls produced a `429`. One field, additive, and
+     * meaningless to an agent that ignores it.
+     */
+    trace_id?: string;
   };
 }
 
@@ -123,6 +135,16 @@ export function apiError(
   // be an invitation to retry a request that cannot succeed.
   if (spec.retryable && retryAfter !== undefined && retryAfter > 0) {
     headers["retry-after"] = String(Math.ceil(retryAfter));
+  }
+  // Reuse the ambient trace; never mint one here. A trace id invented at the moment
+  // of failure would be echoed back to the caller and match nothing in the logs,
+  // which is worse than no id at all — it looks like correlation and is not. The
+  // route's `tracedRoute` wrapper is what supplies it, and an untraced caller
+  // simply gets a body without the field.
+  const traceId = currentTraceId();
+  if (isTraceId(traceId)) {
+    body.error.trace_id = traceId;
+    headers[TRACE_HEADER] = traceId;
   }
   return { status: spec.status, body, headers };
 }

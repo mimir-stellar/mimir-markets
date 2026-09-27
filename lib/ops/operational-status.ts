@@ -424,6 +424,7 @@ export function evaluateOperationalStatusReport(
           facilitatorFailureRatio: 0,
           sourceFailureRatio: 0,
           workerAgesSec: {},
+          workerTraceIds: {},
         },
       };
 
