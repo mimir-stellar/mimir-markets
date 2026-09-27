@@ -182,6 +182,21 @@ pub fn deposit(
     }
     storage::set_market(env, market_id, &market);
 
+    let new_pool_total = if side == SIDE_A {
+        market.pool_a
+    } else {
+        market.pool_b
+    };
+
+    events::LiquidityAdded {
+        market_id,
+        side,
+        amount,
+        new_pool_total,
+        shares_issued: amount,
+    }
+    .publish(env);
+
     events::Deposited {
         market_id,
         side,
@@ -234,6 +249,21 @@ pub fn withdraw_before_deadline(
     let usdc = storage::usdc(env)?;
     escrow::push(env, &usdc, &participant, amount);
 
+    let new_pool_total = if side == SIDE_A {
+        market.pool_a
+    } else {
+        market.pool_b
+    };
+
+    events::LiquidityRemoved {
+        market_id,
+        side,
+        amount,
+        new_pool_total,
+        shares_burned: amount,
+    }
+    .publish(env);
+
     events::Withdrawn {
         market_id,
         side,
@@ -257,6 +287,14 @@ pub fn transition_deadline(env: &Env, market_id: u64) -> Result<(), Error> {
         return Err(Error::Locked);
     }
 
+    events::MarketDeadlineReached {
+        market_id,
+        deadline: market.deadline,
+        pool_a_total: market.pool_a,
+        pool_b_total: market.pool_b,
+    }
+    .publish(env);
+
     market.resolved = true;
     market.result = RESULT_CANCELLED;
     market.remaining_escrow = market
@@ -264,6 +302,15 @@ pub fn transition_deadline(env: &Env, market_id: u64) -> Result<(), Error> {
         .checked_add(market.pool_b)
         .ok_or(Error::Overflow)?;
     assert_market_conservation(&market)?;
+    
+    events::MarketStateTransitioned {
+        market_id,
+        from_state: 0, // Active
+        to_state: 2,   // Resolved
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+    
     storage::set_market(env, market_id, &market);
 
     events::Resolved {
@@ -304,6 +351,14 @@ pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
         }
     }
 
+    events::MarketDeadlineReached {
+        market_id,
+        deadline: market.deadline,
+        pool_a_total: market.pool_a,
+        pool_b_total: market.pool_b,
+    }
+    .publish(env);
+
     market.resolved = true;
     market.result = result;
     market.remaining_escrow = market
@@ -311,6 +366,15 @@ pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
         .checked_add(market.pool_b)
         .ok_or(Error::Overflow)?;
     assert_market_conservation(&market)?;
+    
+    events::MarketStateTransitioned {
+        market_id,
+        from_state: 0, // Active
+        to_state: 2,   // Resolved
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+    
     storage::set_market(env, market_id, &market);
 
     events::Resolved {

@@ -220,3 +220,52 @@ pub struct ChallengerPaid {
     pub fee: i128,
     pub net: i128,
 }
+
+/// Lifecycle state transition event for auditing and monitoring.
+/// Emitted on every state change with the previous and new states.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimStateTransitioned {
+    #[topic]
+    pub id: u64,
+    pub from_state: u32,
+    pub to_state: u32,
+    pub timestamp: u64,
+}
+
+/// Emitted when a claim's deadline is reached and it transitions to settlement-eligible.
+/// Useful for indexers and workers to identify claims ready for oracle resolution.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeadlineReached {
+    #[topic]
+    pub id: u64,
+    pub deadline: u64,
+    pub challenger_count: u32,
+    pub total_staked: i128,
+}
+
+/// Emitted when initial escrow is established for a claim.
+/// Records the initial funding state for accounting reconciliation.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowSeeded {
+    #[topic]
+    pub id: u64,
+    #[topic]
+    pub funder: Address,
+    pub amount: i128,
+    pub escrow_type: String,
+}
+
+/// Emitted on fixed-odds liquidity state changes beyond reservations.
+/// Tracks available creator liquidity for risk management.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiquidityUpdated {
+    #[topic]
+    pub id: u64,
+    pub reserved_liability: i128,
+    pub available_liquidity: i128,
+    pub total_creator_stake: i128,
+}
