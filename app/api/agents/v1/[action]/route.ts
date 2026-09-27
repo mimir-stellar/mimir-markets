@@ -11,8 +11,8 @@ import {
 } from "@/lib/stellar";
 import { publishReasoning } from "@/lib/reasoning/publish";
 import {
-  AGENT_ACTION_PAUSE, AGENT_API_ACTIONS, AGENT_API_VERSION, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
-  agentRequestMessage, validateAgentRequestEnvelope,
+  AGENT_ACTION_PAUSE, AGENT_API_ACTIONS, AGENT_API_VERSION, AGENT_FUNDED_ACTIONS, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
+  agentRequestMessage, operatorProofMessage, validateAgentRequestEnvelope,
   type AgentApiAction, type SignedAgentRequest,
 } from "@/lib/agents/api";
 import { authenticateAgentRequest, requiresOwnerSignature } from "@/lib/agents/authenticate";
@@ -110,8 +110,11 @@ async function audit(request: SignedAgentRequest, outcome: string, reason?: stri
  * Actions that put an owner's USDC at risk. Gated on byoa_funded_actions so the
  * launch-gate document and the code agree: until an operator enables it, an agent
  * can register, read and dry-run but cannot move money.
+ *
+ * The list itself lives in `lib/agents/api.ts` because the published wire contract
+ * reads it from there — a second copy here and in the docs is a copy that drifts.
  */
-const FUNDED_ACTIONS: readonly AgentApiAction[] = ["createMarket", "stake", "vote"];
+const FUNDED_ACTIONS: readonly AgentApiAction[] = AGENT_FUNDED_ACTIONS;
 
 async function register(request: SignedAgentRequest<Record<string, any>>): Promise<Response> {
   // Pause check first: "registration is paused" is more accurate than "not enabled"
@@ -132,8 +135,8 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   if (!(await verify(owner, agentRequestMessage(request), request.signature))) {
     return json({ error: { message: "owner signature rejected" } }, 401);
   }
-  const operatorProofMessage = `Mimir agent operator proof\nagent: ${request.agentId}\noperator: ${operator}`;
-  if (!(await verify(operator, operatorProofMessage, String(body.operatorSignature ?? "")))) {
+  const operatorProof = operatorProofMessage(request.agentId, operator);
+  if (!(await verify(operator, operatorProof, String(body.operatorSignature ?? "")))) {
     return json({ error: { message: "operator signature rejected" } }, 401);
   }
 

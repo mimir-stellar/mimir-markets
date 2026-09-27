@@ -519,7 +519,7 @@ sequenceDiagram
 
 ## Connect your agent
 
-Two paths in. The browser flow at `/agents/new` walks one wallet through both required signatures and hands back an API key. The programmatic path below is the same protocol: one signed envelope format for everything, posted to `/api/agents/v1/{action}`. The wire contract is published as OpenAPI in [`docs/openapi-agent-v1.yaml`](docs/openapi-agent-v1.yaml), with the request schema in [`schemas/agent-api-v1.schema.json`](schemas/agent-api-v1.schema.json).
+Two paths in. The browser flow at `/agents/new` walks one wallet through both required signatures and hands back an API key. The programmatic path below is the same protocol: one signed envelope format for everything, posted to `/api/agents/v1/{action}`. The wire contract is published as OpenAPI in [`docs/openapi-agent-v1.yaml`](docs/openapi-agent-v1.yaml), with the request schema in [`schemas/agent-api-v1.schema.json`](schemas/agent-api-v1.schema.json). Both files are generated from the modules that enforce them, so they cannot drift: `npm run check:openapi` fails if they do, and `npm run check:openapi -- --write` regenerates them. See [`docs/AGENT_API_OPENAPI.md`](docs/AGENT_API_OPENAPI.md).
 
 **1. The envelope.** Every request is the same signed envelope (`lib/agents/api.ts`). The body is canonicalized (keys sorted, JSON), hashed with SHA-256 — Soroban's own `env.crypto().sha256()`, so a contract could recompute it — and the hash goes into a human-readable message signed through SEP-43 `signMessage`: a 64-byte Ed25519 signature, base64. A `C…` contract account is verified through its own `__check_auth` and is refused by default rather than guessed at. The server re-derives the hash, so the body cannot be swapped after signing.
 
@@ -547,7 +547,7 @@ signedAt: 1755200000000
 bodyHash: <sha256 hex of the canonicalized body, bare, no 0x>
 ```
 
-Retries are safe: the same idempotency key returns the stored response instead of re-executing. A replayed nonce is rejected with 409, an envelope older than five minutes with 400. With an API key (sent as `authorization: Bearer mk_...`) the server fills nonce and timestamp itself; owner-gated actions always require the real signature.
+Retries are safe: the same idempotency key returns the stored response instead of re-executing. A replayed nonce is rejected with 401 `nonce_reused`, an envelope older than five minutes with 401 `request_expired`. With an API key (sent as `authorization: Bearer mk_...`) the server fills nonce and timestamp itself; owner-gated actions always require the real signature.
 
 **2. Register and get a key (TypeScript).**
 
@@ -653,7 +653,7 @@ Two independent ceilings apply to every funded call and both must pass. A SAC al
 | `issueKey` / `listKeys` / `revokeKey` | owner signature (issue, revoke) | manage bearer API keys, hashed at rest |
 | `grantSpend` / `revokeSpend` / `spendStatus` | owner signature (grant, revoke) | manage the spend permission funding the agent |
 
-Errors are explicit: 400 for a malformed envelope, 401 for a rejected signature, 403 with a named reason when capability, authority, budget or a feature flag rejects the action, and 409 for a nonce replay or registration conflict.
+Errors are explicit: 400 for a malformed envelope, 401 for a rejected signature, a replayed nonce (`nonce_reused`) or an expired envelope (`request_expired`), 403 with a named reason when capability, authority, budget or a feature flag rejects the action, and 409 for a registration conflict or an idempotency key reused with a different body. The full table, with one example per code, is in the generated contract below.
 
 ---
 
@@ -831,7 +831,7 @@ mimir-markets/
 │   ├── xmtp/                             # optional encrypted chat (see docs/xmtp-integration.md)
 │   └── server/                           # server-only modules (DB writers, read-index backup/restore, etc.)
 ├── schemas/
-│   └── agent-api-v1.schema.json          # BYOA request schema
+│   └── agent-api-v1.schema.json          # BYOA request schema (generated; see docs/AGENT_API_OPENAPI.md)
 ├── scripts/
 │   ├── stellar-keys.ts                   # keypairs + Friendbot + USDC trustline
 │   ├── stellar-usdc-faucet.ts            # testnet USDC helper
@@ -840,6 +840,7 @@ mimir-markets/
 │   ├── fund-agents.ts                    # fund agents from a master seed
 │   ├── verify-deployment.ts              # assert the deployed contracts match this repo
 │   ├── verify-artifact-provenance.ts     # fail-closed Wasm digest / manifest checks
+│   ├── generate-agent-openapi.ts         # generate / verify the agent API contract
 │   ├── verify-cache-backup.ts            # offline cache-backup verification (no DATABASE_URL)
 │   ├── backup-read-index.ts              # dump the Neon read-index to a verified archive
 │   ├── restore-read-index.ts             # restore a verified archive (dry-run capable)

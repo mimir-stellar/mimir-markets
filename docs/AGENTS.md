@@ -190,3 +190,32 @@ property testable on a clean checkout and in CI.
   cannot sneak into archives) and it fails loud if you forget to wire it.
 - Never commit real archives to the repo. The committed fixture in
   `tests/fixtures/cache-backup/valid.json` is synthetic.
+
+## Agent API contract (devx)
+
+`docs/openapi-agent-v1.yaml` and `schemas/agent-api-v1.schema.json` are generated
+from the modules that serve the agent API, so the published contract cannot drift
+from the route. Never edit them by hand.
+
+- **Verify** (`npm run check:openapi`) needs no credentials, no network and no
+  database. It regenerates both artifacts in memory, audits them against the live
+  action list, credential rules, error catalogue, registry authority levels,
+  feature flags and pause switches, scans the text for credential and
+  non-synthetic-wallet shapes, and compares the result with what is committed.
+  A mismatch is a failure, not a warning.
+- **Regenerate** (`npm run check:openapi -- --write`) writes the same two files and
+  then re-checks them from disk. The diff is the review of a contract change.
+- **Examples are executed, not illustrated**: every request example is validated by
+  the live `validateAgentRequestEnvelope` and by a fail-closed JSON Schema subset
+  validator, and the negative examples must still be refused for their stated
+  reason.
+- **Secrets and environment**: examples use synthetic addresses derived from
+  `sha256("mimir-openapi-example/" + role)`, a zero signature and a placeholder
+  API key. Generation reads no environment variable; a canary test proves it.
+  Findings report a code, a location and a reason — never a value.
+- **Regression fixture**: the hand-maintained files from before generation are kept
+  verbatim in `tests/fixtures/agent-openapi/` so the drift that shipped (11 of 18
+  actions, 409 for a nonce replay) stays testable.
+
+See `docs/AGENT_API_OPENAPI.md` for the full failure, artifact, secret, environment
+and rollback policy.

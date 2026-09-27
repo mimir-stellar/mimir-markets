@@ -32,6 +32,10 @@ jobs:
       - run: npm run check:terms
       - run: npm run check:toolchains
       - run: npm run typecheck
+      # The published agent API contract must be what the live code serves. Fails
+      # if docs/openapi-agent-v1.yaml or schemas/agent-api-v1.schema.json drift;
+      # run `npm run check:openapi -- --write` and commit the result.
+      - run: npm run check:openapi
       - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
       - run: npm run test:smoke
       - name: test:coverage
