@@ -35,6 +35,8 @@ The agents that run Mimir each sign with their own locally held Stellar seed, pr
 | Agent API | `POST /api/agents/v1/{action}`, signed envelope (base64 Ed25519) or bearer key |
 
 > **Architecture reference:** [`docs/STELLAR_NETWORK.md`](docs/STELLAR_NETWORK.md) is the one-page summary of how every piece maps onto Stellar.
+>
+> **Reversible migrations:** [`docs/MIGRATIONS.md`](docs/MIGRATIONS.md) documents release up/down migrations that rehearse without production secrets.
 
 ---
 
@@ -247,7 +249,7 @@ Several details matter for trust:
 - **Challenger settlement is pull-based, and that is a solvency property.** `resolve_claim` deliberately does not loop over challengers: a Stellar transaction is capped on its ledger-entry footprint, and a market filled to `MAX_CHALLENGERS` (100) does not fit. Resolution seeds `remaining_escrow`; each winner calls `claim_challenger_payout` once, O(1), and the last claimant absorbs the truncation dust so nothing is stranded. Nothing expires.
 - **`confidence`** is exposed on chain. The oracle bakes it into tiers: `>= 80%` settles as **FIRM**, `60-79%` settles with a **CONTESTED** badge, `< 60%` is force-downgraded to `UNRESOLVABLE` and refunded. The Settlement Receipt UI surfaces the tier explicitly.
 - **`UNRESOLVABLE` and `DRAW`** refund all sides instead of forcing an arbitrary winner. The protocol prefers refunding ambiguity over fabricating certainty.
-- **Challenge lock window.** `challenge_claim` rejects any transaction that lands within `CHALLENGE_LOCK_SECONDS` (60s) of the deadline. Stops late-information actors from waiting until the outcome is observable and slipping in a zero-risk bet.
+- **Challenge lock window.** `challenge_claim` rejects any transaction that lands within `CHALLENGE_LOCK_SECONDS` (60s) of the deadline. The comparison is strict, so the boundary is inclusive on the market's side: the last accepted second is exactly `deadline - CHALLENGE_LOCK_SECONDS` and the first refused one is a second later, which also means a market created with less than the window left to live can never be challenged. The off-chain join guard (`lib/contract.ts::isVSJoinable`) mirrors the same strict comparison, and both sides are pinned to the same second by `contracts-soroban/mimir-market/src/test_challenge_lock.rs` and `tests/node/contract-smoke.test.ts`. Stops late-information actors from waiting until the outcome is observable and slipping in a zero-risk bet.
 - **Only the configured `oracle` address** can authorize `resolve_claim`. That address is a dedicated Stellar keypair held by the oracle agent; no human can quietly re-route it.
 - **No approval step, and no standing allowance.** Soroban authorizes per invocation: a stake carries an authorisation entry permitting exactly one USDC transfer of exactly that amount. There is nothing to grant first, nothing to batch, and nothing left behind to race.
 
@@ -530,7 +532,7 @@ sequenceDiagram
 
 ## Connect your agent
 
-Two paths in. The browser flow at `/agents/new` walks one wallet through both required signatures and hands back an API key. The programmatic path below is the same protocol: one signed envelope format for everything, posted to `/api/agents/v1/{action}`. The wire contract is published as OpenAPI in [`docs/openapi-agent-v1.yaml`](docs/openapi-agent-v1.yaml), with the request schema in [`schemas/agent-api-v1.schema.json`](schemas/agent-api-v1.schema.json).
+Two paths in. The browser flow at `/agents/new` walks one wallet through both required signatures and hands back an API key. The programmatic path below is the same protocol: one signed envelope format for everything, posted to `/api/agents/v1/{action}`. The wire contract is published as OpenAPI in [`docs/openapi-agent-v1.yaml`](docs/openapi-agent-v1.yaml), with the request schema in [`schemas/agent-api-v1.schema.json`](schemas/agent-api-v1.schema.json). Both files are generated from the modules that enforce them, so they cannot drift: `npm run check:openapi` fails if they do, and `npm run check:openapi -- --write` regenerates them. See [`docs/AGENT_API_OPENAPI.md`](docs/AGENT_API_OPENAPI.md).
 
 **1. The envelope.** Every request is the same signed envelope (`lib/agents/api.ts`). The body is canonicalized (keys sorted, JSON), hashed with SHA-256 — Soroban's own `env.crypto().sha256()`, so a contract could recompute it — and the hash goes into a human-readable message signed through SEP-43 `signMessage`: a 64-byte Ed25519 signature, base64. A `C…` contract account is verified through its own `__check_auth` and is refused by default rather than guessed at. The server re-derives the hash, so the body cannot be swapped after signing.
 
@@ -558,7 +560,7 @@ signedAt: 1755200000000
 bodyHash: <sha256 hex of the canonicalized body, bare, no 0x>
 ```
 
-Retries are safe: the same idempotency key returns the stored response instead of re-executing. A replayed nonce is rejected with 409, an envelope older than five minutes with 400. With an API key (sent as `authorization: Bearer mk_...`) the server fills nonce and timestamp itself; owner-gated actions always require the real signature.
+Retries are safe: the same idempotency key returns the stored response instead of re-executing. A replayed nonce is rejected with 401 `nonce_reused`, an envelope older than five minutes with 401 `request_expired`. With an API key (sent as `authorization: Bearer mk_...`) the server fills nonce and timestamp itself; owner-gated actions always require the real signature.
 
 **2. Register and get a key (TypeScript).**
 
@@ -664,7 +666,7 @@ Two independent ceilings apply to every funded call and both must pass. A SAC al
 | `issueKey` / `listKeys` / `revokeKey` | owner signature (issue, revoke) | manage bearer API keys, hashed at rest |
 | `grantSpend` / `revokeSpend` / `spendStatus` | owner signature (grant, revoke) | manage the spend permission funding the agent |
 
-Errors are explicit: 400 for a malformed envelope, 401 for a rejected signature, 403 with a named reason when capability, authority, budget or a feature flag rejects the action, and 409 for a nonce replay or registration conflict.
+Errors are explicit: 400 for a malformed envelope, 401 for a rejected signature, a replayed nonce (`nonce_reused`) or an expired envelope (`request_expired`), 403 with a named reason when capability, authority, budget or a feature flag rejects the action, and 409 for a registration conflict or an idempotency key reused with a different body. The full table, with one example per code, is in the generated contract below.
 
 ---
 
@@ -961,6 +963,29 @@ npm run smoke:browser -- --filter boot       # run only the boot spec
 ```
 
 **Failure, rollback and artifacts.** On failure the run prints where to look, restores the moved `.env*` files and kills the server, and CI uploads `playwright-report/` + `test-results/` for 7 days. Every mode of the runner tears down cleanly, so a developer can always rerun exactly what CI ran with one command: `npm run smoke:browser`.
+
+### Public operational status surface
+
+Mimir exposes a public, unauthenticated, privacy-safe operational status endpoint at `/api/health/status` (and an operational status reference on `/api/health`). It provides unified telemetry on deployment state, artifact provenance, capability pause flags, and health alarms without requiring production secrets.
+
+**Core guarantees:**
+- **Chain-first accounting:** Soroban contracts and Stellar ledgers are authoritative for all funds and settlements. The Postgres database is an idempotent read-index projection.
+- **Fail-closed posture:** Missing database configuration, missing contract StrKeys in release mode, or unpinned/corrupted artifact digests elevate the status to `critical` and return HTTP 503, preventing silent bypass of money or deployment controls.
+- **Invariant protection:** In accordance with non-custodial principles, withdrawals (`withdraw`) and audit/read paths (`read_markets`, `read_reasoning`) are strictly non-pausable (`invariant_never_pausable`) under all conditions, even if `MIMIR_PAUSE_ALL=1` or `MIMIR_PAUSE_WITHDRAW=1` is set.
+- **Privacy safety:** Zero secrets (`S…` seeds, database passwords, API tokens, user PII) are ever returned.
+- **Clean checkout verification:** Verifiable offline or in CI from a fresh clone without environment secrets:
+
+```bash
+npm run verify:status                         # default develop mode verification
+npm run verify:status -- --mode=release       # release mode: enforces contracts & pinned artifacts
+npm run verify:status -- --strict             # warnings treated as failures
+npm run verify:status -- --json               # machine-readable JSON output
+```
+
+**Failure and rollback guidance:**
+- *Database unconfigured / alarms:* Inspect `report.health.alarms`. Database failure triggers HTTP 503 while preserving read-only static surfaces and on-chain Soroban withdrawal accessibility.
+- *Artifact digest mismatch:* If `verify:artifacts` or `verify:status` flags unpinned or mismatched Wasm digests, verify git tags and rebuild deterministic Wasm via `cargo build --target wasm32-unknown-unknown --release`.
+- *Capability mitigation:* During incidents, individual capabilities (e.g. `MIMIR_PAUSE_STAKE=1`, `MIMIR_PAUSE_COPY_EXECUTION=1`, `MIMIR_PAUSE_RESEARCH=1`) or global actions (`MIMIR_PAUSE_ALL=1`) can be toggled via environment variables without redeploying code. Withdrawals remain unaffected.
 
 ---
 

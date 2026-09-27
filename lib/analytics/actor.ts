@@ -20,15 +20,13 @@ import { parseAddressParam } from "@/lib/server/api-validation";
 import type { ActorType } from "./events";
 
 export const ANON_ACTOR_ID = "anon";
-const SAFE_AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+const SAFE_AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 /**
  * A Stellar strkey in the account, muxed or contract flavours.
  *
- * Checked separately from {@link SAFE_AGENT_ID} because that pattern is
- * case-insensitive, which makes it blind to exactly the value that must never
- * reach `distinct_id`: `G…` matches `[a-z0-9]` and the remaining base32 characters
- * match too, so a wallet address used as an agent id sails through a length and
- * charset check while being a permanent cross-site identity. The id is used
+ * Checked separately from {@link SAFE_AGENT_ID} as defence in depth: a wallet
+ * address used as an agent id is a permanent cross-site identity, and that must
+ * never reach `distinct_id` even if the charset check is loosened again. The id is used
  * verbatim, and `distinct_id` sits outside the properties redactor, so nothing
  * downstream would catch it.
  */

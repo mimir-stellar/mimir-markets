@@ -156,3 +156,32 @@ export function isRetryable(code: ApiErrorCode): boolean {
 export function statusFor(code: ApiErrorCode): number {
   return SPECS[code].status;
 }
+
+export interface ApiErrorSpec {
+  code: ApiErrorCode;
+  status: number;
+  retryable: boolean;
+  retryAfterSeconds?: number;
+}
+
+/**
+ * The whole catalogue, in declaration order.
+ *
+ * Published for documentation consumers: the agent API wire contract
+ * (`lib/ops/agent-api-openapi.ts`) derives its error examples from these rows, so
+ * a status, a retry hint or a `retryable` flag cannot be published as something
+ * the server does not actually send. `SPECS` is a `Record<ApiErrorCode, …>`, so
+ * adding a code without a spec is a type error, and this list can only be wrong by
+ * omission — which the contract's own audit turns into a failed check.
+ */
+export function apiErrorCatalogue(): ApiErrorSpec[] {
+  return (Object.keys(SPECS) as ApiErrorCode[]).map((code) => {
+    const spec = SPECS[code];
+    return {
+      code,
+      status: spec.status,
+      retryable: spec.retryable,
+      ...(spec.retryAfterSeconds !== undefined ? { retryAfterSeconds: spec.retryAfterSeconds } : {}),
+    };
+  });
+}

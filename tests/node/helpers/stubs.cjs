@@ -11,6 +11,7 @@
 "use strict";
 
 const Module = require("module");
+const { createHash } = require("node:crypto");
 const originalLoad = Module._load;
 
 const STUBS = {
@@ -35,6 +36,12 @@ const STUBS = {
       Api: { isSimulationSuccess: () => false },
     },
     scValToNative: () => 7,
+    // Real SHA-256, not a fake: lib/content-hash.ts uses it for the body hash in
+    // the agent API signing message, and a stub digest would make a published
+    // example disagree with what the server computes. Returns a Buffer like the
+    // SDK does — a Uint8Array would be `.toString("hex")`-ed into "1,2,3" and
+    // quietly poison every digest.
+    hash: (data) => createHash("sha256").update(Buffer.from(data)).digest(),
     Networks: { TESTNET: "Test SDF Network ; September 2015" },
     Keypair: { fromPublicKey: () => ({}) },
     StrKey: {

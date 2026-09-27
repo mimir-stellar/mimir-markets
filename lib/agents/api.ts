@@ -13,6 +13,23 @@ export const AGENT_API_ACTIONS = [
 ] as const;
 export type AgentApiAction = (typeof AGENT_API_ACTIONS)[number];
 
+/**
+ * Actions that put an owner's USDC at risk, gated on `byoa_funded_actions` so the
+ * launch-gate document and the code agree: until an operator enables it, an agent
+ * can register, read and dry-run but cannot move money.
+ *
+ * Lives here, not in the route, because the published wire contract
+ * (`lib/ops/agent-api-openapi.ts`) reads it from the same place the route does. A
+ * second copy in the docs is a copy that drifts.
+ */
+export const AGENT_FUNDED_ACTIONS: readonly AgentApiAction[] = ["createMarket", "stake", "vote"];
+
+/** The rollout flag every funded action additionally requires. */
+export const AGENT_FUNDED_FEATURE = "byoa_funded_actions" as const;
+
+/** The rollout flag that gates registration. */
+export const AGENT_REGISTRY_FEATURE = "byoa_registry" as const;
+
 export interface SignedAgentRequest<T = unknown> {
   version: typeof AGENT_API_VERSION;
   agentId: string;
@@ -80,6 +97,26 @@ export function agentRequestMessage(request: Omit<SignedAgentRequest, "signature
     `action: ${request.action}`, `idempotency: ${request.idempotencyKey}`,
     `nonce: ${request.nonce}`, `signedAt: ${request.signedAt}`, `bodyHash: ${bodyHash}`,
   ].join("\n");
+}
+
+/**
+ * Domain separator for the register action's SECOND signature.
+ *
+ * `register` needs two proofs: the owner grants the record, and the operator
+ * proves it controls the hot key it is about to be handed. They are separate
+ * messages because they are separate claims — one signature must never satisfy
+ * both — and the leading `Mimir …` line is the domain separation that keeps a
+ * proof harvested from another surface from verifying here.
+ *
+ * Exported so the published wire contract carries the exact bytes an operator has
+ * to sign; the route and the generator must not each hold their own copy.
+ */
+export const AGENT_OPERATOR_PROOF_DOMAIN = "Mimir agent operator proof";
+
+export function operatorProofMessage(agentId: string, operatorWallet: string): string {
+  // NOT lowercased. A strkey is case-sensitive base32; folding the case names a
+  // wallet that does not exist.
+  return `${AGENT_OPERATOR_PROOF_DOMAIN}\nagent: ${agentId}\noperator: ${operatorWallet.trim()}`;
 }
 
 /**
