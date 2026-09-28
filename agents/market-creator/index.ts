@@ -53,6 +53,19 @@ import {
 } from "../../lib/stellar";
 import { payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll } from "../../lib/ops/heartbeat";
+import {
+  BackoffError,
+  DependencyFailureError,
+  MalformedInputError,
+  StaleStateError,
+  DuplicateActionError,
+  CancelledByOperatorError,
+  PausedWorkerError,
+  CREATOR_BACKOFF,
+  computeBackoff,
+  describeBackoffError,
+  withBackoff,
+} from "../../lib/ops/backoff-policies";
 import { unitsToUsdc } from "../../lib/usdc";
 import { gatherCouncilPreflight } from "./council-preflight";
 import { insertMarketProposal } from "../../lib/db";
@@ -797,7 +810,7 @@ async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
   }
 
   try {
-    const result = await createClaimOnChain(CREATOR.signer, {
+    const rawResult = await withBackoff("market_creator", () => createClaimOnChain(CREATOR.signer, {
       question:              candidate.question,
       creator_position:      candidate.creatorPosition,
       counter_position:      candidate.counterPosition,
@@ -811,10 +824,16 @@ async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
       max_challengers:       100,
       visibility:            "public",
       agent_owner_recipient: FEE_RECIPIENT,
-    });
+    }), { policy: CREATOR_BACKOFF });
+    const result = rawResult as { claimId: number; txHash: string; explorerUrl?: string } | undefined;
+    if (!result) return null;
     console.log(`[market-creator]   claim id #${result.claimId}`);
     return result.explorerUrl ?? result.txHash;
   } catch (err) {
+    if (err instanceof BackoffError) {
+      console.warn(`[market-creator] ${describeBackoffError(err)}`);
+      return null;
+    }
     console.error(`[market-creator] Failed to create claim:`, err);
     return null;
   }
@@ -837,8 +856,15 @@ async function sweepAndCount(): Promise<{ cancelled: number; joinable: number; j
   try {
     total = await getClaimCount();
   } catch (err) {
-    console.warn("[market-creator] Failed to read the claim count for sweep:", err);
-    return { cancelled: 0, joinable: 0, joinableClaims: [], creatorExposureClaims: [] };
+    const depErr = new DependencyFailureError(
+      `Failed to read the claim count for sweep: ${err instanceof Error ? err.message : String(err)}`,
+      "rpc",
+      true,
+      0,
+      err,
+    );
+    console.warn(`[market-creator] ${describeBackoffError(depErr)}`);
+    throw depErr;
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -885,14 +911,22 @@ async function sweepAndCount(): Promise<{ cancelled: number; joinable: number; j
 
     console.log(`[market-creator] Cancelling stale claim #${id} (expired, no challenger)`);
     try {
-      const result = await cancelClaim(CREATOR.signer, id);
+      const rawResult = await withBackoff("market_creator", () => cancelClaim(CREATOR.signer, id), {
+        policy: CREATOR_BACKOFF,
+      });
+      const result = rawResult as { txHash: string; explorerUrl?: string } | undefined;
+      if (!result) continue;
       console.log(`[market-creator] ✓ Cancelled #${id} — ${result.explorerUrl ?? result.txHash}`);
       cancelled++;
       if (CANCEL_DELAY_MS > 0) {
         await new Promise((r) => setTimeout(r, CANCEL_DELAY_MS));
       }
     } catch (err) {
-      console.error(`[market-creator] Failed to cancel #${id}:`, err);
+      if (err instanceof BackoffError) {
+        console.warn(`[market-creator] ${describeBackoffError(err)}`);
+      } else {
+        console.error(`[market-creator] Failed to cancel #${id}:`, err);
+      }
     }
   }
   return { cancelled, joinable, joinableClaims, creatorExposureClaims };

@@ -111,6 +111,19 @@ import {
 import { normalizeQuorum } from "../../lib/council/quorum";
 // Confidence tiers + fetcher-trust cap: pure and fixture-calibrated (#97).
 import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tiers";
+import {
+  BackoffError,
+  DependencyFailureError,
+  MalformedInputError,
+  StaleStateError,
+  DuplicateActionError,
+  CancelledByOperatorError,
+  PausedWorkerError,
+  ORACLE_BACKOFF,
+  computeBackoff,
+  describeBackoffError,
+  withBackoff,
+} from "../../lib/ops/backoff-policies";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -557,14 +570,27 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
   // transaction cannot carry ~100 payouts inside its ledger-entry footprint, so
   // each challenger pulls with `claim_challenger_payout` afterwards. The oracle's
   // job ends here and the market is final.
-  const settled = await resolveClaim(ORACLE.signer, claim.id, {
-    winner_side:   verdictToSide(verdict.verdict),
-    summary:       verdict.explanation,
-    confidence:    verdict.confidence,
-    evidence_hash: evidenceHash,
-  });
+  let settledOnChain: { txHash: string; explorerUrl?: string; pending?: boolean };
+  try {
+    settledOnChain = await resolveClaim(ORACLE.signer, claim.id, {
+      winner_side:   verdictToSide(verdict.verdict),
+      summary:       verdict.explanation,
+      confidence:    verdict.confidence,
+      evidence_hash: evidenceHash,
+    });
+  } catch (err) {
+    const depErr = new DependencyFailureError(
+      `resolve_claim failed for claim #${claim.id}: ${err instanceof Error ? err.message : String(err)}`,
+      "rpc",
+      true,
+      0,
+      err,
+    );
+    console.warn(`[settle] ${describeBackoffError(depErr)}`);
+    throw depErr;
+  }
 
-  console.log(`[settle] ✓ Resolved — ${settled.explorerUrl ?? settled.txHash}`);
+  console.log(`[settle] ✓ Resolved — ${settledOnChain.explorerUrl ?? settledOnChain.txHash}`);
 
   // Cross-entropy bonuses AFTER the on-chain settle: informative jurors split
   // the pool, parrots and dissenters-from-evidence get nothing. Best-effort —
@@ -573,13 +599,13 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
     try {
       // The send response may be pending. Soroban, not the worker or DB, is the
       // authority on whether this claim really resolved to this evidence hash.
-      const confirmed = settled.pending ? null : await fetchClaim(claim.id);
-      if (!isConfirmedCouncilSettlement(confirmed, verdictToSide(verdict.verdict), evidenceHash, Boolean(settled.pending))) {
+      const confirmed = settledOnChain.pending ? null : await fetchClaim(claim.id);
+      if (!isConfirmedCouncilSettlement(confirmed, verdictToSide(verdict.verdict), evidenceHash, Boolean(settledOnChain.pending))) {
         console.warn(`[settle] Bonus for claim #${claim.id} withheld: resolution not confirmed on chain`);
       } else {
         const receipts = await payCouncilBonuses({
           votes: bonusVotes, poolAtomic: COUNCIL_BONUS_ATOMIC, payerWallet: ORACLE,
-          claimId: claim.id, contractId: CONTRACT_ID, settlementTxHash: settled.txHash,
+          claimId: claim.id, contractId: CONTRACT_ID, settlementTxHash: settledOnChain.txHash,
         });
         for (const r of receipts) {
           console.log(`[settle] Bonus ${formatAtomicUsdc(r.amountAtomic)} USDC to ${r.slug}: ${r.status}${r.txHash ? ` (${getExplorerTxUrl(r.txHash)})` : ""}`);
@@ -688,8 +714,15 @@ async function poll(): Promise<void> {
   try {
     total = await getClaimCount();
   } catch (err) {
-    console.warn("[oracle] Failed to read the claim count:", err);
-    return;
+    const depErr = new DependencyFailureError(
+      `Failed to read the claim count: ${err instanceof Error ? err.message : String(err)}`,
+      "rpc",
+      true,
+      0,
+      err,
+    );
+    console.warn(`[oracle] ${describeBackoffError(depErr)}`);
+    throw depErr;
   }
 
   console.log(`\n[oracle] ── Poll at ${new Date().toISOString()} ── ${total} claims`);
@@ -715,7 +748,9 @@ async function poll(): Promise<void> {
         claim.deadline > now
       ) {
         const before = challengedClaimIds.size;
-        await challengeIfMispriced(claim);
+        await withBackoff("oracle", () => challengeIfMispriced(claim), {
+          policy: ORACLE_BACKOFF,
+        });
         if (challengedClaimIds.size > before) challenged.push(id);
       }
     } catch (err) {
@@ -737,8 +772,10 @@ async function poll(): Promise<void> {
   for (let i = 0; i < expiredActive.length; i++) {
     const claim = expiredActive[i];
     try {
-      const resolved = await settle(claim);
-      if (!resolved) continue; // deferred (e.g. sports match not final) — retry next poll
+      const resolved = await withBackoff("oracle", () => settle(claim), {
+        policy: ORACLE_BACKOFF,
+      });
+      if (!resolved) continue; // deferred or backed off — retry next poll
       settled.push(claim.id);
       if (i < expiredActive.length - 1 && SETTLEMENT_DELAY_MS > 0) {
         console.log(`[oracle] Cooling down ${(SETTLEMENT_DELAY_MS / 60000).toFixed(1)} min before next settlement...`);
