@@ -7,7 +7,7 @@ use crate::events;
 use crate::storage;
 use crate::types::{
     ClaimResult, Error, Market, BPS_DIVISOR, MAX_DURATION, MAX_FEE_BPS, MAX_PARTICIPANTS_PER_SIDE,
-    MIN_DURATION, RESULT_CANCELLED, SIDE_A, SIDE_B,
+    MAX_QUESTION_BYTES, MAX_SQUAD_MEMBERS, MIN_DURATION, RESULT_CANCELLED, SIDE_A, SIDE_B,
 };
 
 /// The fee on one winning claim: `floor(profit * fee_bps / BPS_DIVISOR)`.
@@ -90,6 +90,9 @@ pub fn create_market(
     if question.is_empty() {
         return Err(Error::EmptyQuestion);
     }
+    if question.len() > MAX_QUESTION_BYTES {
+        return Err(Error::QuestionTooLong);
+    }
     let now = env.ledger().timestamp();
     let earliest = now.checked_add(MIN_DURATION).ok_or(Error::Overflow)?;
     let latest = now.checked_add(MAX_DURATION).ok_or(Error::Overflow)?;
@@ -153,6 +156,18 @@ pub fn deposit(
     // topping up an existing position never consumes a slot.
     let previous = storage::deposit_of(env, market_id, side, &participant);
     if previous == 0 {
+        // ── Total-membership cap (across both sides) ──────────────────────
+        // This fires before the per-side check so callers get a clear signal
+        // that the squad itself is full, not just the target side.
+        let total = market
+            .participants_a
+            .checked_add(market.participants_b)
+            .ok_or(Error::Overflow)?;
+        if total >= MAX_SQUAD_MEMBERS {
+            return Err(Error::SquadFull);
+        }
+
+        // ── Per-side cap ──────────────────────────────────────────────────
         let count = if side == SIDE_A {
             market.participants_a
         } else {
@@ -178,6 +193,23 @@ pub fn deposit(
         market.pool_b += amount;
     }
     storage::set_market(env, market_id, &market);
+
+    // Emit a SquadFull event when this deposit fills the very last available
+    // slot so that off-chain indexers can react without polling.  We emit this
+    // *after* the state write so the stored counts are already correct.
+    if previous == 0 {
+        let total_now = market
+            .participants_a
+            .checked_add(market.participants_b)
+            .ok_or(Error::Overflow)?;
+        if total_now == MAX_SQUAD_MEMBERS {
+            events::SquadFull {
+                market_id,
+                total_members: total_now,
+            }
+            .publish(env);
+        }
+    }
 
     events::Deposited {
         market_id,
