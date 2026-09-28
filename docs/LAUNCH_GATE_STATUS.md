@@ -4,13 +4,18 @@ Stellar Testnet: 2026-08-19. A checked implementation gate means the repository 
 the required policy, enforcement and automated tests. It does not substitute for the
 external evidence below.
 
-Code-complete gates
-Gate	Evidence	Rollout state
-Duel	Equal stake is enforced in mimir-market (DuelNeedsEqualStake); payout conservation/profit tests and funnel analytics are in the full suite.	Enabled on the deployed Soroban contract; npm run verify:deployment is the check.
-BYOA funded actions	Signed registry, owner revoke/rotation, atomic budgets, dry-run/simulation and durable audit records.	Off by default until deployment/review evidence is attached.
-Copy trading	Owner-signed policy, exact on-chain USDC SAC allowance, pause/revoke, depth/cycle guard, atomic rolling caps and realized-loss ceiling.	Off by default until deployment/review evidence is attached.
-Funded baskets safety boundary	agent_baskets is off by default and the accepted ADR forbids deposits before audit/legal/eligibility approval.	No real funds accepted.
-External evidence still required
+## Code-complete gates
+
+| Gate | Evidence | Rollout state |
+| --- | --- | --- |
+| Duel | Equal stake is enforced in `mimir-market` (`DuelNeedsEqualStake`); payout conservation/profit tests and funnel analytics are in the full suite. | Enabled on the deployed Soroban contract; `npm run verify:deployment` is the check. |
+| BYOA funded actions | Signed registry, owner revoke/rotation, atomic budgets, dry-run/simulation and durable audit records. | Off by default until deployment/review evidence is attached. |
+| Copy trading | Owner-signed policy, exact on-chain USDC SAC allowance, pause/revoke, depth/cycle guard, atomic rolling caps and realized-loss ceiling. | Off by default until deployment/review evidence is attached. |
+| Funded baskets safety boundary | `agent_baskets` is off by default and the accepted ADR forbids deposits before audit/legal/eligibility approval. | No real funds accepted. |
+| Public operational status surface | `/api/health/status` unauthenticated telemetry, fail-closed DB & contract checks, withdrawal non-pausability invariant, zero-secret redaction, deterministic clean checkout verification. | Enabled across web routes; `npm run verify:status` is the check. |
+
+## External evidence still required
+
 These gates cannot be honestly completed from source code or synthetic tests:
 
 Export enough non-internal production/testnet PostHog traffic and run npm run verify:analytics -- <export.json>. The command requires measurable create/stake funnels and at least 99% required-field completeness.

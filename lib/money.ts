@@ -21,6 +21,7 @@ export function formatUsdc(value: number): string {
 
 /** Bare number ("1,234.56", "12") for layouts that render the unit separately. */
 export function formatUsdcBare(amount: number): string {
+  if (!Number.isFinite(amount)) return "0";
   return new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 2,
     minimumFractionDigits: 0,
