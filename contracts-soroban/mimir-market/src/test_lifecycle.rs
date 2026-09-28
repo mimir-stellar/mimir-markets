@@ -883,6 +883,11 @@ fn a_market_filled_to_max_challengers_pays_out_all_one_hundred() {
     params.max_challengers = MAX_CHALLENGERS;
     let id = f.client().create_claim(&creator, &params);
 
+    // Simulate a claim created before the hard cap was enforced at admission.
+    let mut claim = crate::storage::get_claim(&f.env, id).unwrap();
+    claim.market.max_challengers = MAX_CHALLENGERS + 1;
+    crate::storage::set_claim(&f.env, id, &claim);
+
     let stake = 2 * USDC;
     let mut challengers = std::vec::Vec::new();
     for _ in 0..MAX_CHALLENGERS {
