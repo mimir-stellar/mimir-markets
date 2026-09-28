@@ -192,11 +192,109 @@ function removeDirectory(directory) {
   rmSync(resolved, { recursive: true, force: true });
 }
 
-const result = spawnSync(
-  process.execPath,
-  ["--import", "tsx", "--test", ...files],
-  { cwd: root, env: { ...process.env, TZ: process.env.TZ || "UTC" }, stdio: "inherit" },
-);
+/**
+ * Discover all test files under tests/node/ in the given root, sorted
+ * alphabetically and returned as relative paths (e.g. "tests/node/foo.test.ts").
+ */
+export function discoverTestFiles(root = ROOT) {
+  const testDir = path.join(root, "tests", "node");
+  if (!existsSync(testDir)) return [];
+  return readdirSync(testDir)
+    .filter((name) => name.endsWith(".test.ts"))
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => path.join("tests", "node", name));
+}
+
+/**
+ * Return the explicit file list when provided, otherwise fall back to
+ * discoverTestFiles. Paths are relative to `root`.
+ */
+export function normalizeTestFiles(root = ROOT, files = []) {
+  if (files.length > 0) return files;
+  return discoverTestFiles(root);
+}
+
+/**
+ * Build the Node.js argument list for the test child process.
+ *
+ * Always included:
+ *   --import tsx  --test
+ *   --test-reporter=spec  (stdout)
+ *
+ * Added when supportsExplicitTestIsolation:
+ *   --experimental-test-isolation=process
+ *
+ * Added when coverage:
+ *   --experimental-test-coverage
+ *   --test-reporter=lcov  --test-reporter-destination=<coveragePath>
+ *
+ * Test files are appended last.
+ */
+export function buildChildArgs({ files, coverage, coveragePath, nodeVersion = process.versions.node }) {
+  const args = ["--import", "tsx", "--test"];
+
+  if (supportsExplicitTestIsolation(nodeVersion)) {
+    args.push("--experimental-test-isolation=process");
+  }
+
+  if (coverage) {
+    args.push(
+      "--experimental-test-coverage",
+      "--test-reporter=spec",
+      "--test-reporter-destination=stdout",
+      "--test-reporter=lcov",
+      `--test-reporter-destination=${coveragePath}`,
+    );
+  } else {
+    args.push("--test-reporter=spec");
+  }
+
+  args.push(...files);
+  return args;
+}
+
+/**
+ * Build the child-process environment from an allowlisted subset of the source
+ * environment plus test-specific overrides.
+ *
+ * Secrets (seeds, API keys, database URLs) are excluded by default.
+ * Pass includeDatabase: true to forward DATABASE_URL / TURSO_DATABASE_URL.
+ */
+export function buildTestEnvironment({ sourceEnvironment = process.env, cacheDirectory, includeDatabase = false }) {
+  const env = {};
+
+  for (const key of SAFE_ENV_KEYS) {
+    if (key in sourceEnvironment) env[key] = sourceEnvironment[key];
+  }
+
+  if (includeDatabase) {
+    for (const key of DATABASE_ENV_KEYS) {
+      if (key in sourceEnvironment) env[key] = sourceEnvironment[key];
+    }
+  }
+
+  env.NODE_ENV = "test";
+  env.MIMIR_NODE_TESTS = "1";
+
+  if (cacheDirectory) {
+    env.NODE_COMPILE_CACHE = cacheDirectory;
+  }
+
+  return env;
+}
+
+/**
+ * Ensure the compile-cache directory exists and write a manifest.json recording
+ * the identity inputs. The manifest lets the cache be invalidated when inputs
+ * (Node version, lockfile, tsx version) change.
+ */
+export function prepareCompileCache(cacheDirectory, root = ROOT) {
+  mkdirSync(cacheDirectory, { recursive: true, mode: 0o700 });
+  assertDirectory(cacheDirectory);
+  const identity = cacheIdentity(root);
+  const manifestPath = path.join(cacheDirectory, "manifest.json");
+  writeFileSync(manifestPath, JSON.stringify(identity, null, 2), "utf8");
+}
 
 function coveragePaths(directory) {
   const resolved = path.resolve(directory);
