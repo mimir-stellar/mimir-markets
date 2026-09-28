@@ -25,6 +25,8 @@ mod test_common;
 #[cfg(test)]
 mod test_decimals;
 #[cfg(test)]
+mod test_dust_isolation;
+#[cfg(test)]
 mod test_fee_rounding;
 #[cfg(test)]
 mod test_lifecycle;
