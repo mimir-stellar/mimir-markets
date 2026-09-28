@@ -192,98 +192,11 @@ function removeDirectory(directory) {
   rmSync(resolved, { recursive: true, force: true });
 }
 
-function writeJsonAtomically(filePath, value) {
-  const temporaryPath = `${filePath}.${process.pid}.tmp`;
-  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  renameSync(temporaryPath, filePath);
-}
-
-function prepareCompileCache(directory, root, nodeVersion = process.versions.node) {
-  const resolved = path.resolve(directory);
-  const identity = cacheIdentity(root, nodeVersion);
-  const manifestPath = path.join(resolved, "manifest.json");
-  let shouldClear = false;
-
-  if (existsSync(resolved)) {
-    assertDirectory(resolved);
-    try {
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-      shouldClear = JSON.stringify(manifest) !== JSON.stringify(identity);
-    } catch {
-      shouldClear = true;
-    }
-    if (shouldClear) removeDirectory(resolved);
-  }
-
-  mkdirSync(resolved, { recursive: true, mode: 0o700 });
-  writeJsonAtomically(manifestPath, identity);
-  return resolved;
-}
-
-export function discoverTestFiles(root = ROOT) {
-  const directory = path.join(root, "tests", "node");
-  if (!existsSync(directory)) fail("Node test directory is missing.");
-  const files = readdirSync(directory, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".test.ts"))
-    .map((entry) => path.join("tests", "node", entry.name))
-    .sort((left, right) => left.localeCompare(right));
-  if (files.length === 0) fail("No node tests found.");
-  return files;
-}
-
-function normalizeTestFiles(root, requestedFiles) {
-  const files = requestedFiles.length > 0 ? requestedFiles : discoverTestFiles(root);
-  const testRoot = path.resolve(root, "tests", "node");
-  return files.map((file) => {
-    const absolute = path.resolve(root, file);
-    const relative = path.relative(testRoot, absolute);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      fail("Node tests must be inside tests/node.");
-    }
-    if (!absolute.endsWith(".test.ts") || !existsSync(absolute)) {
-      fail("Node test file is missing or has an unsupported name.");
-    }
-    return path.join("tests", "node", relative);
-  });
-}
-
-export function buildChildArgs({ files, coverage = false, coveragePath, nodeVersion = process.versions.node } = {}) {
-  const args = ["--import", "tsx", "--test"];
-  if (supportsExplicitTestIsolation(nodeVersion)) args.push("--experimental-test-isolation=process");
-  if (coverage) {
-    args.push(
-      "--experimental-test-coverage",
-      "--test-reporter=spec",
-      "--test-reporter-destination=stdout",
-      "--test-reporter=lcov",
-      `--test-reporter-destination=${coveragePath}`,
-    );
-  }
-  args.push(...files);
-  return args;
-}
-
-export function buildTestEnvironment({
-  sourceEnvironment = process.env,
-  cacheDirectory,
-  includeDatabase = false,
-} = {}) {
-  const environment = {};
-  for (const key of SAFE_ENV_KEYS) {
-    if (sourceEnvironment[key] !== undefined) environment[key] = sourceEnvironment[key];
-  }
-  if (includeDatabase) {
-    for (const key of DATABASE_ENV_KEYS) {
-      if (sourceEnvironment[key] !== undefined) environment[key] = sourceEnvironment[key];
-    }
-  }
-  environment.NODE_ENV = "test";
-  environment.MIMIR_NODE_TESTS = "1";
-  if (cacheDirectory) {
-    environment.NODE_COMPILE_CACHE = cacheDirectory;
-  }
-  return environment;
-}
+const result = spawnSync(
+  process.execPath,
+  ["--import", "tsx", "--test", ...files],
+  { cwd: root, env: { ...process.env, TZ: process.env.TZ || "UTC" }, stdio: "inherit" },
+);
 
 function coveragePaths(directory) {
   const resolved = path.resolve(directory);
