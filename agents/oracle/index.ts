@@ -40,7 +40,7 @@
  *      CHALLENGE_STAKE_USDC=2 (stake per challenge, default 2 USDC)
  *      CHALLENGE_CONFIDENCE=80 (min confidence to challenge, default 80)
  *      ORACLE_LLM_THROTTLE_MS=0 (min ms between LLM calls; raise to stay
- *                                under applyWorkerGeminiKey("ORACLE_GEMINI_API_KEY")free-tier RPM, e.g. 5000 ≈ 12 RPM)
+ *                                under Gemini free-tier RPM, e.g. 5000 ≈ 12 RPM)
  *      ORACLE_POLL_INTERVAL_MS=60000 (poll cadence in ms, default 60s)
  */
 
@@ -88,12 +88,9 @@ import {
 } from "../../lib/stellar";
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll } from "../../lib/ops/heartbeat";
-  feat/bound-challenge-risk-111
-
 import { isPaused } from "../../lib/ops/flags";
 // Explicit settlement outcome + named UNRESOLVABLE (refund) reasons (#99).
 import { applySettlementPolicy, describeDecision } from "../../lib/oracle/unresolvable-policy";
-  main
 import { unitsToUsdc, usdcToUnits, formatAtomicUsdc } from "../../lib/usdc";
 import {
   fetchEvidence as fetchEvidenceShared,
@@ -112,13 +109,10 @@ import {
   type CouncilVote,
 } from "./council-vote";
 import { normalizeQuorum } from "../../lib/council/quorum";
-        feat/bound-challenge-risk-111
 import { RiskManager } from "../../lib/oracle-risk";
-
 // Confidence tiers + fetcher-trust cap: pure and fixture-calibrated (#97).
 import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tiers";
 
-        main
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
 const MAX_CONTENT_CHARS     = 8_000;
@@ -180,7 +174,11 @@ requireAnyLLMKey();
 const ORACLE        = getOracleWallet();
 const ORACLE_ADDR   = ORACLE.address;
 const ORACLE_PAYER  = payingWalletFor(ORACLE);
+// Challenge risk bounds (#111): caps, circuit breaker, duplicate guard.
 const riskManager = new RiskManager();
+// Stake the oracle put on each claim, so exposure is released when it settles.
+const challengeStakes = new Map<number, number>();
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ClaimOnChain = ClaimData;
 
@@ -573,6 +571,13 @@ async function settle(claim: ClaimOnChain): Promise<boolean> {
 
   console.log(`[settle] ✓ Resolved — ${settled.explorerUrl ?? settled.txHash}`);
 
+  // Release the risk exposure held for this claim, if the oracle had staked on it.
+  const stakedOnClaim = challengeStakes.get(claim.id);
+  if (stakedOnClaim !== undefined) {
+    riskManager.recordSettled(stakedOnClaim);
+    challengeStakes.delete(claim.id);
+  }
+
   // Cross-entropy bonuses AFTER the on-chain settle: informative jurors split
   // the pool, parrots and dissenters-from-evidence get nothing. Best-effort —
   // a failed transfer never affects the already-final settlement.
@@ -628,6 +633,19 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
     return;
   }
 
+  // Risk bounds (#111), cheap checks first: a malformed/cancelled/duplicate claim,
+  // or an exhausted cap / cooldown, is refused before any RPC or LLM spend.
+  const claimCheck = riskManager.validateClaim(claim);
+  if (!claimCheck.ok) {
+    console.log(`[challenge] Risk skip #${claim.id}: ${claimCheck.reason} — ${claimCheck.detail ?? ""}`);
+    return;
+  }
+  const capCheck = riskManager.canChallenge(riskManager.config.minStakePerClaimUsdc);
+  if (!capCheck.ok) {
+    console.log(`[challenge] Risk blocked (${capCheck.reason}): ${capCheck.detail ?? ""}`);
+    return;
+  }
+
   // Check the oracle's USDC bankroll. Fees are XLM and separate — an agent cannot
   // strand itself for fees by staking, which is why only USDC is checked here.
   const balances = await readAgentBalances(ORACLE_ADDR);
@@ -673,33 +691,46 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
   const kelly = kellyFraction(verdict.confidence, KELLY_CAP);
   const bankroll = balances.usdc;
   const kellyStake = Math.max(CHALLENGE_STAKE_USDC, Math.min(bankroll * kelly, bankroll * 0.1));
-  const stakeUsdc = Math.round(kellyStake * 100) / 100;
+  // Risk bound (#111): never stake more than the per-claim cap.
+  const stakeUsdc = Math.min(Math.round(kellyStake * 100) / 100, riskManager.config.maxStakePerClaimUsdc);
 
   console.log(`[challenge] Kelly: ${(kelly * 100).toFixed(1)}% of USDC bankroll → ${stakeUsdc} USDC stake`);
-    // ── RISK BOUNDS (Issue #111) ──
-  const riskCheck = riskManager.checkRisk(claim, stakeUsdc);
-  if (!riskCheck.allowed) {
-    console.log(`[challenge] Risk blocked: ${riskCheck.reason}`);
+
+  // Final gate with the real stake: per-claim, daily, total exposure, concurrency.
+  const stakeCheck = riskManager.canChallenge(stakeUsdc);
+  if (!stakeCheck.ok) {
+    console.log(`[challenge] Risk blocked (${stakeCheck.reason}): ${stakeCheck.detail ?? ""}`);
     return;
   }
-  const riskCheck = checkRiskBounds(claim);
-  if (!riskCheck.allowed) {
-    console.log(`[challenge] Risk blocked: ${riskCheck.reason}`);
-    return;
-  }
+
   console.log(`[challenge] Staking ${stakeUsdc} USDC on challenger side...`);
 
   // One call, one signature. No `approve` leg: the invocation carries auth for
   // exactly this transfer of exactly this amount.
-  const staked = await challengeClaim(ORACLE.signer, claim.id, stakeUsdc);
-  riskManager.recordChallenge(stakeUsdc);
+  let staked;
+  try {
+    staked = await challengeClaim(ORACLE.signer, claim.id, stakeUsdc);
+  } catch (err) {
+    riskManager.recordFailure("dependency"); // repeated failures trip the circuit breaker
+    throw err;
+  }
+  riskManager.recordChallenge(claim.id, stakeUsdc);
+  riskManager.resetFailures();
+  challengeStakes.set(claim.id, stakeUsdc);
   challengedClaimIds.add(claim.id);
   console.log(`[challenge] ✓ Staked ${stakeUsdc} USDC — ${staked.explorerUrl ?? staked.txHash}`);
   console.log(`[challenge] Oracle: "${verdict.explanation.slice(0, 120)}"`);
+  console.log(`[risk] ${JSON.stringify(riskManager.getStats())}`);
 }
 
 // ── Main poll loop ────────────────────────────────────────────────────────────
 async function poll(): Promise<void> {
+  // Operator kill switch (MIMIR_PAUSE_ORACLE_SETTLEMENT / MIMIR_PAUSE_ALL).
+  if (isPaused("oracle_settlement")) {
+    console.log("[oracle] oracle_settlement is paused — skipping this poll.");
+    return;
+  }
+
   const now = Math.floor(Date.now() / 1000);
 
   let total: number;
