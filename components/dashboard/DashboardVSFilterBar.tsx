@@ -27,13 +27,6 @@ const TAB_ORDER: DashboardVSTab[] = ["all", "active", "done"];
 
 type TabItem = { l: string; v: DashboardVSTab; count: number };
 
-export type DashboardVSPagination = {
-  page: number;
-  pageSize: number;
-  total: number;
-  onPageChange: (page: number) => void;
-};
-
 type DashboardVSFilterBarProps = {
   tab: DashboardVSTab;
   onTabChange: (tab: DashboardVSTab) => void;
@@ -46,7 +39,10 @@ type DashboardVSFilterBarProps = {
   onMinStakeFilterChange: (value: number) => void;
   refreshing?: boolean;
   onRefresh: () => void;
-  pagination?: DashboardVSPagination;
+  page: number;
+  pageCount: number;
+  onPageChange: (page: number) => void;
+  totalCount: number;
 };
 
 /**
@@ -65,7 +61,10 @@ export default function DashboardVSFilterBar({
   onMinStakeFilterChange,
   refreshing = false,
   onRefresh,
-  pagination,
+  page,
+  pageCount,
+  onPageChange,
+  totalCount,
 }: DashboardVSFilterBarProps) {
   const tDash = useTranslations("dashboard");
   const tExplore = useTranslations("explore");
@@ -73,7 +72,23 @@ export default function DashboardVSFilterBar({
   const tCat = useTranslations("categories");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const reduceMotion = useReducedMotion();
-  const tPagination = useTranslations("pagination");
+
+  const safePageCount = Math.max(1, pageCount);
+  const safePage = Math.min(Math.max(1, page), safePageCount);
+  const canPrev = safePage > 1;
+  const canNext = safePage < safePageCount;
+
+  const goToPage = useCallback(
+    (next: number) => {
+      const clamped = Math.min(Math.max(1, next), safePageCount);
+      if (clamped === safePage) return;
+      onPageChange(clamped);
+    },
+    [onPageChange, safePage, safePageCount],
+  );
+
+  const handlePrev = useCallback(() => goToPage(safePage - 1), [goToPage, safePage]);
+  const handleNext = useCallback(() => goToPage(safePage + 1), [goToPage, safePage]);
 
   const handleTabListKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Home") {
@@ -94,25 +109,18 @@ export default function DashboardVSFilterBar({
     onTabChange(TAB_ORDER[(i + delta + TAB_ORDER.length) % TAB_ORDER.length]);
   };
 
-  const totalPages = pagination
-    ? Math.max(1, Math.ceil(pagination.total / Math.max(1, pagination.pageSize)))
-    : 1;
-  const currentPage = pagination
-    ? Math.min(Math.max(1, pagination.page), totalPages)
-    : 1;
-  const hasPrev = currentPage > 1;
-  const hasNext = currentPage < totalPages;
-  const showPagination = Boolean(pagination) && pagination!.total > 0;
-
-  const handlePrev = useCallback(() => {
-    if (!pagination || !hasPrev) return;
-    pagination.onPageChange(currentPage - 1);
-  }, [pagination, hasPrev, currentPage]);
-
-  const handleNext = useCallback(() => {
-    if (!pagination || !hasNext) return;
-    pagination.onPageChange(currentPage + 1);
-  }, [pagination, hasNext, currentPage]);
+  const handlePagerKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      if (canPrev) handlePrev();
+      return;
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      if (canNext) handleNext();
+      return;
+    }
+  };
 
   const advDuration = reduceMotion ? 0 : 0.34;
   const advOpacityDuration = reduceMotion ? 0 : 0.22;
@@ -219,43 +227,6 @@ export default function DashboardVSFilterBar({
         </div>
       </div>
 
-      {showPagination ? (
-        <nav
-          aria-label={tPagination("ariaLabel")}
-          className="mt-4 flex flex-col gap-2 border-t border-pv-ink/[0.06] pt-4 sm:flex-row sm:items-center sm:justify-between"
-        >
-          <p
-            className="font-mono text-[11px] uppercase tracking-[0.18em] text-pv-muted tabular-nums"
-            aria-live="polite"
-          >
-            {tPagination("pageOf", {
-              page: currentPage,
-              total: totalPages,
-            })}
-          </p>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handlePrev}
-              disabled={!hasPrev}
-              aria-label={tPagination("previous")}
-              className="flex h-11 min-h-[44px] items-center justify-center gap-2 rounded border border-pv-ink/[0.1] bg-pv-bg px-4 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50 focus-ring"
-            >
-              {tPagination("previous")}
-            </button>
-            <button
-              type="button"
-              onClick={handleNext}
-              disabled={!hasNext}
-              aria-label={tPagination("next")}
-              className="flex h-11 min-h-[44px] items-center justify-center gap-2 rounded border border-pv-ink/[0.1] bg-pv-bg px-4 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50 focus-ring"
-            >
-              {tPagination("next")}
-            </button>
-          </div>
-        </nav>
-      ) : null}
-
       <motion.div
         initial={false}
         animate={{
@@ -274,7 +245,6 @@ export default function DashboardVSFilterBar({
         }}
         className={`overflow-hidden ${!advancedOpen ? "pointer-events-none" : ""}`}
         aria-hidden={!advancedOpen}
-        inert={!advancedOpen ? "" : undefined}
       >
         <div className="mt-6 border-t border-pv-ink/[0.06] pt-6">
           <div className="grid grid-cols-1 gap-8 sm:grid-cols-2 sm:gap-x-10 sm:gap-y-6 sm:items-start">
@@ -353,6 +323,53 @@ export default function DashboardVSFilterBar({
           </div>
         </div>
       </motion.div>
+
+      <nav
+        className="mt-4 flex flex-col gap-3 border-t border-pv-ink/[0.06] pt-4 sm:flex-row sm:items-center sm:justify-between"
+        aria-label={tDash("paginationAria")}
+      >
+        <p
+          className="font-mono text-[11px] tabular-nums text-pv-muted"
+          aria-live="polite"
+        >
+          {tDash("paginationStatus", {
+            page: safePage,
+            pageCount: safePageCount,
+            total: totalCount,
+          })}
+        </p>
+        <div
+          className="flex items-center gap-2"
+          role="group"
+          aria-label={tDash("paginationControlsAria")}
+          onKeyDown={handlePagerKeyDown}
+        >
+          <button
+            type="button"
+            onClick={handlePrev}
+            disabled={!canPrev}
+            aria-label={tDash("paginationPrev")}
+            className="flex h-11 min-h-[44px] items-center justify-center rounded border border-pv-ink/[0.1] bg-pv-bg px-4 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50 focus-ring"
+          >
+            {tDash("paginationPrev")}
+          </button>
+          <span
+            className="font-mono text-[11px] tabular-nums text-pv-muted"
+            aria-hidden
+          >
+            {safePage} / {safePageCount}
+          </span>
+          <button
+            type="button"
+            onClick={handleNext}
+            disabled={!canNext}
+            aria-label={tDash("paginationNext")}
+            className="flex h-11 min-h-[44px] items-center justify-center rounded border border-pv-ink/[0.1] bg-pv-bg px-4 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50 focus-ring"
+          >
+            {tDash("paginationNext")}
+          </button>
+        </div>
+      </nav>
     </section>
   );
 }

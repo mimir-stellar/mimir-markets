@@ -9,13 +9,14 @@ import {
   type DashboardFilterUrlState,
   type DashboardUrlTab,
 } from "@/lib/dashboardUrlState";
+import { clampDashboardPage } from "@/lib/dashboardUiPolicy";
 
 /**
  * Filtros del dashboard en cliente + URL vía `history.replaceState` (mismo criterio que Explore:
  * sin `router.replace` para evitar re-fetch de RSC).
  *
  * - Navegación con URL completa / atrás-adelante: `useSearchParams` o `popstate` alinean estado.
- * - Paginación: `page` es 1-based en URL y se reseta a 1 al cambiar cualquier otro filtro.
+ * - La página (`page`) es base 1 y se clampea al rango válido al escribir la URL.
  */
 export function useDashboardFilterUrlState() {
   const searchParams = useSearchParams();
@@ -40,6 +41,7 @@ export function useDashboardFilterUrlState() {
   const setTab = useCallback(
     (tab: DashboardUrlTab) => {
       setState((prev) => {
+        // Cambio de pestaña reseta la página para no perder filas en el nuevo conjunto.
         const next = { ...prev, tab, page: 1 };
         commitUrl(next);
         return next;
@@ -81,14 +83,19 @@ export function useDashboardFilterUrlState() {
     [commitUrl]
   );
 
-  /** Avanza una página (máx 1) sin tocar el resto de filtros. */
+  /**
+   * Actualiza la página de la lista. Acepta número o una función reducer para
+   * permitir prev/next sin conocer el estado actual en el llamador.
+   */
   const setPage = useCallback(
-    (page: number) => {
+    (next: number | ((prev: number) => number)) => {
       setState((prev) => {
-        const safe = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1;
-        const next = { ...prev, page: safe };
-        commitUrl(next);
-        return next;
+        const raw = typeof next === "function" ? next(prev.page) : next;
+        const page = clampDashboardPage(raw);
+        if (page === prev.page) return prev;
+        const updated = { ...prev, page };
+        commitUrl(updated);
+        return updated;
       });
     },
     [commitUrl]
@@ -116,7 +123,7 @@ export function useDashboardFilterUrlState() {
   }, []);
 
   return {
-    tab,
+    tab: state.tab,
     setTab,
     searchQuery: state.search,
     setSearchQuery,
