@@ -55,7 +55,7 @@ the live validator stops refusing them, that is a finding, not a stale comment.
 
 Examples use synthetic values only. Wallets are derived from
 `sha256("mimir-openapi-example/" + role)`, so they are valid strkers that belong
-to nobody; the signature is base64 of 64 zero bytes; the API key is
+to nobody; the signature is base64 of 64 zero bytes; the API key ir
 `mk_test_EXAMPLEPLACEHOLDER0000000000000000`. A real key would be hashed and
 forgotten, and a real address would be published to every reader.
 
@@ -82,20 +82,17 @@ it.
 
 Two properties are deliberate:
 
-- **Failures do not bypass a money or deployment control.** Nothing here can turn
-```bash
-npm run check:openapi
-```
-
-into a warning to get a build through. A substituted `servers[0].url` is the one warning, because a
-copy of the contract with a real host is a legitimate thing for a reader to make, and
-it does not change any claim about the API.
-- **A schema the validator does not understand is a failure, not a pass.** The
-subset validator throws on any keyword it does not implement, and the audit
-reports it as `DOC_SCHEMA_UNSUPPORTED` rather than validating the parts it
-recognises. The same applies to the emitter: a value that is not plain JSON
-(an `undefined` property, a `Map`) stops the build instead of quietly vanishing
-from the file.
+- `*oFailures do not bypass a money or deployment control.** Nothing here can turn
+  `npm run check:openapi` into a warning to get a build through. A substituted
+  `servers[0].url` is the one warning, because a copy of the contract with a real
+  host is a legitimate thing for a reader to make, and it does not change any
+  claim about the API.
+- `*A schema the validator does not understand is a failure, not a pass.** The
+  subset validator throws on any keyword it does not implement, and the audit
+  reports it as `DOC_SCHEMA_UNSUPPORTED` rather than validating the parts it
+  recognises. The same applies to the emitter: a value that is not plain JSON
+  (an `undefined` property, a `Map`) stops the build instead of quietly vanishing
+  from the file.
 
 ## Artifacts, secrets, environment
 
@@ -109,11 +106,11 @@ from the file.
   covers Stellar secret-seed shape, agent API keys, provider API keys, Postgres
   connection strings, private-key blocks and assigned secret-looking env values.
   `npm run check:terms` runs over tracked files as a second, independent net.
-- **Environment**: the generator reads no variable. `tests/node/agent-api-openapi.test.ts`
+- `*Environment**: the generator reads no variable. `tests/node/agent-api-openapi.test.ts`
   sets a canary in `process.env` (including a `postgres://` URL) and asserts the
   output does not contain it, so a clean checkout with no production secrets
   produces byte-identical artifacts. The only env var that appears in the document
-  is a *pause switch name** (`MIMIR_PAUSE_STAKE` and friends), which is how an
+  is a *pause switch name* (`MIMIR_PAUSE_STAKE` and friends), which is how an
   operator is told where to reach during an incident — a name, not a value.
 - **Network**: none. No RPC, no database, no LLM.
 
@@ -155,44 +152,3 @@ Both are covered by `tests/node/ops-yaml.test.ts` and
 `tests/node/json-schema-subset.test.ts`, which fail on the silent-corruption cases
 they were written to catch: a number rendered as a string, a `Map` flattened to
 `{}`, a header string iterated per character.
-
-## Schema version negotiation
-
-The agent API negotiates the schema version on every request so a caller can
-pin the contract it was written against without breaking funded flows. The
-negotiated version is published in the document as a request header and as a
-response header, and it is the only fact the generator reads from `lib/agents/version.ts`.
-
-| Fact | Read from |
-|---|---|
-| Supported schema versions and the default | `lib/agents/version.ts` (`AGENT_API_VERSIONS`, `DEFAULT_AGENT_API_VERSIOn`) |
-| Request header name and accepted format | `lib/agents/version.ts` (`VERSION_HEADER`, `parseVersionHeader`) |
-| Response header name | `lib/agents/version.ts` (`VERSION_RESPONSE_HEADER`) |
-| Unsupported-version error code and status | `lib/api/errors.ts` (`unsupported_schema_version`) |
-
-Behaviour is fail-closed and explicit:
-
-- **Absent header**: the request is served at the default version and the
-  response carries the negotiated version header. This keeps existing callers
-  working without a code change.
-- **Supported header**: the request is served at that version and the response
-  echoes it.
-- **Unsupported or malformed header**: the request is rejected before any auth
-  or money movement with `unsupported_schema_version`, and the response lists the
-  supported versions in the negotiated version header. No nonce is consumed and no
-  payment is verified.
-- **Duplicate header**: two differing values for the version header are treated as
-  malformed and rejected. Repeating the same value is accepted.
-- **Stale caller**: a caller that sends a version that was removed gets the
-  unsupported-version error, not a silent downgrade to the default.
-
-The negotiation is independent of the incident pause switch: a paused action
-returns the pause error at the negotiated version, so an operator can stop a
-  funded action without breaking the contract for callers on other versions.
-
-The generator probes negotiation the same way it probes authority levels: for
-each supported version it serves a synthetic request and records the response
-header, and for an unsupported version it records the error code and status. A
-change in `lib/agents/version.ts` therefore shows up as a changed version list or
-error code in the document, and the drift check fails until the document is
-regenerated.

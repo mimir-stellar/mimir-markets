@@ -19,12 +19,59 @@
  * Env-driven so a switch can be flipped without a deploy.
  */
 
-/** Schema versions the agent API can negotiate. */
-export const AGENT_API_SCHEMA_VERSIONS = ["2024-01-01", "2024-06-01"] as const;
-export type AgentApiSchemaVersion = (typeof AGENT_API_SCHEMA_VERSIONS)[number];
+/**
+ * Agent API schema versions this build can serve.
+ *
+ * Contract-first: the agent API negotiates a schema version so callers can
+ * pin to a known shape and fail closed on an unknown one rather than silently
+ * receiving a newer, incompatible payload. Bump `AGENT_API_LATEST_SCHEMA`
+ * only when a breaking change ships behind a new version string.
+ */
+export const AGENT_API_SCHEMAS = ["2024-01-01", "2024-06-01"] as const;
+export type AgentApiSchema = (typeof AGENT_API_SCHEMAS)[number];
 
-/** The schema version served when a caller does not request one. */
-export const AGENT_API_DEFAULT_SCHEMA_VERSION: AgentApiSchemaVersion = "2024-06-01";
+/** The schema version served when a caller does not negotiate one. */
+export const AGENT_API_LATEST_SCHEMA: AgentApiSchema = "2024-06-01";
+
+export function isAgentApiSchema(value: string): value is AgentApiSchema {
+  return (AGENT_API_SCHEMAS as readonly string[]).includes(value);
+}
+
+export interface SchemaNegotiationResult {
+  /** The schema version the caller will receive. */
+  schema: AgentApiSchema;
+  /** True when the caller's requested version was honored verbatim. */
+  negotiated: boolean;
+  /** Versions this build can serve, for a 406 body / discovery endpoint. */
+  supported: readonly AgentApiSchema[];
+}
+
+/**
+ * Negotiate an agent API schema version.
+ *
+ * Fail-closed: an unknown requested version is rejected (returns `undefined`)
+ * rather than silently downgraded, so a caller pinning to a schema this build
+ * does not implement never receives a payload it cannot parse. An absent
+ * request falls back to `AGENT_API_LATEST_SCHEMA`.
+ */
+export function negotiateAgentApiSchema(
+  requested: string | undefined | null,
+): SchemaNegotiationResult | undefined {
+  if (requested === undefined || requested === null || requested.trim() === "") {
+    return {
+      schema: AGENT_API_LATEST_SCHEMA,
+      negotiated: false,
+      supported: AGENT_API_SCHEMAS,
+    };
+  }
+  const trimmed = requested.trim();
+  if (!isAgentApiSchema(trimmed)) return undefined;
+  return {
+    schema: trimmed,
+    negotiated: true,
+    supported: AGENT_API_SCHEMAS,
+  };
+}
 
 /** Capabilities that can be paused independently during an incident. */
 export const PAUSABLE = [
@@ -40,6 +87,9 @@ export const PAUSABLE = [
   // Outbound source fetches through `lib/research/gateway.ts`. Listed here rather
   // than read ad hoc so `MIMIR_PAUSE_ALL` reaches it like every other switch.
   "research",
+  // Agent API schema negotiation. Pausing this stops new agent sessions from
+  // negotiating a schema without affecting already-negotiated callers.
+  "agent_api",
 ] as const;
 export type Pausable = (typeof PAUSABLE)[number];
 
@@ -179,11 +229,6 @@ export const FEATURES = [
   // in-process-only nonce store, which loses replay protection on restart and across
   // instances. Only disable in an isolated local dev environment.
   "nonce_persistence",
-  // Agent API schema negotiation. ON by default so callers can opt into a
-  // versioned contract; turning it OFF (MIMIR_FEATURE_AGENT_API_SCHEMA_NEGOTIATION=0)
-  // reverts to the unversioned legacy response shape for every caller. Only
-  // disable during a rollback of the negotiation rollout.
-  "agent_api_schema_negotiation",
 ] as const;
 export type Feature = (typeof FEATURES)[number];
 
@@ -218,9 +263,6 @@ const FEATURE_DEFAULTS: Record<Feature, boolean> = {
   // Nonce persistence is a security invariant, not a product rollout. Default ON
   // so no deploy step is needed; only disable in isolated local dev.
   nonce_persistence: true,
-  // Negotiation is additive: unversioned callers keep working. Default ON so
-  // versioned callers get the contract they asked for without a deploy step.
-  agent_api_schema_negotiation: true,
 };
 
 function featureEnvKey(feature: Feature): string {
@@ -271,55 +313,6 @@ export function disabledCategories(
   env: Record<string, string | undefined> = process.env,
 ): string[] {
   return categoryIds.filter((id) => !isCategoryEnabled(id, env));
-}
-
-// ── Agent API schema negotiation ──────────────────────────────────────────────
-
-export interface SchemaNegotiationResult {
-  /** The schema version the response will be served as. */
-  version: AgentApiSchemaVersion;
-  /** True when the caller's requested version was honored. */
-  negotiated: boolean;
-  /** True when the caller asked for a version we do not serve and we fell back. */
-  fellBack: boolean;
-  /** The version the caller requested, when one was supplied. */
-  requested?: string;
-}
-
-/**
- * Negotiate the agent API schema version for a request.
- *
- * Fail-closed on unknown versions: a caller that names a version we do not serve
- * gets the default rather than an arbitrary one, and `fellBack` is set so the
- * caller can detect the mismatch instead of silently parsing the wrong shape.
- * When negotiation is disabled by flag, the default is returned and the caller's
- * request is ignored — the legacy unversioned behavior.
- */
-export function negotiateAgentApiSchema(
-  requested: string | undefined | null,
-  env: Record<string, string | undefined> = process.env,
-): SchemaNegotiationResult {
-  if (!isFeatureEnabled("agent_api_schema_negotiation", env)) {
-    return { version: AGENT_API_DEFAULT_SCHEMA_VERSION, negotiated: false, fellBack: false };
-  }
-  const trimmed = typeof requested === "string" ? requested.trim() : "";
-  if (trimmed.length === 0) {
-    return { version: AGENT_API_DEFAULT_SCHEMA_VERSION, negotiated: false, fellBack: false };
-  }
-  if ((AGENT_API_SCHEMA_VERSIONS as readonly string[]).includes(trimmed)) {
-    return {
-      version: trimmed as AgentApiSchemaVersion,
-      negotiated: true,
-      fellBack: false,
-      requested: trimmed,
-    };
-  }
-  return {
-    version: AGENT_API_DEFAULT_SCHEMA_VERSION,
-    negotiated: false,
-    fellBack: true,
-    requested: trimmed,
-  };
 }
 
 // ── The single gate a write path calls ────────────────────────────────────────
