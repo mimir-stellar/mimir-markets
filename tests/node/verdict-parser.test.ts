@@ -45,14 +45,13 @@ import {
   VERDICT_LLM_SCHEMA,
   VERDICT_RETRY_SUFFIX,
 } from "../../lib/verdict-parser";
+import { extractJson } from "../../lib/llm";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Minimal extractJson stub: returns the first {...} block found via regex.
- * Handles fenced code blocks (strips the fence first) and prose wrappers.
- * Good enough for the cases tests need to exercise; the real extractJson in
- * lib/llm.ts has full balanced-brace walking.
+ * extractJson stub: returns the first balanced {...} block.
+ * Handles fenced code blocks and prose wrappers.
  */
 function stubExtract(text: string): string | null {
   // Strip ```json ... ``` fences

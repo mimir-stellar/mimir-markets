@@ -161,7 +161,8 @@ pub fn challenge_claim(
             return Err(Error::AlreadyChallenged);
         }
     }
-    if claim.challenger_count >= claim.market.max_challengers {
+    let max_challengers = claim.market.max_challengers.min(MAX_CHALLENGERS);
+    if claim.challenger_count >= max_challengers || list.len() >= max_challengers {
         return Err(Error::ClaimFull);
     }
     if stake_amount < MIN_STAKE {

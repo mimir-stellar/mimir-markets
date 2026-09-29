@@ -327,6 +327,7 @@ const SCHEMA_STATEMENTS: SqlStatement[] = [
   // through the overlap window after rotation. Idempotent ALTER TABLE: Postgres
   // ignores the statement when the column already exists.
   { sql: "ALTER TABLE agent_api_keys ADD COLUMN IF NOT EXISTS expires_at BIGINT" },
+  { sql: "ALTER TABLE agent_api_keys ADD COLUMN IF NOT EXISTS scopes_json TEXT" },
   { sql: `CREATE TABLE IF NOT EXISTS agent_spend_permissions (
     permission_hash TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
@@ -1884,7 +1885,7 @@ export async function getAgentEarningsSummary(payoutWallet: string): Promise<{
   return { ownerFeesAtomic: getBigInt(row.owner_fees), unclaimedAtomic: getBigInt(row.unclaimed), x402Atomic: getBigInt(row.x402) };
 }
 
-export async function getPaymentsRevenueSummary(limit = 25): Promise<PaymentsRevenueSummary> {
+export async function getPaymentsRevenueSummary(limit = 25, offset = 0): Promise<PaymentsRevenueSummary> {
   const pool = await getDb();
   const [totals, byResource, bySeller, recent] = await Promise.all([
     execute(pool, {
@@ -1908,8 +1909,8 @@ export async function getPaymentsRevenueSummary(limit = 25): Promise<PaymentsRev
       sql: `SELECT resource, scheme, network, asset_address, asset_symbol, asset_decimals,
               amount_atomic, payer, seller, transaction_hash, payment_identifier,
               facilitator, settled_at, created_at
-            FROM payments_v2 ORDER BY settled_at DESC, id DESC LIMIT ?`,
-      args: [limit],
+            FROM payments_v2 ORDER BY settled_at DESC, id DESC LIMIT ? OFFSET ?`,
+      args: [limit, offset],
     }),
   ]);
   const t = totals.rows[0] ?? {};
@@ -2092,10 +2093,10 @@ export async function insertAgentApiKey(record: AgentApiKeyRecord): Promise<void
   const pool = await getDb();
   await execute(pool, {
     sql: `INSERT INTO agent_api_keys (
-      key_id, agent_id, key_hash, key_prefix, label, created_at, expires_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      key_id, agent_id, key_hash, key_prefix, label, created_at, expires_at, scopes_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [record.keyId, record.agentId, record.keyHash, record.keyPrefix,
-      record.label, record.createdAt, record.expiresAt ?? null],
+      record.label, record.createdAt, record.expiresAt ?? null, record.scopes ? JSON.stringify(record.scopes) : null],
   });
 }
 
@@ -2111,6 +2112,7 @@ function toApiKeyRecord(row: Record<string, unknown>): AgentApiKeyRecord {
     expiresAt: row.expires_at == null ? undefined : getNumber(row.expires_at),
     revokedAt: row.revoked_at == null ? undefined : getNumber(row.revoked_at),
     revokedReason: row.revoked_reason == null ? undefined : getString(row.revoked_reason),
+    scopes: row.scopes_json ? JSON.parse(getString(row.scopes_json)) : undefined,
   };
 }
 

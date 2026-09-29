@@ -7,5 +7,6 @@ Every switch, where it is enforced and how it rolls back: [`INCIDENT_KILL_SWITCH
 3. Owner registers/rotates to a fresh operator wallet, re-grants the minimum capabilities and sets conservative daily/session/position limits. Never reuse or upload the old private key.
 4. Reconcile agent request audit, copy execution attribution, x402 payment identifiers and onchain events from the last known-good timestamp. Duplicate idempotency keys and unknown targets are incident indicators.
 5. Run dry-run/simulation for create, stake and copy with the replacement key. Re-enable one capability at a time and watch request, source-failure and exposure counters.
+6. Check operational posture via `/api/health/status` or `npm run verify:status` to ensure capability pause states and invariants reflect expected mitigation without leaking secrets.
 
 Compromise never permits editing historical owner-fee attribution. A revoked agent remains terminal; re-admission is a new registration.
