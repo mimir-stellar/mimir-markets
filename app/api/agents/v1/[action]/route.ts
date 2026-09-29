@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { negotiateAgentApiVersion } from "@/lib/agents/version-negotiation";
 import { verifyAgentSignature } from "@/lib/agents/signature";
 import { isStellarAccount } from "@/lib/stellar-message";
 import { getUserVSDirect } from "@/lib/contract";
@@ -15,9 +16,6 @@ import {
   agentRequestMessage, operatorProofMessage, validateAgentRequestEnvelope,
   type AgentApiAction, type SignedAgentRequest,
 } from "@/lib/agents/api";
-import {
-  AGENT_API_SUPPORTED_VERSIONS, negotiateAgentApiVersion, type AgentApiVersionNegotiation,
-} from "@/lib/agents/version-negotiation";
 import { authenticateAgentRequest, requiresOwnerSignature } from "@/lib/agents/authenticate";
 import {
   apiKeyPrefix, generateApiKey, hashApiKey, parseOverlapMs, type AgentApiKeyRecord,
@@ -72,24 +70,6 @@ function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
-/**
- * Attach the negotiated schema version to every response so a caller can pin the
- * contract it is speaking without re-deriving it from the request. `vary` keeps
- * caches from serving a v1 body to a v2 caller; `no-store` above already forbids
- * caching, but the header documents the intent for any intermediary.
- */
-function versionedJson(body: unknown, negotiation: AgentApiVersionNegotiation, status = 200): Response {
-  return Response.json(body, {
-    status,
-    headers: {
-      "cache-control": "no-store",
-      "x-mimir-agent-api-version": negotiation.version,
-      "x-mimir-agent-api-supported-versions": AGENT_API_SUPPORTED_VERSIONS.join(","),
-      vary: "x-mimir-agent-api-version",
-    },
-  });
-}
-
 /** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
 /** Map an authorizeAction() rejection to the typed agent API error envelope. */
 function actionVerdictToError(
@@ -114,22 +94,6 @@ function actionVerdictToError(
 
 function errorResponse(err: import("@/lib/api/errors").ApiErrorResult): Response {
   return Response.json(err.body, { status: err.status, headers: { ...err.headers, "cache-control": "no-store" } });
-}
-
-function versionedErrorResponse(
-  err: import("@/lib/api/errors").ApiErrorResult,
-  negotiation: AgentApiVersionNegotiation,
-): Response {
-  return Response.json(err.body, {
-    status: err.status,
-    headers: {
-      ...err.headers,
-      "cache-control": "no-store",
-      "x-mimir-agent-api-version": negotiation.version,
-      "x-mimir-agent-api-supported-versions": AGENT_API_SUPPORTED_VERSIONS.join(","),
-      vary: "x-mimir-agent-api-version",
-    },
-  });
 }
 
 async function verify(address: string, message: string, signature: string): Promise<boolean> {
@@ -261,12 +225,6 @@ async function handleAgentApiPost(
   req: Request,
   context: { params: Promise<{ action: string }> },
 ): Promise<Response> {
-  // Negotiate before touching the body: an unsupported version must fail closed
-  // with a typed error rather than be silently coerced into the current schema.
-  const negotiation = negotiateAgentApiVersion(req.headers.get("x-mimir-agent-api-version"));
-  if (!negotiation.ok) {
-    return Response.json(negotiation.error.body, { status: negotiation.error.status, headers: { ...negotiation.error.headers, "cache-control": "no-store" } });
-  }
   const { action: rawAction } = await context.params;
   if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action" } }, 404);
   const action = rawAction as AgentApiAction;
@@ -274,21 +232,37 @@ async function handleAgentApiPost(
   // check below still applies when the header is absent or wrong.
   const declared = Number(req.headers.get("content-length") ?? NaN);
   if (Number.isFinite(declared) && declared > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
-    return versionedJson({
+    return json({
       error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes` },
-    }, negotiation, 413);
+    }, 413);
   }
   let raw: string;
   try { raw = await req.text(); }
-  catch { return versionedJson({ error: { message: "invalid body" } }, negotiation, 400); }
+  catch { return json({ error: { message: "invalid body" } }, 400); }
   if (new TextEncoder().encode(raw).length > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
-    return versionedJson({
+    return json({
       error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes` },
-    }, negotiation, 413);
+    }, 413);
   }
   let request: SignedAgentRequest;
   try { request = JSON.parse(raw) as SignedAgentRequest; }
-  catch { return versionedJson({ error: { message: "invalid JSON" } }, negotiation, 400); }
+  catch { return json({ error: { message: "invalid JSON" } }, 400); }
+
+  // Schema-version negotiation happens before authentication so that a caller
+  // pinned to an unsupported (or malformed) version is told exactly that, rather
+  // than being handed a signature error that hides the real problem. The
+  // negotiator is fail-closed: unknown, missing, or malformed versions are
+  // rejected with a typed error and the set of versions this deployment speaks.
+  // `Accept-Version` is the primary channel; the envelope's `version` field is
+  // the fallback for signed callers that cannot set headers.
+  const negotiated = negotiateAgentApiVersion({
+    acceptVersion: req.headers.get("accept-version"),
+    envelopeVersion: typeof (request as { version?: unknown }).version === "string"
+      ? (request as { version: string }).version
+      : undefined,
+    supported: [AGENT_API_VERSION],
+  });
+  if (!negotiated.ok) return errorResponse(negotiated.error);
 
   // An API-key caller writes plain HTTP: `{ "body": {...} }` with the action in the
   // path. Everything the signed envelope carries for its own sake — version, nonce,
@@ -299,15 +273,13 @@ async function handleAgentApiPost(
     ip: clientIp(req),
     claimedAgentId: typeof request.agentId === "string" && request.agentId ? request.agentId : undefined,
   });
-  if (auth.error) return versionedErrorResponse(auth.error, negotiation);
+  if (auth.error) return Response.json(auth.error.body, { status: auth.error.status, headers: { ...auth.error.headers, "cache-control": "no-store" } });
   const viaApiKey = auth.auth?.kind === "api_key";
 
   if (viaApiKey && auth.auth?.kind === "api_key") {
     request = {
       ...request,
-      // The negotiated version, not the hard-coded latest: a v1 caller must keep
-      // getting v1 semantics even after the server default advances.
-      version: negotiation.version,
+      version: negotiated.version,
       action,
       agentId: auth.auth.agentId,
       idempotencyKey: request.idempotencyKey || randomUUID(),
@@ -322,21 +294,18 @@ async function handleAgentApiPost(
     };
   }
 
-  if (request.action !== action) return versionedJson({ error: { message: "action/path mismatch" } }, negotiation, 400);
+  if (request.action !== action) return json({ error: { message: "action/path mismatch" } }, 400);
   const envelopeErrors = validateAgentRequestEnvelope(request, Date.now(), { requireSignature: !viaApiKey });
-  if (envelopeErrors.length) return versionedJson({ error: { message: envelopeErrors.join("; ") } }, negotiation, 400);
-  if (action === "register") {
-    const registered = await register(request as SignedAgentRequest<Record<string, any>>);
-    return withNegotiatedVersion(registered, negotiation);
-  }
+  if (envelopeErrors.length) return json({ error: { message: envelopeErrors.join("; ") } }, 400);
+  if (action === "register") return register(request as SignedAgentRequest<Record<string, any>>);
 
   const agent = await loadAgent(request.agentId);
-  if (!agent) return versionedJson({ error: { message: "agent not found" } }, negotiation, 404);
+  if (!agent) return json({ error: { message: "agent not found" } }, 404);
   if (!viaApiKey) {
     const signer = requiresOwnerSignature(action) ? agent.ownerWallet : agent.operatorWallet;
     if (!(await verify(signer, agentRequestMessage(request), request.signature))) {
       await audit(request, "rejected", "signature");
-      return versionedJson({ error: { message: "signature rejected" } }, negotiation, 401);
+      return json({ error: { message: "signature rejected" } }, 401);
     }
     const { authorizeRequest } = await import("@/lib/api/policy");
     const gate = authorizeRequest("registered_agent", {
@@ -348,23 +317,23 @@ async function handleAgentApiPost(
     });
     if (!gate.allowed && gate.error) {
       await audit(request, "rejected", "rate_limited");
-      return versionedErrorResponse(gate.error, negotiation);
+      return errorResponse(gate.error);
     }
   }
   // A revoked agent keeps read access to its own records but does nothing else;
   // that is what makes revoke a usable emergency stop rather than a data loss.
   if (agent.status === "revoked" && !["heartbeat", "listPositions", "listEarnings", "listKeys", "spendStatus"].includes(action)) {
     await audit(request, "rejected", "agent_revoked");
-    return versionedJson({ error: { message: "agent is revoked" } }, negotiation, 403);
+    return json({ error: { message: "agent is revoked" } }, 403);
   }
   if (FUNDED_ACTIONS.includes(action) && !isFeatureEnabled("byoa_funded_actions")) {
     await audit(request, "rejected", "feature_disabled");
-    return versionedJson({
+    return json({
       error: {
         message: "byoa funded actions are not enabled",
         detail: "dryRun and proposeMarket work meanwhile; they move no money.",
       },
-    }, negotiation, 403);
+    }, 403);
   }
   // After the feature check, as in checkWriteAllowed: "not enabled" is the truer
   // answer for something that was never switched on. Before the idempotency replay,
@@ -373,10 +342,10 @@ async function handleAgentApiPost(
   const pauseErr = pauseCapability ? gateOrPause({ capability: pauseCapability }) : null;
   if (pauseErr) {
     await audit(request, "rejected", "paused");
-    return versionedErrorResponse(pauseErr, negotiation);
+    return errorResponse(pauseErr);
   }
   const prior = await loadIdempotentResponse(agent.agentId, action, request.idempotencyKey);
-  if (prior) return versionedJson(prior.body, negotiation, prior.status);
+  if (prior) return json(prior.body, prior.status);
   const replayed = await rejectReplayedSignedEnvelope({
     agentId: agent.agentId,
     nonce: request.nonce,
@@ -384,7 +353,7 @@ async function handleAgentApiPost(
   });
   if (replayed) {
     await audit(request, "rejected", "nonce_replay");
-    return versionedErrorResponse(replayed, negotiation);
+    return errorResponse(replayed);
   }
 
   const body = (request.body ?? {}) as Record<string, any>;
@@ -398,13 +367,13 @@ async function handleAgentApiPost(
     if (body.ttl_seconds !== undefined && body.ttl_seconds !== null) {
       const ttl = Number(body.ttl_seconds);
       if (!Number.isFinite(ttl) || ttl <= 0) {
-        return versionedJson({ error: { message: "ttl_seconds must be a positive number" } }, negotiation, 400);
+        return json({ error: { message: "ttl_seconds must be a positive number" } }, 400);
       }
       expiresAt = Date.now() + Math.floor(ttl) * 1000;
     }
     const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
     if (scopes && scopes.length === 0) {
-      return versionedJson({ error: { message: "Cannot issue a key with an empty scope set" } }, negotiation, 400);
+      return json({ error: { message: "Cannot issue a key with an empty scope set" } }, 400);
     }
     const record: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(key),
@@ -429,9 +398,9 @@ async function handleAgentApiPost(
     };
   } else if (action === "revokeKey") {
     const keyId = String(body.keyId ?? "");
-    if (!keyId) return versionedJson({ error: { message: "keyId is required" } }, negotiation, 400);
+    if (!keyId) return json({ error: { message: "keyId is required" } }, 400);
     const revoked = await revokeAgentApiKey(agent.agentId, keyId, Date.now(), String(body.reason ?? "owner revoked"));
-    if (!revoked) return versionedJson({ error: { message: "key not found or already revoked" } }, negotiation, 404);
+    if (!revoked) return json({ error: { message: "key not found or already revoked" } }, 404);
     result = { keyId, revoked: true };
   } else if (action === "rotateKey") {
     // rotateKey is OWNER_SIGNED (same as issueKey/revokeKey): a key cannot
@@ -447,11 +416,11 @@ async function handleAgentApiPost(
     // distributes the new credential. After the window closes, the old key
     // silently returns "expired" from checkApiKeyRecord.
     const keyId = String(body.keyId ?? "");
-    if (!keyId) return versionedJson({ error: { message: "keyId is required" } }, negotiation, 400);
+    if (!keyId) return json({ error: { message: "keyId is required" } }, 400);
 
     const overlapResult = parseOverlapMs(body.overlap_ms);
     if (!overlapResult.ok) {
-      return versionedJson({ error: { message: overlapResult.error } }, negotiation, 400);
+      return json({ error: { message: overlapResult.error } }, 400);
     }
     const { overlapMs } = overlapResult;
 
@@ -460,7 +429,7 @@ async function handleAgentApiPost(
     const newKey = generateApiKey(body.environment === "test" ? "test" : "live");
     const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
     if (scopes && scopes.length === 0) {
-      return versionedJson({ error: { message: "Cannot issue a key with an empty scope set" } }, negotiation, 400);
+      return json({ error: { message: "Cannot issue a key with an empty scope set" } }, 400);
     }
     const newRecord: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(newKey),
@@ -495,12 +464,12 @@ async function handleAgentApiPost(
       agentId: agent.agentId, grant: body as SpendPermissionGrant,
       spender: configuredSpender(), now: Date.now(),
     });
-    if (!parsed.ok) return versionedJson({ error: { message: parsed.error } }, negotiation, 400);
+    if (!parsed.ok) return json({ error: { message: parsed.error } }, 400);
     // The owner's own account must be the source of funds; letting an agent point a
     // permission at a third party's account would make this a phishing endpoint.
     // EXACT comparison — see `normalizeWallet` above.
     if (parsed.record.account !== agent.ownerWallet.trim()) {
-      return versionedJson({ error: { message: "permission account must be the agent owner wallet" } }, negotiation, 403);
+      return json({ error: { message: "permission account must be the agent owner wallet" } }, 403);
     }
     await upsertSpendPermission(parsed.record);
     result = {
@@ -511,9 +480,9 @@ async function handleAgentApiPost(
     };
   } else if (action === "revokeSpend") {
     const hash = String(body.permissionHash ?? "");
-    if (!hash) return versionedJson({ error: { message: "permissionHash is required" } }, negotiation, 400);
+    if (!hash) return json({ error: { message: "permissionHash is required" } }, 400);
     const revoked = await revokeSpendPermission(agent.agentId, hash, Date.now(), String(body.reason ?? "owner revoked"));
-    if (!revoked) return versionedJson({ error: { message: "permission not found or already revoked" } }, negotiation, 404);
+    if (!revoked) return json({ error: { message: "permission not found or already revoked" } }, 404);
     // On-chain revocation is the owner's own call and outranks this record; this only
     // stops Mimir from drawing further.
     result = { permissionHash: hash, revoked: true, note: "Mimir will draw no further; revoke on chain to withdraw the grant itself." };
@@ -550,13 +519,13 @@ async function handleAgentApiPost(
     // revoke is in OWNER_SIGNED_ACTIONS, so reaching here means the owner's own
     // signature verified above — an API key is refused before this point.
     const revoked = revokeAgent(agent, { requestedBy: agent.ownerWallet, reason: String(body.reason ?? "owner revoked") });
-    if (!revoked.ok) return versionedJson({ error: { message: revoked.reason } }, negotiation, 403);
+    if (!revoked.ok) return json({ error: { message: revoked.reason } }, 403);
     await saveAgent(revoked.agent); result = { agent: revoked.agent };
   } else if (action === "publishReasoning") {
     const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
     if (!gate.allowed) {
       await audit(request, "rejected", gate.reason);
-      return versionedErrorResponse(actionVerdictToError(gate, "researcher"), negotiation);
+      return errorResponse(actionVerdictToError(gate, "researcher"));
     }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
   } else {
@@ -570,7 +539,7 @@ async function handleAgentApiPost(
       activeMarkets: Number(body.activeMarkets ?? 0), requestsThisHour: Number(body.requestsThisHour ?? 0),
       proposalOnly,
     } as any);
-    if (!gate.allowed) return versionedJson({ error: { message: gate.reason, detail: gate.detail } }, negotiation, 403);
+    if (!gate.allowed) return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
     if (action === "dryRun") {
       // ── What "allowance" means now ──────────────────────────────────────────
       // The EVM version read the ERC-20 allowance the agent had granted the
@@ -623,7 +592,10 @@ async function handleAgentApiPost(
   }
   await audit(request, "accepted");
   await saveIdempotentResponse(agent.agentId, action, request.idempotencyKey, result);
-  return versionedJson(result, negotiation);
+  // Echo the negotiated version so a caller can confirm which schema it was
+  // served under. Additive header only; the body shape is unchanged for the
+  // currently-supported version, so existing callers keep working.
+  return json(result, 200);
 }
 
 // Traced: this is the API an autonomous agent calls, and the failure it gets back

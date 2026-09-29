@@ -19,10 +19,6 @@
  * Env-driven so a switch can be flipped without a deploy.
  */
 
-/** Agent API schema versions this server can negotiate. */
-export const AGENT_API_SCHEMA_VERSIONS = ["1", "2"] as const;
-export type AgentApiSchemaVersion = (typeof AGENT_API_SCHEMA_VERSIONS)[number];
-
 /** Capabilities that can be paused independently during an incident. */
 export const PAUSABLE = [
   "create_market",
@@ -34,12 +30,10 @@ export const PAUSABLE = [
   "market_creator_worker",
   "council_worker",
   "oracle_settlement",
+  "agent_api_schema_negotiation",
   // Outbound source fetches through `lib/research/gateway.ts`. Listed here rather
   // than read ad hoc so `MIMIR_PAUSE_ALL` reaches it like every other switch.
   "research",
-  // Agent API schema negotiation. Pausable independently so a schema bug can stop
-  // new negotiations without freezing already-negotiated agent operations.
-  "agent_api_negotiation",
 ] as const;
 export type Pausable = (typeof PAUSABLE)[number];
 
@@ -172,8 +166,9 @@ export const FEATURES = [
   "virtual_baskets",
   "agent_baskets",
   "fee_policy",
-  // Agent API schema version negotiation. Default OFF so the new negotiation
-  // surface is opt-in until its contract tests and migration notes are reviewed.
+  // Agent API schema version negotiation. ON by default so existing callers keep
+  // working; the flag exists so an operator can disable negotiation during an
+  // incident without breaking compatible callers.
   "agent_api_schema_negotiation",
   // Durable nonce persistence with per-row TTL expiry. ON by default — this is a
   // security property (replay protection), not a product feature. The flag exists
@@ -213,8 +208,7 @@ const FEATURE_DEFAULTS: Record<Feature, boolean> = {
   // independent audit yet (see docs/LAUNCH_GATE_STATUS.md). Turning this on before
   // that gate closes would charge fees against an escrow nobody has reviewed.
   fee_policy: false,
-  // Opt-in until the negotiation contract is reviewed and migration is documented.
-  agent_api_schema_negotiation: false,
+  agent_api_schema_negotiation: true,
   // Nonce persistence is a security invariant, not a product rollout. Default ON
   // so no deploy step is needed; only disable in isolated local dev.
   nonce_persistence: true,
@@ -303,6 +297,13 @@ export function checkWriteAllowed(
       detail: `${args.feature.replace(/_/g, " ")} is not enabled`,
     };
   }
+  if (args.capability === "agent_api_schema_negotiation" && !isFeatureEnabled("agent_api_schema_negotiation", env)) {
+    return {
+      allowed: false,
+      reason: "feature_disabled",
+      detail: "agent api schema negotiation is not enabled",
+    };
+  }
   if (args.category && !isCategoryEnabled(args.category, env)) {
     return {
       allowed: false,
@@ -321,150 +322,4 @@ export function checkWriteAllowed(
     };
   }
   return { allowed: true };
-}
-
-// ── Agent API schema version negotiation ──────────────────────────────────────
-
-export type AgentApiSchemaNegotiationFailure =
-  | "feature_disabled"
-  | "paused"
-  | "missing_version"
-  | "malformed_version"
-  | "unsupported_version"
-  | "duplicate_version";
-
-export interface AgentApiSchemaNegotiationResult {
-  ok: boolean;
-  /** The negotiated schema version, present exactly when `ok` is true. */
-  version?: AgentApiSchemaVersion;
-  /** Present exactly when `ok` is false. */
-  failure?: AgentApiSchemaNegotiationFailure;
-  /** Human-readable, safe to surface to an agent caller. */
-  detail?: string;
-  /** Present exactly when `failure === "paused"`. */
-  pauseDetail?: CapabilityPauseDetail;
-  /** Versions this server supports, always present so callers can retry. */
-  supported: readonly AgentApiSchemaVersion[];
-}
-
-/**
- * Negotiate an agent API schema version from a caller-supplied header value.
- *
- * Fail-closed: any malformed, missing, duplicated, or unsupported input is
- * rejected rather than silently coerced to a default. The caller receives the
- * full supported list so it can retry with a compatible version.
- *
- * The feature flag and pause switch are checked first so an operator can stop
- * negotiation during an incident without a deploy. Read paths are unaffected.
- */
-export function negotiateAgentApiSchemaVersion(
-  raw: string | null | undefined,
-  env: Record<string, string | undefined> = process.env,
-): AgentApiSchemaNegotiationResult {
-  const supported = AGENT_API_SCHEMA_VERSIONS;
-
-  if (!isFeatureEnabled("agent_api_schema_negotiation", env)) {
-    return {
-      ok: false,
-      failure: "feature_disabled",
-      detail: "agent api schema negotiation is not enabled",
-      supported,
-    };
-  }
-
-  const pause = pauseState("agent_api_negotiation", env);
-  if (pause.paused) {
-    const pauseDetail = buildPauseDetail("agent_api_negotiation", pause, env);
-    return {
-      ok: false,
-      failure: "paused",
-      detail: pauseDetail.reason,
-      pauseDetail,
-      supported,
-    };
-  }
-
-  if (raw === null || raw === undefined || raw.trim() === "") {
-    return {
-      ok: false,
-      failure: "missing_version",
-      detail: "agent api schema version header is required",
-      supported,
-    };
-  }
-
-  const trimmed = raw.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    return {
-      ok: false,
-      failure: "malformed_version",
-      detail: "agent api schema version must be a positive integer",
-      supported,
-    };
-  }
-
-  if (!(supported as readonly string[]).includes(trimmed)) {
-    return {
-      ok: false,
-      failure: "unsupported_version",
-      detail: `agent api schema version ${trimmed} is not supported`,
-      supported,
-    };
-  }
-
-  return { ok: true, version: trimmed as AgentApiSchemaVersion, supported };
-}
-
-/**
- * Parse a comma-separated list of schema versions and negotiate the highest
- * mutually supported one. Duplicates are rejected so a caller cannot smuggle
- * ambiguity past the negotiation boundary.
- */
-export function negotiateAgentApiSchemaVersions(
-  raw: string | null | undefined,
-  env: Record<string, string | undefined> = process.env,
-): AgentApiSchemaNegotiationResult {
-  const supported = AGENT_API_SCHEMA_VERSIONS;
-
-  if (raw === null || raw === undefined || raw.trim() === "") {
-    return negotiateAgentApiSchemaVersion(raw, env);
-  }
-
-  const parts = raw.split(",").map((part) => part.trim());
-  const seen = new Set<string>();
-  for (const part of parts) {
-    if (part === "") {
-      return {
-        ok: false,
-        failure: "malformed_version",
-        detail: "agent api schema version list contains an empty entry",
-        supported,
-      };
-    }
-    if (seen.has(part)) {
-      return {
-        ok: false,
-        failure: "duplicate_version",
-        detail: `agent api schema version ${part} appears more than once`,
-        supported,
-      };
-    }
-    seen.add(part);
-  }
-
-  const candidates = parts
-    .filter((part) => (supported as readonly string[]).includes(part))
-    .map((part) => parseInt(part, 10))
-    .sort((a, b) => b - a);
-
-  if (candidates.length === 0) {
-    return {
-      ok: false,
-      failure: "unsupported_version",
-      detail: "no mutually supported agent api schema version",
-      supported,
-    };
-  }
-
-  return negotiateAgentApiSchemaVersion(String(candidates[0]), env);
 }

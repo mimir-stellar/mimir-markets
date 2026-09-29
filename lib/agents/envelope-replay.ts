@@ -10,7 +10,7 @@
  * Call this AFTER envelope validation and signature verification, and BEFORE any
  * money-moving or authority-changing side effect. Returning a structured
  * `ApiErrorResult` keeps autonomous clients on the machine-readable path
- * (`code: "nonce_reused"`, `retryable: false`) instead of free-form 409 prose.
+ * (`code: "nonce_reused" `, `retryable: false`) instead of free-form 409 prose.
  */
 
 import { AGENT_REQUEST_MAX_SKEW_MS } from "@/lib/agents/api";

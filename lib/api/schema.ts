@@ -19,9 +19,9 @@
  *  - **Every response carries its version**, so a cached body can be identified
  *    later rather than guessed at from its keys.
  *
- *  - **Negotiation is explicit.** A client may advertise the set of versions it
- *    accepts; the server picks the highest mutually supported version, or fails
- *    closed with a machine-readable reason rather than guessing.
+ *  - **Negotiation is explicit.** A client may advertise a range of versions it
+ *    can speak; the server picks the highest mutually supported one, or refuses.
+ *    This keeps contract-first accounting: the caller knows exactly what it got.
  */
 
 export const API_SCHEMA_VERSION = 1;
@@ -29,11 +29,11 @@ export const API_SCHEMA_VERSION = 1;
 /** Header a client uses to state the schema version it speaks. */
 export const SCHEMA_VERSION_HEADER = "x-mimir-schema-version";
 
-/** Header a client uses to advertise the versions it accepts, comma-separated. */
-export const SCHEMA_ACCEPT_HEADER = "x-mimir-schema-accept";
+/** Header a client uses to advertise a comma-separated list of versions it supports. */
+export const SCHEMA_VERSION_ACCEPT_HEADER = "x-mimir-schema-version-accept";
 
 /** Versions this server can speak, newest first. */
-export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [API_SCHEMA_VERSION];
+export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [1];
 
 export interface VersionVerdict {
   ok: boolean;
@@ -41,11 +41,8 @@ export interface VersionVerdict {
   version?: number;
   reason?: "unsupported_version" | "version_required" | "malformed_version";
   detail?: string;
-}
-
-export interface NegotiatedVersion extends VersionVerdict {
-  /** Versions the client advertised, when negotiation was used. */
-  clientVersions?: number[];
+  /** Versions the server supports, for client diagnostics. Present on failure. */
+  supported?: readonly number[];
 }
 
 /**
@@ -65,6 +62,7 @@ export function resolveRequestVersion(
         ok: false,
         reason: "version_required",
         detail: `${SCHEMA_VERSION_HEADER} is required for this operation`,
+        supported: SUPPORTED_SCHEMA_VERSIONS,
       };
     }
     return { ok: true, version: API_SCHEMA_VERSION };
@@ -72,75 +70,63 @@ export function resolveRequestVersion(
   // Digits only: "1.0", "v1" and "1 " with junk are all a client that has not
   // agreed on the format, and parseInt would silently accept "1abc" as 1.
   if (!/^\d+$/.test(trimmed)) {
-    return { ok: false, reason: "malformed_version", detail: trimmed };
+    return { ok: false, reason: "malformed_version", detail: trimmed, supported: SUPPORTED_SCHEMA_VERSIONS };
   }
   const version = Number(trimmed);
-  if (version !== API_SCHEMA_VERSION) {
+  if (!SUPPORTED_SCHEMA_VERSIONS.includes(version)) {
     return {
       ok: false,
       reason: "unsupported_version",
       detail: `server speaks ${API_SCHEMA_VERSION}, client sent ${version}`,
+      supported: SUPPORTED_SCHEMA_VERSIONS,
     };
   }
   return { ok: true, version };
 }
 
 /**
- * Negotiate a schema version from an `Accept`-style list.
+ * Negotiate a schema version from an Accept-style header.
  *
- * The client advertises the versions it can speak; the server picks the highest
- * one it also supports. An empty or absent list falls back to the single-version
- * behaviour of `resolveRequestVersion`, so existing callers keep working.
- *
- * Fail-closed rules:
- *  - A malformed entry (non-digits) refuses the whole negotiation rather than
- *    silently skipping it; a client that cannot format its own version list is
- *    not a client whose payload should be guessed at.
- *  - A list with no overlap with `SUPPORTED_SCHEMA_VERSIONS` is refused with
- *    `unsupported_version`, never coerced down to the server's current version.
- *  - Duplicates are collapsed; order in the header does not imply preference.
+ * The client advertises a comma-separated list of versions it can speak; the
+ * server picks the highest mutually supported one. A malformed list is refused
+ * rather than coerced, and an empty list falls back to `resolveRequestVersion`
+ * so existing single-version clients keep working.
  */
 export function negotiateRequestVersion(
   acceptRaw: string | null | undefined,
-  opts: { mutating?: boolean; explicitRaw?: string | null } = {},
-): NegotiatedVersion {
-  const explicit = (opts.explicitRaw ?? "").trim();
-  if (explicit.length > 0) {
-    const verdict = resolveRequestVersion(explicit, { mutating: opts.mutating });
-    return verdict;
-  }
-
+  singleRaw: string | null | undefined,
+  opts: { mutating?: boolean } = {},
+): VersionVerdict {
   const accept = (acceptRaw ?? "").trim();
   if (accept.length === 0) {
-    return resolveRequestVersion(null, { mutating: opts.mutating });
+    return resolveRequestVersion(singleRaw, opts);
   }
-
   const parts = accept.split(",").map((p) => p.trim()).filter((p) => p.length > 0);
   if (parts.length === 0) {
-    return resolveRequestVersion(null, { mutating: opts.mutating });
+    return resolveRequestVersion(singleRaw, opts);
   }
-
-  const clientVersions: number[] = [];
+  const offered: number[] = [];
   for (const part of parts) {
     if (!/^\d+$/.test(part)) {
-      return { ok: false, reason: "malformed_version", detail: part };
+      return {
+        ok: false,
+        reason: "malformed_version",
+        detail: part,
+        supported: SUPPORTED_SCHEMA_VERSIONS,
+      };
     }
-    const n = Number(part);
-    if (!clientVersions.includes(n)) clientVersions.push(n);
+    offered.push(Number(part));
   }
-
-  const overlap = clientVersions.filter((v) => SUPPORTED_SCHEMA_VERSIONS.includes(v));
-  if (overlap.length === 0) {
+  const mutual = SUPPORTED_SCHEMA_VERSIONS.filter((v) => offered.includes(v));
+  if (mutual.length === 0) {
     return {
       ok: false,
       reason: "unsupported_version",
-      detail: `server speaks ${SUPPORTED_SCHEMA_VERSIONS.join(", ")}, client accepts ${clientVersions.join(", ")}`,
-      clientVersions,
+      detail: `server speaks ${SUPPORTED_SCHEMA_VERSIONS.join(", ")}, client sent ${offered.join(", ")}`,
+      supported: SUPPORTED_SCHEMA_VERSIONS,
     };
   }
-
-  const chosen = Math.max(...overlap);
-  return { ok: true, version: chosen, clientVersions };
+  return { ok: true, version: mutual[0] };
 }
 
 // ── Minimal shape checking ────────────────────────────────────────────────────
@@ -242,8 +228,10 @@ export function versioned<T>(data: T): VersionedResponse<T> {
 
 /** Header set on every response, so a cached body can be identified later. */
 export function schemaVersionHeaders(): Record<string, string> {
-  return {
-    [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION),
-    [SCHEMA_ACCEPT_HEADER]: SUPPORTED_SCHEMA_VERSIONS.join(","),
-  };
+  return { [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION) };
+}
+
+/** Headers advertising the versions this server can speak, for negotiation. */
+export function schemaVersionAcceptHeaders(): Record<string, string> {
+  return { [SCHEMA_VERSION_ACCEPT_HEADER]: SUPPORTED_SCHEMA_VERSIONS.join(", ") };
 }
