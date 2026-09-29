@@ -62,6 +62,39 @@ fn assert_market_conservation(market: &Market) -> Result<(), Error> {
     Ok(())
 }
 
+/// The gross payout for one winning claim, before fees.
+///
+/// Every winner but the final one receives their pro-rata share,
+/// `floor((pool_a + pool_b) * principal / winner_pool)`, which truncates. The
+/// last winner to claim receives whatever `remaining_escrow` is left, so the
+/// pool-share truncation dust is distributed rather than stranded in escrow.
+///
+/// `claim` and `preview_claim` both call this one function, so the dust branch
+/// cannot be computed two different ways: a preview of the final winner cannot
+/// round differently from the payout it is previewing.
+fn winner_gross(market: &Market, principal: i128) -> Result<i128, Error> {
+    let winner_pool = if market.result == SIDE_A {
+        market.pool_a
+    } else {
+        market.pool_b
+    };
+    let winner_count = if market.result == SIDE_A {
+        market.participants_a
+    } else {
+        market.participants_b
+    };
+
+    // `winner_claims` counts winners that have already pulled. This call is the
+    // next one, so it closes the escrow when it is the final winner.
+    if market.winner_claims + 1 == winner_count {
+        return Ok(market.remaining_escrow);
+    }
+
+    (market.pool_a + market.pool_b)
+        .checked_mul(principal)
+        .map(|p| p / winner_pool)
+        .ok_or(Error::Overflow)
+}
 
 pub fn initialize(
     env: &Env,
@@ -383,29 +416,11 @@ pub fn claim(
     let mut fee = 0i128;
 
     if market.result != RESULT_CANCELLED {
-        let winner_pool = if market.result == SIDE_A {
-            market.pool_a
-        } else {
-            market.pool_b
-        };
-        let winner_count = if market.result == SIDE_A {
-            market.participants_a
-        } else {
-            market.participants_b
-        };
-
+        // The last winner to claim absorbs whatever is left, so truncation dust
+        // cannot be stranded in escrow. Computed before the counter moves so the
+        // same `winner_gross` a preview used a moment earlier applies here.
+        gross = winner_gross(&market, principal)?;
         market.winner_claims += 1;
-        gross = if market.winner_claims == winner_count {
-            // The last winner to claim absorbs whatever is left, so truncation
-            // dust cannot be stranded in escrow.
-            market.remaining_escrow
-        } else {
-            (market.pool_a + market.pool_b)
-                .checked_mul(principal)
-                .map(|p| p / winner_pool)
-                .ok_or(Error::Overflow)?
-        };
-
         fee = profit_fee(principal, gross, market.fee_bps)?;
     }
 
@@ -423,7 +438,30 @@ pub fn claim(
     storage::set_accrued_fees(env, storage::accrued_fees(env) + fee);
 
     let usdc = storage::usdc(env)?;
-    escrow::push(env, &usdc, &participant, net);
+    if !escrow::try_push(env, &usdc, &participant, net) {
+        // The winner's trustline is frozen: the token traps, and under a plain
+        // `push` that reverts the whole claim, so the position could not be
+        // settled while the trustline stays frozen. Everything above is already
+        // applied and is exactly what a later retry needs — the claim stays
+        // marked (no double claim) and the escrow keeps the funds — so only the
+        // interaction is deferred: the amount is parked against the winner and
+        // `claim_parked_payout` moves it once the trustline can receive.
+        storage::set_payout(
+            env,
+            market_id,
+            side,
+            &participant,
+            storage::payout_of(env, market_id, side, &participant) + net,
+        );
+        events::PayoutParked {
+            market_id,
+            side,
+            participant: participant.clone(),
+            amount: net,
+        }
+        .publish(env);
+        return Ok(net);
+    }
 
     events::Claimed {
         market_id,
@@ -436,6 +474,37 @@ pub fn claim(
     Ok(net)
 }
 
+/// Retry a payout that [`claim`] parked, once the winner's trustline can
+/// receive again.
+///
+/// The parked amount is cleared before the transfer so a re-entrant call cannot
+/// double-pay, and restored if the token traps again: a frozen trustline leaves
+/// the balance parked rather than dropped, and the caller is told with
+/// [`Error::PayoutParked`]. Returns `0` when nothing is parked, so a retry loop
+/// is idempotent.
+pub fn claim_parked_payout(
+    env: &Env,
+    participant: Address,
+    market_id: u64,
+    side: u32,
+) -> Result<i128, Error> {
+    participant.require_auth();
+    require_side(side)?;
+
+    let amount = storage::payout_of(env, market_id, side, &participant);
+    if amount <= 0 {
+        return Ok(0);
+    }
+    storage::set_payout(env, market_id, side, &participant, 0); // effects before interaction
+
+    let usdc = storage::usdc(env)?;
+    if !escrow::try_push(env, &usdc, &participant, amount) {
+        storage::set_payout(env, market_id, side, &participant, amount);
+        return Err(Error::PayoutParked);
+    }
+    Ok(amount)
+}
+
 pub fn claim_fees(env: &Env) -> Result<i128, Error> {
     let recipient = storage::fee_recipient(env)?;
     recipient.require_auth();
@@ -444,10 +513,20 @@ pub fn claim_fees(env: &Env) -> Result<i128, Error> {
     if amount <= 0 {
         return Ok(0);
     }
+
     storage::set_accrued_fees(env, 0); // effects before interaction
 
     let usdc = storage::usdc(env)?;
-    escrow::push(env, &usdc, &recipient, amount);
+    if !escrow::try_push(env, &usdc, &recipient, amount) {
+        // A deauthorized fee recipient cannot be credited. The effect is put
+        // back and the call is rejected, so the fees stay in escrow and stay
+        // claimable: a frozen recipient cannot lose them by trying to claim
+        // them, and nothing else in the pool is held up because fees are only
+        // ever pulled here. The recipient retries once the balance is
+        // authorized again.
+        storage::set_accrued_fees(env, amount);
+        return Err(Error::PayoutParked);
+    }
 
     events::FeesClaimed {
         recipient,
@@ -488,24 +567,17 @@ pub fn preview_claim(
         });
     }
 
-    let winner_pool = if market.result == SIDE_A {
-        market.pool_a
-    } else {
-        market.pool_b
-    };
-    let winner_count = if market.result == SIDE_A {
-        market.participants_a
-    } else {
-        market.participants_b
-    };
-    let gross = if market.winner_claims + 1 == winner_count {
-        market.remaining_escrow
-    } else {
-        (market.pool_a + market.pool_b)
-            .checked_mul(principal)
-            .map(|p| p / winner_pool)
-            .ok_or(Error::Overflow)?
-    };
+    // A settled position previews as nothing: `claim` is a no-op after the pull,
+    // so the preview must agree instead of promising a second payout.
+    if storage::has_claimed(env, market_id, side, participant) {
+        return Ok(ClaimResult {
+            gross: 0,
+            fee: 0,
+            net: 0,
+        });
+    }
+
+    let gross = winner_gross(&market, principal)?;
     let fee = profit_fee(principal, gross, market.fee_bps)?;
     Ok(ClaimResult {
         gross,

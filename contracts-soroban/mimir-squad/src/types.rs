@@ -106,4 +106,8 @@ pub enum Error {
     /// `participants_a + participants_b == MAX_SQUAD_MEMBERS` even if the target
     /// side still has room.
     SquadFull = 28,
+    /// A payout could not be delivered because the token transfer trapped
+    /// (frozen or deauthorized trustline). The amount is parked, not lost:
+    /// `claim` succeeds and holds it, `claim_parked_payout` retries it.
+    PayoutParked = 29,
 }

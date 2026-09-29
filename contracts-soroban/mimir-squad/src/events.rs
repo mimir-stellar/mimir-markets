@@ -69,6 +69,22 @@ pub struct FeesClaimed {
     pub amount: i128,
 }
 
+/// Emitted instead of [`Claimed`] when the payout settled in the ledger but the
+/// token transfer trapped — a frozen or deauthorized trustline. The amount is
+/// parked against the winner and `claim_parked_payout` delivers it later, so
+/// this event means "owed", not "paid".
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutParked {
+    #[topic]
+    pub market_id: u64,
+    #[topic]
+    pub side: u32,
+    #[topic]
+    pub participant: Address,
+    pub amount: i128,
+}
+
 /// Emitted on the deposit that fills the squad to [`crate::types::MAX_SQUAD_MEMBERS`]
 /// total participants.  Subsequent deposits from new addresses will be rejected
 /// with [`crate::types::Error::SquadFull`] until existing members withdraw.

@@ -17,6 +17,7 @@
     "test:node": "node scripts/run-node-tests.mjs",
     "test:node:coverage": "node scripts/run-node-tests.mjs --coverage",
     "check:locales": "node scripts/check-locale-completeness.mjs",
+    "check:lockfile": "git diff --exit-code package-lock.json",
     "sbom:release": "node scripts/generate-release-sbom.mjs",
     "test:contracts": "cargo test --manifest-path contracts-soroban/Cargo.toml --release",
     "check:toolchains": "tsx scripts/check-contract-toolchains.ts",
