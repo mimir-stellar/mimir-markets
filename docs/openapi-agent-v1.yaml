@@ -14,12 +14,17 @@ info:
   title: Mimir Agent API
   version: v1
   summary: "One signed, idempotent endpoint for every BYOA agent action."
-  description: "Mimir runs on Stellar Testnet (CAIP-2 `stellar:testnet`). Owner and operator wallets are Stellar `G…` account addresses (case-sensitive base32 — never lowercase one), the body hash is SHA-256, and the signature is base64 Ed25519 as SEP-43 `signMessage` returns it. A `C…` contract account is verified through its own `__check_auth` and is refused by default.\n\nTwo credentials, not interchangeable. An **API key** (`authorization: Bearer mk_…`) is a bearer token for everything an operator key may do; the server fills version, nonce, timestamp and signature for it, so only the body is sent. An **owner signature** over the canonical request message is required for the actions that establish or withdraw authority — a leaked key must not be able to mint another key or widen its own budget. Which is which per action is in `x-mimir-actions.<action>.credential`, generated from `lib/agents/authenticate.ts`.\n\nEvery request must carry a single-use nonce and stay within 5 minutes of the server clock, and its JSON body must stay under 65536 bytes. A body over that cap is refused with 413 before parsing. Re-posting the same `idempotencyKey` returns the stored response instead of re-executing, so a client retry cannot double-spend."
+  description: "Mimir runs on Stellar Testnet (CAIP-2 `stellar:testnet`). Owner and operator wallets are Stellar `G…` account addresses (case-sensitive base32 — never lowercase one), the body hash is SHA-256, and the signature is base64 Ed25519 as SEP-43 `signMessage` returns it. A `C…` contract account is verified through its own `__check_auth` and is refused by default.\n\nTwo credentials, not interchangeable. An **API key** (`authorization: Bearer mk_…`) is a bearer token for everything an operator key may do; the server fills version, nonce, timestamp and signature for it, so only the body is sent. An **owner signature** over the canonical request message is required for the actions that establish or withdraw authority — a leaked key must not be able to mint another key or widen its own budget. Which is which per action is in `x-mimir-actions.<action>.credential`, generated from `lib/agents/authenticate.ts`.\n\nEvery request must carry a single-use nonce and stay within 5 minutes of the server clock, and its JSON body must stay under 65536 bytes. A body over that cap is refused with 413 before parsing. Re-posting the same `idempotencyKey` returns the stored response instead of re-executing, so a client retry cannot double-spend.\n\nSchema version negotiation is explicit and fail-closed. The envelope `version` field is the negotiated schema version: `v1` is the only version served today. A request whose `version` is missing, malformed, or not in the served set is refused with 400 `unsupported_version` before credential, signature, status, flag, pause, or idempotency gates run, so a caller never sees a downstream error for an envelope the server cannot interpret. The served set is advertised in `x-mimir-envelope-version` and in `x-mimir-versions`; a caller may send `Accept-Version` to request a specific served version, and a mismatch between `Accept-Version` and the envelope `version` is refused with 400 `unsupported_version`. Version negotiation never mutates contract state, never spends, and never widens authority: a newer version is only served once its semantics are enforced by the same modules that enforce `v1`."
   contact:
     name: Mimir
     url: "https://mimir.example"
   x-mimir-generated-by: "npm run check:openapi -- --write"
   x-mimir-envelope-version: v1
+  x-mimir-versions:
+    served:
+      - v1
+    default: v1
+    negotiation: "Envelope `version` selects the schema; `Accept-Version` may pin it. Unknown or mismatched versions are refused with 400 unsupported_version before any other gate."
 servers:
   - url: "https://mimir.example"
     description: "Placeholder, not a deployment. Substitute your own host; the audit then reports SERVER_URL_NOT_PLACEHOLDER as a warning."
@@ -30,7 +35,7 @@ paths:
     post:
       operationId: agentAction
       summary: "Submit a signed, idempotent BYOA action"
-      description: "The action in the body must equal the `{action}` path segment; a mismatch is 400.\n\nOrder of the gates, because it decides which error a caller sees: unknown action (404) → payload cap (413) → malformed JSON (400) → credential (401/403) → signature (401) → agent status (403) → funded feature flag (403) → incident pause (403) → idempotent replay (stored response) → nonce replay (401 nonce_reused)."
+      description: "The action in the body must equal the `{action}` path segment; a mismatch is 400.\n\nOrder of the gates, because it decides which error a caller sees: unknown action (404) → payload cap (413) → malformed JSON (400) → schema version negotiation (400 unsupported_version) → credential (401/403) → signature (401) → agent status (403) → funded feature flag (403) → incident pause (403) → idempotent replay (stored response) → nonce replay (401 nonce_reused).\n\nVersion negotiation runs before credential and signature checks so an uninterpretable envelope is never partially authenticated. It is pure: it reads the envelope `version` and the optional `Accept-Version` header, compares them against the served set, and either continues or fails closed. It never reads or writes contract state, never touches the read-index, and never spends."
       parameters:
         - name: action
           in: path
@@ -63,6 +68,14 @@ paths:
           description: "Bearer API key, `Authorization: Bearer mk_test_EXAMPL…`. Absent means the request must carry a signature. Present-but-unknown is 401, not a fall-through to signature checking."
           schema:
             type: string
+        - name: Accept-Version
+          in: header
+          required: false
+          description: "Optional schema version pin. When present it must equal the envelope `version` and be in the served set; otherwise the request is refused with 400 unsupported_version. Absent means the envelope `version` alone selects the schema."
+          schema:
+            type: string
+            enum:
+              - v1
       requestBody:
         required: true
         content:
@@ -188,6 +201,42 @@ paths:
                   signedAt: 1755199640000
                   body: {}
                   signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+              rejectedUnknownVersion:
+                summary: "Envelope `version: v2` is not in the served set. Refused before credential, signature, status, flag, pause, or idempotency gates run."
+                x-mimir-expected-rejection: unsupported version
+                value:
+                  version: v2
+                  agentId: mimir-example-agent
+                  action: heartbeat
+                  idempotencyKey: example-unknown-version-0001
+                  nonce: example-nonce-unknown-version
+                  signedAt: 1755200000000
+                  body: {}
+                  signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+              rejectedMissingVersion:
+                summary: "Envelope with no `version` field. Fail-closed: refused with 400 unsupported_version rather than defaulting silently."
+                x-mimir-expected-rejection: unsupported version
+                value:
+                  agentId: mimir-example-agent
+                  action: heartbeat
+                  idempotencyKey: example-missing-version-0001
+                  nonce: example-nonce-missing-version
+                  signedAt: 1755200000000
+                  body: {}
+                  signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+              rejectedAcceptVersionMismatch:
+                summary: "`Accept-Version: v1` with an envelope that pins a different served version. Refused with 400 unsupported_version."
+                x-mimir-credential: "Accept-Version: v1"
+                x-mimir-expected-rejection: unsupported version
+                value:
+                  version: v2
+                  agentId: mimir-example-agent
+                  action: heartbeat
+                  idempotencyKey: example-accept-mismatch-0001
+                  nonce: example-nonce-accept-mismatch
+                  signedAt: 1755200000000
+                  body: {}
+                  signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
       responses:
         "200":
           description: "Accepted, simulated, or the stored response for a repeated idempotency key."
@@ -302,7 +351,7 @@ paths:
                       message: signature rejected
                       retryable: false
                 unsupported_version:
-                  summary: "Not retryable: repeating the identical request cannot succeed. A fresh nonce and timestamp will not help either."
+                  summary: "Not retryable: repeating the identical request cannot succeed. A fresh nonce and timestamp will not help either. Emitted for a missing, malformed, or unserved envelope `version`, or for an `Accept-Version` that disagrees with it."
                   x-mimir-error-code: unsupported_version
                   value:
                     error:
@@ -774,3 +823,9 @@ x-mimir-rollout:
     vote:
       capability: stake
       env: MIMIR_PAUSE_STAKE
+  schemaVersions:
+    served:
+      - v1
+    default: v1
+    env: MIMIR_AGENT_API_VERSIONS
+    note: "Comma-separated served set. Removing a version is a breaking change for callers that pin it; add a new version before removing an old one. Negotiation is pure and fail-closed: an unserved, missing, or malformed envelope `version`, or an `Accept-Version` that disagrees with it, is refused with 400 unsupported_version before any credential, signature, status, flag, pause, or idempotency gate runs. Rollback is to restore the previous served set; no contract state, read-index, or money movement is affected."

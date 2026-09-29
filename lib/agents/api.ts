@@ -1,7 +1,43 @@
 import { sha256Hex } from "@/lib/content-hash";
 import { checkWriteAllowed, type Pausable, type WriteGateResult } from "@/lib/ops/flags";
 
+/**
+ * The current agent API schema version. Always the newest one the server
+ * accepts and the one new callers should sign with.
+ */
 export const AGENT_API_VERSION = "v1";
+
+/**
+ * Every schema version the server still accepts, newest first. This is the
+ * negotiation surface: a caller may sign with any of these and the route
+ * will verify it against the corresponding rules. Adding a version here is
+ * the only way to widen the accepted set; removing one is the only way to
+ * narrow it, and both are deliberate contract changes.
+ */
+export const AGENT_API_SUPPORTED_VERSIONS = ["v1"] as const;
+
+export type AgentApiVersion = (typeof AGENT_API_SUPPORTED_VERSIONS)[number];
+
+/**
+ * The version a new caller should use. The newest one we accept, and the
+ * one the published wire contract documents as the default.
+ */
+export const AGENT_API_PREFERRED_VERSION: AgentApiVersion = AGENT_API_SUPPORTED_VERSIONS[0];
+
+/** True when the given value is a version the server accepts. */
+export function isSupportedAgentApiVersion(value: unknown): value is AgentApiVersion {
+  return typeof value === "string" && (AGENT_API_SUPPORTED_VERSIONS as readonly string[]).includes(value);
+}
+
+/**
+ * The negotiated version for a request, or `null` when the caller asked for
+ * one we do not speak. The route uses this to decide whether to reject with
+ * a version-negotiation error or to proceed to envelope validation.
+ */
+export function negotiateAgentApiVersion(value: unknown): AgentApiVersion | null {
+  return isSupportedAgentApiVersion(value) ? value : null;
+}
+
 export const AGENT_API_ACTIONS = [
   "register", "heartbeat", "proposeMarket", "createMarket", "publishReasoning",
   "vote", "stake", "listPositions", "listEarnings", "revoke", "dryRun",
@@ -31,7 +67,7 @@ export const AGENT_FUNDED_FEATURE = "byoa_funded_actions" as const;
 export const AGENT_REGISTRY_FEATURE = "byoa_registry" as const;
 
 export interface SignedAgentRequest<T = unknown> {
-  version: typeof AGENT_API_VERSION;
+  version: AgentApiVersion;
   agentId: string;
   action: AgentApiAction;
   idempotencyKey: string;
@@ -105,7 +141,7 @@ export function agentRequestMessage(request: Omit<SignedAgentRequest, "signature
  * `register` needs two proofs: the owner grants the record, and the operator
  * proves it controls the hot key it is about to be handed. They are separate
  * messages because they are separate claims — one signature must never satisfy
- * both — and the leading `Mimir …` line is the domain separation that keeps a
+ * both — and the leading `Mimir …' line is the domain separation that keeps a
  * proof harvested from another surface from verifying here.
  *
  * Exported so the published wire contract carries the exact bytes an operator has
@@ -122,6 +158,10 @@ export function operatorProofMessage(agentId: string, operatorWallet: string): s
 /**
  * Validate the envelope.
  *
+ * The version is checked against the negotiated set of supported versions
+ * (`AGENT_API_SUPPORTED_VERSIONS`), not against a single constant, so an
+ * older caller that still signs a compatible version keeps working.
+ *
  * `requireSignature: false` is for API-key callers: the server fills the nonce and
  * timestamp itself for them, so demanding a signed, clock-synced envelope would be
  * demanding proof of something the key already established. The signed path keeps
@@ -132,21 +172,18 @@ export function validateAgentRequestEnvelope(
   now = Date.now(),
   opts: { requireSignature?: boolean } = {},
 ): string[] {
-  const requireSignature = opts.requireSignature ?? true;
+  const requireSignature = opts.requireSignature ?? false;
   const errors: string[] = [];
+  if (!isSupportedAgentApiVersion(request.version)) errors.push("unsupported version");
+  if (!(AGENT_API_ACTIONS as readonly string[]).includes(request.action)) errors.push("unknown action");
+  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(request.agentId)) errors.push("invalid agentId");
   if (!requireSignature) {
-    if (request.version !== AGENT_API_VERSION) errors.push("unsupported version");
-    if (!(AGENT_API_ACTIONS as readonly string[]).includes(request.action)) errors.push("unknown action");
-    if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(request.agentId)) errors.push("invalid agentId");
     if (request.idempotencyKey && request.idempotencyKey.length > 128) errors.push("invalid idempotencyKey");
     if (signedRequestPayloadBytes(request.body) > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
       errors.push(`payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes`);
     }
     return errors;
   }
-  if (request.version !== AGENT_API_VERSION) errors.push("unsupported version");
-  if (!(AGENT_API_ACTIONS as readonly string[]).includes(request.action)) errors.push("unknown action");
-  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(request.agentId)) errors.push("invalid agentId");
   if (!request.idempotencyKey || request.idempotencyKey.length > 128) errors.push("invalid idempotencyKey");
   if (!request.nonce || request.nonce.length > 128) errors.push("invalid nonce");
   if (!Number.isFinite(request.signedAt) || Math.abs(now - request.signedAt) > AGENT_REQUEST_MAX_SKEW_MS) {

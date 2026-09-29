@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { verifyAgentSignature } from "@/lib/agents/signature";
 import { isStellarAccount } from "@/lib/stellar-message";
 import { getUserVSDirect } from "@/lib/contract";
@@ -13,6 +14,7 @@ import { publishReasoning } from "@/lib/reasoning/publish";
 import {
   AGENT_ACTION_PAUSE, AGENT_API_ACTIONS, AGENT_API_VERSION, AGENT_FUNDED_ACTIONS, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
   agentRequestMessage, operatorProofMessage, validateAgentRequestEnvelope,
+  AGENT_API_SUPPORTED_VERSIONS, negotiateAgentApiVersion, agentApiVersionHeaders,
   type AgentApiAction, type SignedAgentRequest,
 } from "@/lib/agents/api";
 import { authenticateAgentRequest, requiresOwnerSignature } from "@/lib/agents/authenticate";
@@ -67,6 +69,44 @@ function normalizeWallet(value: string): string {
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
+}
+
+/**
+ * Emit a response with negotiated schema-version headers attached.
+ *
+ * Every agent API reply carries `x-mimir-agent-api-version` (the version the
+ * server actually served) and `x-mimir-agent-api-supported` (the full set the
+ * server can speak). A caller pinned to an older schema reads the first header
+ * to confirm the server honoured its request; a caller that sent no version
+ * reads the second to discover what is available. `vary: x-mimir-agent-api-version`
+ * keeps any intermediary from serving a version-mismatched cached body.
+ */
+function jsonVersioned(
+  body: unknown,
+  status: number,
+  negotiated: { version: string; supported: readonly string[] },
+): Response {
+  return Response.json(body, {
+    status,
+    headers: {
+      "cache-control": "no-store",
+      ...agentApiVersionHeaders(negotiated),
+    },
+  });
+}
+
+/**
+ * Stable digest of the request body used for idempotency-key collision detection.
+ *
+ * Two requests that share an idempotency key but carry different bodies are not
+ * retries — they are a client bug or an attempt to smuggle a second effect under
+ * a key that already produced a response. We fingerprint the canonical JSON of
+ * the body so a mismatch can be rejected instead of silently replaying the first
+ * result. `createHash` over the raw string is sufficient: the caller already
+ * parsed the body, so we hash what we saw.
+ */
+function bodyFingerprint(body: unknown): string {
+  return createHash("sha256").update(JSON.stringify(body ?? null)).digest("hex");
 }
 
 /** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
@@ -144,7 +184,20 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   // Safe client retries: same idempotency key returns the prior accepted body.
   if (request.idempotencyKey) {
     const prior = await loadIdempotentResponse(request.agentId, "register", request.idempotencyKey);
-    if (prior) return json(prior.body, prior.status);
+    if (prior) {
+      // A retry must carry the same body. A different body under the same key is
+      // a collision, not a retry, and replaying the first response would hide it.
+      const priorFingerprint = (prior as { fingerprint?: string }).fingerprint;
+      if (priorFingerprint && priorFingerprint !== bodyFingerprint(body)) {
+        return json({
+          error: {
+            message: "idempotency key reused with a different body",
+            detail: "use a fresh idempotency key for a different request",
+          },
+        }, 409);
+      }
+      return json(prior.body, prior.status);
+    }
   }
 
   const payoutWallet = isWalletAddress(normalizeWallet(String(body.payoutWallet ?? "")))
@@ -161,7 +214,7 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
     if (replay.ok) {
       const payload = { agent: existing };
       if (request.idempotencyKey) {
-        await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200);
+        await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200, bodyFingerprint(body));
       }
       await audit(request, "registered_idempotent");
       return json(payload);
@@ -209,7 +262,7 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   await saveAgent(agent);
   const payload = { agent };
   if (request.idempotencyKey) {
-    await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200);
+    await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200, bodyFingerprint(body));
   }
   await audit(request, "registered");
   return json(payload);
@@ -227,6 +280,32 @@ async function handleAgentApiPost(
   const { action: rawAction } = await context.params;
   if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action" } }, 404);
   const action = rawAction as AgentApiAction;
+
+  // ── Schema version negotiation ────────────────────────────────────────────
+  // The caller declares the schema it speaks via `x-mimir-agent-api-version`
+  // (or `?version=`). We answer with the version we actually served, or 400 if
+  // the caller demands one we cannot speak — fail closed rather than silently
+  // downgrading a caller that relies on newer fields. Absent header means the
+  // caller accepts the current version, which preserves existing callers.
+  const requestedVersion =
+    req.headers.get("x-mimir-agent-api-version") ??
+    new URL(req.url).searchParams.get("version") ??
+    undefined;
+  const negotiation = negotiateAgentApiVersion(requestedVersion);
+  if (!negotiation.ok) {
+    return jsonVersioned(
+      {
+        error: {
+          message: negotiation.error,
+          supported: AGENT_API_SUPPORTED_VERSIONS,
+        },
+      },
+      400,
+      { version: AGENT_API_VERSION, supported: AGENT_API_SUPPORTED_VERSIONS },
+    );
+  }
+  const negotiated = { version: negotiation.version, supported: AGENT_API_SUPPORTED_VERSIONS };
+
   // Cap before parse: Content-Length is a cheap fail-closed gate; the body byte
   // check below still applies when the header is absent or wrong.
   const declared = Number(req.headers.get("content-length") ?? NaN);
@@ -262,7 +341,7 @@ async function handleAgentApiPost(
   if (viaApiKey && auth.auth?.kind === "api_key") {
     request = {
       ...request,
-      version: AGENT_API_VERSION,
+      version: negotiation.version,
       action,
       agentId: auth.auth.agentId,
       idempotencyKey: request.idempotencyKey || randomUUID(),
@@ -575,7 +654,7 @@ async function handleAgentApiPost(
   }
   await audit(request, "accepted");
   await saveIdempotentResponse(agent.agentId, action, request.idempotencyKey, result);
-  return json(result);
+  return jsonVersioned(result, 200, negotiated);
 }
 
 // Traced: this is the API an autonomous agent calls, and the failure it gets back

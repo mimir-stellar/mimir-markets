@@ -18,6 +18,10 @@
  *    dropping a field is how a caller believes it set a cap that never applied.
  *  - **Every response carries its version**, so a cached body can be identified
  *    later rather than guessed at from its keys.
+ *  - **Negotiation is explicit and bounded.** A client may advertise the range
+ *    of versions it understands; the server picks the highest mutually supported
+ *    version, or refuses. There is no silent downgrade to a version the client
+ *    did not offer.
  */
 
 export const API_SCHEMA_VERSION = 1;
@@ -25,12 +29,23 @@ export const API_SCHEMA_VERSION = 1;
 /** Header a client uses to state the schema version it speaks. */
 export const SCHEMA_VERSION_HEADER = "x-mimir-schema-version";
 
+/** Header a client uses to advertise the range of versions it supports. */
+export const SCHEMA_VERSION_RANGE_HEADER = "x-mimir-schema-version-range";
+
+/** Versions this server can speak, newest first. */
+export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [API_SCHEMA_VERSION];
+
 export interface VersionVerdict {
   ok: boolean;
   /** The version to apply. Present when ok. */
   version?: number;
   reason?: "unsupported_version" | "version_required" | "malformed_version";
   detail?: string;
+}
+
+export interface NegotiatedVersion extends VersionVerdict {
+  /** Versions the client advertised, when it used the range header. */
+  offered?: readonly number[];
 }
 
 /**
@@ -68,6 +83,79 @@ export function resolveRequestVersion(
     };
   }
   return { ok: true, version };
+}
+
+/**
+ * Parse a version range header of the form `1`, `1-2`, `1,2`, or `1-2,3`.
+ *
+ * Returns the sorted, de-duplicated set of offered versions, or null when the
+ * header is present but malformed. An empty/absent header returns an empty set.
+ */
+export function parseVersionRange(raw: string | null | undefined): number[] | null {
+  const trimmed = (raw ?? "").trim();
+  if (trimmed.length === 0) return [];
+  const offered = new Set<number>();
+  for (const part of trimmed.split(",")) {
+    const token = part.trim();
+    if (token.length === 0) return null;
+    const range = token.split("-");
+    if (range.length === 1) {
+      if (!/^\d+$/.test(range[0])) return null;
+      offered.add(Number(range[0]));
+      continue;
+    }
+    if (range.length !== 2) return null;
+    const [lo, hi] = range;
+    if (!/^\d+$/.test(lo) || !/^\d+$/.test(hi)) return null;
+    const low = Number(lo);
+    const high = Number(hi);
+    if (low > high) return null;
+    if (high - low > 64) return null;
+    for (let v = low; v <= high; v += 1) offered.add(v);
+  }
+  return [...offered].sort((a, b) => a - b);
+}
+
+/**
+ * Negotiate a schema version from the single-version and range headers.
+ *
+ * The single-version header, when present, is authoritative: the client is
+ * pinning an exact version and we honour that or refuse. The range header is
+ * consulted only when the single-version header is absent, and the server picks
+ * the highest mutually supported version. A range that shares no version with
+ * the server is refused rather than silently downgraded.
+ */
+export function negotiateRequestVersion(
+  single: string | null | undefined,
+  range: string | null | undefined,
+  opts: { mutating?: boolean } = {},
+): NegotiatedVersion {
+  const singleTrimmed = (single ?? "").trim();
+  if (singleTrimmed.length > 0) {
+    return resolveRequestVersion(singleTrimmed, opts);
+  }
+  const rangeTrimmed = (range ?? "").trim();
+  if (rangeTrimmed.length === 0) {
+    return resolveRequestVersion(null, opts);
+  }
+  const offered = parseVersionRange(rangeTrimmed);
+  if (offered === null) {
+    return { ok: false, reason: "malformed_version", detail: rangeTrimmed };
+  }
+  if (offered.length === 0) {
+    return resolveRequestVersion(null, opts);
+  }
+  const mutual = SUPPORTED_SCHEMA_VERSIONS.filter((v) => offered.includes(v));
+  if (mutual.length === 0) {
+    return {
+      ok: false,
+      reason: "unsupported_version",
+      detail: `server speaks ${SUPPORTED_SCHEMA_VERSIONS.join(",")}, client offered ${offered.join(",")}`,
+      offered,
+    };
+  }
+  const version = mutual[0];
+  return { ok: true, version, offered };
 }
 
 // ── Minimal shape checking ────────────────────────────────────────────────────
@@ -170,4 +258,12 @@ export function versioned<T>(data: T): VersionedResponse<T> {
 /** Header set on every response, so a cached body can be identified later. */
 export function schemaVersionHeaders(): Record<string, string> {
   return { [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION) };
+}
+
+/** Headers advertising the versions this server can speak, for negotiation. */
+export function schemaVersionNegotiationHeaders(): Record<string, string> {
+  return {
+    [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION),
+    [SCHEMA_VERSION_RANGE_HEADER]: SUPPORTED_SCHEMA_VERSIONS.join(","),
+  };
 }
