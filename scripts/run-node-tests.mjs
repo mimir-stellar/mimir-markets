@@ -18,7 +18,7 @@ if (files.length === 0) {
 const result = spawnSync(
   process.execPath,
   ["--import", "tsx", "--test", ...files],
-  { cwd: root, env: process.env, stdio: "inherit" },
+  { cwd: root, env: { ...process.env, TZ: process.env.TZ || "UTC" }, stdio: "inherit" },
 );
 
 if (result.error) throw result.error;
