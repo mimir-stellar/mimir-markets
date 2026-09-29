@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/navigation";
@@ -15,6 +15,7 @@ import {
 import {
   DASHBOARD_EXPOSURE_LOAD_MORE,
   DASHBOARD_EXPOSURE_PAGE_SIZE,
+  DASHBOARD_EXPOSURE_PAGE_SIZES,
   summarizeDashboardFilteredExposure,
   type DashboardFilteredExposureSummary,
 } from "@/lib/dashboardUiPolicy";
@@ -132,6 +133,45 @@ function holdingMatchesDashboardSearch(
     t("holdings.poolPill.closed"),
   ];
   return parts.some((p) => p.toLowerCase().includes(q));
+}
+
+/**
+ * Paginated slice of the filtered VS list. Keeps the pagination math in one
+ * place so the column can render page controls without duplicating bounds
+ * logic. Returns the clamped page, the slice, and derived flags.
+ */
+function paginateVsList(
+  list: VSData[],
+  page: number,
+  pageSize: number
+): {
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  slice: VSData[];
+  hasPrev: boolean;
+  hasNext: boolean;
+  rangeStart: number;
+  rangeEnd: number;
+  total: number;
+} {
+  const total = list.length;
+  const safePageSize = pageSize > 0 ? pageSize : DASHBOARD_EXPOSURE_PAGE_SIZE;
+  const pageCount = total > 0 ? Math.ceil(total / safePageSize) : 1;
+  const safePage = Math.min(Math.max(1, page), pageCount);
+  const startIdx = (safePage - 1) * safePageSize;
+  const endIdx = Math.min(startIdx + safePageSize, total);
+  return {
+    page: safePage,
+    pageCount,
+    pageSize: safePageSize,
+    slice: list.slice(startIdx, endIdx),
+    hasPrev: safePage > 1,
+    hasNext: safePage < pageCount,
+    rangeStart: total === 0 ? 0 : startIdx + 1,
+    rangeEnd: endIdx,
+    total,
+  };
 }
 
 /** Mismo trazo que `public/icons/verify.svg`, con `currentColor` para `text-pv-emerald`. */
@@ -870,18 +910,56 @@ function StakeHoldingsColumn({
 
   const isInitialExposureLoad = exposureLoading && totalDuelsCount === 0;
 
-  const [visibleVsCount, setVisibleVsCount] = useState(DASHBOARD_EXPOSURE_PAGE_SIZE);
+  const [vsPage, setVsPage] = useState(1);
+  const [vsPageSize, setVsPageSize] = useState(DASHBOARD_EXPOSURE_PAGE_SIZE);
+  const listTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    setVisibleVsCount(DASHBOARD_EXPOSURE_PAGE_SIZE);
+    setVsPage(1);
+    setVsPageSize(DASHBOARD_EXPOSURE_PAGE_SIZE);
   }, [exposureFilterKey]);
 
-  const visibleVsSlice = useMemo(
-    () => filteredVsList.slice(0, visibleVsCount),
-    [filteredVsList, visibleVsCount]
+  const pagination = useMemo(
+    () => paginateVsList(filteredVsList, vsPage, vsPageSize),
+    [filteredVsList, vsPage, vsPageSize]
   );
 
-  const hasMoreVs = filteredVsList.length > visibleVsCount;
+  const visibleVsSlice = pagination.slice;
+
+  // If the current page falls out of range (e.g. filter shrinks the list),
+  // clamp back to the last valid page without remounting the list.
+  useEffect(() => {
+    if (pagination.page !== vsPage) {
+      setVsPage(pagination.page);
+    }
+  }, [pagination.page, vsPage]);
+
+  const scrollListTop = useCallback(() => {
+    const node = listTopRef.current;
+    if (!node) return;
+    if (typeof node.scrollIntoView === "function") {
+      node.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+  }, []);
+
+  const goToPrevPage = useCallback(() => {
+    setVsPage((p) => Math.max(1, p - 1));
+    scrollListTop();
+  }, [scrollListTop]);
+
+  const goToNextPage = useCallback(() => {
+    setVsPage((p) => Math.min(pagination.pageCount, p + 1));
+    scrollListTop();
+  }, [pagination.pageCount, scrollListTop]);
+
+  const changePageSize = useCallback(
+    (next: number) => {
+      setVsPageSize(next);
+      setVsPage(1);
+      scrollListTop();
+    },
+    [scrollListTop]
+  );
 
   const exposureSummary = useMemo(
     () => summarizeDashboardFilteredExposure(filteredVsList, viewerAddress),
@@ -931,27 +1009,8 @@ function StakeHoldingsColumn({
   const showMocksBlock =
     !isInitialExposureLoad && showStakeHoldingsMocks && !mockSearchEmpty;
 
-  const pagingSummary =
-    !isInitialExposureLoad && filteredVsList.length > 0 ? (
-      visibleVsSlice.length < filteredVsList.length ? (
-        <p
-          className="mb-1 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-pv-muted sm:text-[11px]"
-          aria-live="polite"
-        >
-          {t("holdings.exposurePagingPartial", {
-            visible: visibleVsSlice.length,
-            total: filteredVsList.length,
-          })}
-        </p>
-      ) : (
-        <p
-          className="mb-1 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-pv-muted sm:text-[11px]"
-          aria-live="polite"
-        >
-          {t("holdings.exposurePagingAll", { total: filteredVsList.length })}
-        </p>
-      )
-    ) : null;
+  const showPagination =
+    !isInitialExposureLoad && filteredVsList.length > 0;
 
   return (
     <section
@@ -967,7 +1026,6 @@ function StakeHoldingsColumn({
           {headerExtra}
         </div>
       ) : null}
-      {pagingSummary}
       <div
         className={`flex flex-col gap-3 sm:gap-4 ${exposureRefreshing && totalDuelsCount > 0 ? "opacity-60 transition-opacity duration-200" : ""}`}
         aria-busy={exposureRefreshing && totalDuelsCount > 0}
@@ -1050,23 +1108,6 @@ function StakeHoldingsColumn({
             })
           : null}
 
-        {!isInitialExposureLoad && hasMoreVs ? (
-          <button
-            type="button"
-            onClick={() =>
-              setVisibleVsCount((c) =>
-                Math.min(
-                  c + DASHBOARD_EXPOSURE_LOAD_MORE,
-                  filteredVsList.length
-                )
-              )
-            }
-            className={`focus-ring mx-auto mt-1 flex min-h-[44px] w-full max-w-md items-center justify-center ${DASHBOARD_SURFACE_MUTED} px-4 py-2.5 font-display text-[10px] font-bold uppercase tracking-[0.18em] text-pv-muted transition-colors hover:border-pv-emerald/30 hover:bg-pv-emerald/[0.08] hover:text-pv-emerald sm:text-[11px]`}
-          >
-            {t("holdings.loadMore")}
-          </button>
-        ) : null}
-
         {!isInitialExposureLoad && mockSearchEmpty && !mockOnlySearchEmpty ? (
           <p
             className={`${DASHBOARD_SURFACE_DASHED} px-4 py-6 text-center font-mono text-xs text-pv-muted sm:text-sm`}
@@ -1089,6 +1130,70 @@ function StakeHoldingsColumn({
             ))
           : null}
       </div>
+
+      {showPagination ? (
+        <nav
+          ref={listTopRef}
+          aria-label={t("holdings.paginationAria")}
+          className={`mt-4 flex flex-col gap-3 ${DASHBOARD_SURFACE_MUTED} px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-4`}
+        >
+          <p
+            className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-pv-muted sm:text-[11px]"
+            aria-live="polite"
+          >
+            {t("holdings.paginationRange", {
+              from: pagination.rangeStart,
+              to: pagination.rangeEnd,
+              total: pagination.total,
+            })}
+          </p>
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <label className="flex items-center gap-2 font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-pv-muted sm:text-[11px]">
+              <span>{t("holdings.paginationPageSizeLabel")}</span>
+              <select
+                value={pagination.pageSize}
+                onChange={(e) => changePageSize(Number(e.target.value))}
+                className="focus-ring rounded border border-pv-ink/[0.12] bg-pv-ink/[0.04] px-2 py-1 font-mono text-[10px] font-semibold tabular-nums text-pv-text sm:text-[11px]"
+              >
+                {DASHBOARD_EXPOSURE_PAGE_SIZES.map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={goToPrevPage}
+                disabled={!pagination.hasPrev}
+                aria-label={t("holdings.paginationPrevAria")}
+                className="focus-ring inline-flex min-h-[36px] items-center justify-center rounded border border-pv-ink/[0.12] bg-pv-ink/[0.04] px-3 py-1.5 font-display text-[10px] font-bold uppercase tracking-[0.16em] text-pv-text transition-colors hover:border-pv-emerald/35 hover:bg-pv-emerald/[0.08] hover:text-pv-emerald disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-pv-ink/[0.12] disabled:hover:bg-pv-ink/[0.04] disabled:hover:text-pv-text sm:text-[11px]"
+              >
+                {t("holdings.paginationPrev")}
+              </button>
+              <span
+                className="font-mono text-[10px] font-semibold tabular-nums text-pv-text sm:text-[11px]"
+                aria-live="polite"
+              >
+                {t("holdings.paginationPageOf", {
+                  page: pagination.page,
+                  total: pagination.pageCount,
+                })}
+              </span>
+              <button
+                type="button"
+                onClick={goToNextPage}
+                disabled={!pagination.hasNext}
+                aria-label={t("holdings.paginationNextAria")}
+                className="focus-ring inline-flex min-h-[36px] items-center justify-center rounded border border-pv-ink/[0.12] bg-pv-ink/[0.04] px-3 py-1.5 font-display text-[10px] font-bold uppercase tracking-[0.16em] text-pv-text transition-colors hover:border-pv-emerald/35 hover:bg-pv-emerald/[0.08] hover:text-pv-emerald disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-pv-ink/[0.12] disabled:hover:bg-pv-ink/[0.04] disabled:hover:text-pv-text sm:text-[11px]"
+              >
+                {t("holdings.paginationNext")}
+              </button>
+            </div>
+          </div>
+        </nav>
+      ) : null}
     </section>
   );
 }

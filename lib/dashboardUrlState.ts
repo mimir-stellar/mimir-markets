@@ -1,1 +1,92 @@
-aW1wb3J0IHsgQ0FURUdPUklFUyB9IGZyb20gIkAvbGliL2NvbnN0YW50cyI7CmltcG9ydCB7CiAgbm9ybWFsaXplRXhwbG9yZU1pblN0YWtlLAogIHBhcnNlRXhwbG9yZVNlYXJjaFBhcmFtcywKfSBmcm9tICJAL2xpYi9leHBsb3JlRmlsdGVycyI7Cgpjb25zdCBWQUxJRF9DQVRFR09SWV9JRFMgPSBuZXcgU2V0PHN0cmluZz4oCiAgQ0FURUdPUklFUy5tYXAoKGMpID0+IGMuaWQgYXMgc3RyaW5nKQopOwoKZXhwb3J0IHR5cGUgRGFzaGJvYXJkVXJsVGFiID0gImFsbCIgfCAiYWN0aXZlIiB8ICJkb25lIjsKCi eightKICogRXN0YWRvIGRlIGZpbHRyb3MgZGVsIGRhc2hib2FyZCBlbiBxdWVyeSAoYHRhYmAsIGBjYXRgLCBgbWluYCwgYHFgLCBgcGFnZWApLgogKiBPcmRlbiBkZSBsaXN0YSB5IGZpbHRyb3MgcsOhcGlkb3MgdGlwbyBFeHBsb3JlIG5vIGZvcm1hbiBwYXJ0ZSBkZWwgcHJvZHVjdG8gZGFzaGJvYXJkLgogKi8KZXhwb3J0IHR5cGUgRGFzaGJvYXJkRmlsdGVyVXJsU3RhdGUgPSB7CiAgdGFiOiBEYXNoYm9hcmRVcmxUYWI7CiAgY2F0OiBzdHJpbmc7CiAgbWluU3Rha2U6IG51bWJlcjsKICBzZWFyY2g6IHN0cmluZzsKICAvKiogUMOhZ2luYSBhY3RpdmEgKDEtYmFzZWQpIGRlIGxhIGxpc3RhIGRlIGV4cG9zaWNpw7NuLiAqLwogIHBhZ2U6IG51bWJlcjsKfTsKCmV4cG9ydCBjb25zdCBEQVNIQk9BUkRfTUlOX1BBR0UgPSAxOwpleHBvcnQgY29uc3QgREFTSEJPQVJEX01BWF9QQUdFID0gMTAwMDsKCmV4cG9ydCBjb25zdCBERUZBVUxUX0RBU0hCT0FSRF9GSUxURVJfVVJMX1NUQVRFOiBEYXNoYm9hcmRGaWx0ZXJVcmxTdGF0ZSA9IHsKICB0YWI6ICJhbGwiLAogIGNhdDogImFsbCIsCiAgbWluU3Rha2U6IDAsCiAgc2VhcmNoOiAiIiwKICBwYWdlOiBEQVNIQk9BUkRfTUlOX1BBR0UsCn07CgpmdW5jdGlvbiBwYXJzZURhc2hib2FyZENhdGVnb3J5KHJhdzogc3RyaW5nIHwgbnVsbCk6IHN0cmluZyB7CiAgY29uc3QgdiA9IChyYXcgPz8gImFsbCIpLnRyaW0oKS50b0xvd2VyQ2FzZSgpOwogIGlmICh2ID09PSAiYWxsIikgcmV0dXJuICJhbGwiOwogIGlmICh2ID09PSAiY2xpbWEiKSByZXR1cm4gImNsaW1hIjsKICBpZiAoVkFMSURfQ0FURUdPUllfSURTLmhhcyh2KSkgcmV0dXJuIHY7CiAgcmV0dXJuICJhbGwiOwp9CgovKiogTm9ybWFsaXphIGVsIHBhcmFtZXRybyBgcGFnZWAgYSBlbnRlcm8gPj0gMSAoZGVmYXVsdCAxKS4gKi8KZXhwb3J0IGZ1bmN0aW9uIG5vcm1hbGl6ZURhc2hib2FyZFBhZ2UocmF3OiBzdHJpbmcgfCBudW1iZXIgfCBudWxsIHwgdW5kZWZpbmVkKTogbnVtYmVyIHsKICBpZiAocmF3ID09PSBudWxsIHx8IHJhdyA9PT0gdW5kZWZpbmVkIHx8IHJhdyA9PT0gIiIpIHJldHVybiBEQVNIQk9BUkRfTUlOX1BBR0U7CiAgY29uc3QgbnVtID0gdHlwZW9mIHJhdyA9PT0gIm51bWJlciIgPyByYXcgOiBOdW1iZXIocmF3KTsKICBpZiAoIU51bWJlci5pc0Zpbml0ZShudW0pKSByZXR1cm4gREFTSEJPQVJEX01JTl9QQUdFOwogIGNvbnN0IGludCA9IE1hdGguZmxvb3IobnVtKTsKICBpZiAoaW50IDwgREFTSEJPQVJEX01JTl9QQUdFKSByZXR1cm4gREFTSEJPQVJEX01JTl9QQUdFOwogIGlmIChpbnQgPiBEQVNIQk9BUkRfTUFYX1BBR0UpIHJldHVybiBEQVNIQk9BUkRfTUFYX1BBR0U7CiAgcmV0dXJuIGludDsKfQoKLyoqCiAqIExlZSBgP3RhYj0mY2F0PSZtaW49JnE9JnBhZ2U9YCBjb24gdmFsaWRhY2nDs24gYWxpbmVhZGEgYSBsYSBiYXJyYSBkZWwgZGFzaGJvYXJkCiAqIChpbmNsLiBjYXRlZ29yw61hIGxlZ2FjeSBgY2xpbWFgIHVzYWRhIGVuIEFkdmFuY2VkKS4KICovCmV4cG9ydCBmdW5jdGlvbiBwYXJzZURhc2hib2FyZFVybFNlYXJjaFBhcmFtcygKICBzcDogVVJMU2VhcmNoUGFyYW1zCik6IERhc2hib2FyZEZpbHRlclVybFN0YXRlIHsKICBjb25zdCBleHBsb3JlID0gcGFyc2VFeHBsb3JlU2VhcmNoUGFyYW1zKHNwKTsKICBjb25zdCB0YWJSYXcgPSAoc3AuZ2V0KCJ0YWIiKSA/PyAiYWxsIikudG9Mb3dlckNhc2UoKTsKICBjb25zdCB0YWI6IERhc2hib2FyZFVybFRhYiA9CiAgICB0YWJSYXcgPT09ICJhY3RpdmUiIHx8IHRhYlJhdyA9PT0gImRvbmUiID8gdGFiUmF3IDogImFsbCI7CgogIHJldHVybiB7CiAgICB0YWIsCiAgICBjYXQ6IHBhcnNlRGFzaGJvYXJkQ2F0ZWdvcnkoc3AuZ2V0KCJjYXQiKSksCiAgICBtaW5TdGFrZTogbm9ybWFsaXplRXhwbG9yZU1pblN0YWtlKGV4cGxvcmUubWluU3Rha2UpLAogICAgc2VhcmNoOiBleHBsb3JlLnNlYXJjaCwKICAgIHBhZ2U6IG5vcm1hbGl6ZURhc2hib2FyZFBhZ2Uoc3AuZ2V0KCJwYWdlIikpLAogIH07Cn0KCi8qKiBTb2xvIGluY2x1eWUgZGVzdmlhY2lvbmVzIHJlc3BlY3RvIGEgZGVmYXVsdHMgKFVSTHMgY29ydGFzKS4gKi8KZXhwb3J0IGZ1bmN0aW9uIHNlcmlhbGl6ZURhc2hib2FyZFVybFN0YXRlKAogIHM6IERhc2hib2FyZEZpbHRlclVybFN0YXRlCik6IHN0cmluZyB7CiAgY29uc3QgcCA9IG5ldyBVUkxTZWFyY2hQYXJhbXMoKTsKICBpZiAocy50YWIgIT09ICJhbGwiKSBwLnNldCgidGFiIiwgcy50YWIpOwogIGlmIChzLmNhdCAhPT0gImFsbCIpIHAuc2V0KCJjYXQiLCBzLmNhdCk7CiAgaWYgKHMubWluU3Rha2UgIT09IDApIHAuc2V0KCJtaW4iLCBTdHJpbmcocy5taW5TdGFrZSkpOwogIGNvbnN0IHEgPSBzLnNlYXJjaC50cmltKCk7CiAgaWYgKHEpIHAuc2V0KCJxIiwgcSk7CiAgaWYgKHMucGFnZSA+IERBU0hCT0FSRF9NSU5fUEFHRSkgcC5zZXQoInBhZ2UiLCBTdHJpbmcocy5wYWdlKSk7CiAgcmV0dXJuIHAudG9TdHJpbmcoKTsKfQo=
+import { CATEGORIES } from "@/lib/constants";
+import {
+  normalizeExploreMinStake,
+  parseExploreSearchParams,
+} from "@/lib/exploreFilters";
+
+const VALID_CATEGORY_IDS = new Set<string>(
+  CATEGORIES.map((c) => c.id as string)
+);
+
+export type DashboardUrlTab = "all" | "active" | "done";
+
+/**
+ * Estado de filtros del dashboard en query (`tab`, `cat`, `min`, `q`, `page`).
+ * Orden de lista y filtros rápidos tipo Explore no forman parte del producto dashboard.
+ */
+export type DashboardFilterUrlState = {
+  tab: DashboardUrlTab;
+  cat: string;
+  minStake: number;
+  search: string;
+  /** Página actual (1-based) de la lista de exposición. */
+  page: number;
+};
+
+export const DEFAULT_DASHBOARD_FILTER_URL_STATE: DashboardFilterUrlState = {
+  tab: "all",
+  cat: "all",
+  minStake: 0,
+  search: "",
+  page: 1,
+};
+
+/** Página máxima aceptada en URL para evitar valores absurdos/de Mon. */
+export const DASHBOARD_MAX_PAGE = 9999;
+
+function parseDashboardCategory(raw: string | null): string {
+  const v = (raw ?? "all").trim().toLowerCase();
+  if (v === "all") return "all";
+  if (v === "clima") return "clima";
+  if (VALID_CATEGORY_IDS.has(v)) return v;
+  return "all";
+}
+
+/**
+ * Normaliza el parámetro `page` de la URL a un entero 1..DASHBOARD_MAX_PAGE.
+ * Valores no válidos (decimales, 0, Negativos, NaN, infinito, texto) caen a 1.
+ */
+export function normalizeDashboardPage(raw: string | null | undefined): number {
+  if (raw == null) return 1;
+  const trimmed = raw.trim();
+  if (!trimmed) return 1;
+  if (!/^\d+$/.test(trimmed)) return 1;
+  const num = Number(trimmed);
+  if (!Number.isSafeInteger(num) || num < 1) return 1;
+  return Math.min(num, DASHTBOARD_MAX_PAGE);
+}
+
+/**
+ * Lee `?tab=&cat=&min=&q=&page=` con validación alineada a la barra del dashboard
+ * (incl. categoría legacy `clima` usada en Advanced).
+ */
+export function parseDashboardUrlSearchParams(
+  sp: URLSearchParams
+): DashboardFilterUrlState {
+  const explore = parseExploreSearchParams(sp);
+  const tabRaw = (sp.get("tab") ?? "all").toLowerCase();
+  const tab: DashboardUrlTab =
+    tabRaw === "active" || tabRaw === "done" ? tabRaw : "all";
+
+  return {
+    tab,
+    cat: parseDashboardCategory(sp.get("cat")),
+    minStake: normalizeExploreMinStake(explore.minStake),
+    search: explore.search,
+    page: normalizeDashboardPage(sp.get("page")),
+  };
+}
+
+/** Solo incluye desviaciones respecto a defaults (URLs cortas). */
+export function serializeDashboardUrlState(
+  s: DashboardFilterUrlState
+): string {
+  const p = new URLSearchParams();
+  if (s.tab !== "all") p.set("tab", s.tab);
+  if (s.cat !== "all") p.set("cat", s.cat);
+  if (s.minStake !== 0) p.set("min", String(s.minStake));
+  const q = s.search.trim();
+  if (q) p.set("q", q);
+  if (s.page > 1) p.set("page", String(s.page));
+  return p.toString();
+}

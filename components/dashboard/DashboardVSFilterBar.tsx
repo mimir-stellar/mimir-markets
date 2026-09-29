@@ -27,6 +27,13 @@ const TAB_ORDER: DashboardVSTab[] = ["all", "active", "done"];
 
 type TabItem = { l: string; v: DashboardVSTab; count: number };
 
+export type DashboardVSPagination = {
+  page: number;
+  pageSize: number;
+  total: number;
+  onPageChange: (page: number) => void;
+};
+
 type DashboardVSFilterBarProps = {
   tab: DashboardVSTab;
   onTabChange: (tab: DashboardVSTab) => void;
@@ -39,8 +46,7 @@ type DashboardVSFilterBarProps = {
   onMinStakeFilterChange: (value: number) => void;
   refreshing?: boolean;
   onRefresh: () => void;
-  page: number;
-  onPageChange: (page: number) => void;
+  pagination?: DashboardVSPagination;
 };
 
 /**
@@ -59,8 +65,7 @@ export default function DashboardVSFilterBar({
   onMinStakeFilterChange,
   refreshing = false,
   onRefresh,
-  page,
-  onPageChange,
+  pagination,
 }: DashboardVSFilterBarProps) {
   const tDash = useTranslations("dashboard");
   const tExplore = useTranslations("explore");
@@ -68,14 +73,7 @@ export default function DashboardVSFilterBar({
   const tCat = useTranslations("categories");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const reduceMotion = useReducedMotion();
-
-  const handlePageChange = useCallback(
-    (next: number) => {
-      if (!Number.isFinite(next) || next < 1) return;
-      onPageChange(Math.floor(next));
-    },
-    [onPageChange],
-  );
+  const tPagination = useTranslations("pagination");
 
   const handleTabListKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Home") {
@@ -88,16 +86,6 @@ export default function DashboardVSFilterBar({
       onTabChange("done");
       return;
     }
-    if (e.key === "PageUp") {
-      e.preventDefault();
-      handlePageChange(page - 1);
-      return;
-    }
-    if (e.key === "PageDown") {
-      e.preventDefault();
-      handlePageChange(page + 1);
-      return;
-    }
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     e.preventDefault();
     const i = TAB_ORDER.indexOf(tab);
@@ -105,6 +93,26 @@ export default function DashboardVSFilterBar({
     const delta = e.key === "ArrowRight" ? 1 : -1;
     onTabChange(TAB_ORDER[(i + delta + TAB_ORDER.length) % TAB_ORDER.length]);
   };
+
+  const totalPages = pagination
+    ? Math.max(1, Math.ceil(pagination.total / Math.max(1, pagination.pageSize)))
+    : 1;
+  const currentPage = pagination
+    ? Math.min(Math.max(1, pagination.page), totalPages)
+    : 1;
+  const hasPrev = currentPage > 1;
+  const hasNext = currentPage < totalPages;
+  const showPagination = Boolean(pagination) && pagination!.total > 0;
+
+  const handlePrev = useCallback(() => {
+    if (!pagination || !hasPrev) return;
+    pagination.onPageChange(currentPage - 1);
+  }, [pagination, hasPrev, currentPage]);
+
+  const handleNext = useCallback(() => {
+    if (!pagination || !hasNext) return;
+    pagination.onPageChange(currentPage + 1);
+  }, [pagination, hasNext, currentPage]);
 
   const advDuration = reduceMotion ? 0 : 0.34;
   const advOpacityDuration = reduceMotion ? 0 : 0.22;
@@ -211,35 +219,42 @@ export default function DashboardVSFilterBar({
         </div>
       </div>
 
-      <nav
-        className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-pv-ink/[0.06] pt-4"
-        aria-label={tDash("paginationAria")}
-      >
-        <button
-          type="button"
-          onClick={() => handlePageChange(page - 1)}
-          disabled={page <= 1}
-          aria-label={tDash("previousPage")}
-          className="flex h-11 min-h-[44px] shrink-0 items-center justify-center gap-2 rounded border border-pv-ink/[0.1] bg-pv-bg px-5 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+      {showPagination ? (
+        <nav
+          aria-label={tPagination("ariaLabel")}
+          className="mt-4 flex flex-col gap-2 border-t border-pv-ink/[0.06] pt-4 sm:flex-row sm:items-center sm:justify-between"
         >
-          {tDash("previousPage")}
-        </button>
-        <span
-          className="font-mono text-xs font-bold tabular-nums text-pv-muted"
-          aria-live="polite"
-          aria-atomic="true"
-        >
-          {tDash("pageIndicator", { page })}
-        </span>
-        <button
-          type="button"
-          onClick={() => handlePageChange(page + 1)}
-          aria-label={tDash("nextPage")}
-          className="flex h-11 min-h-[44px] shrink-0 items-center justify-center gap-2 rounded border border-pv-ink/[0.1] bg-pv-bg px-5 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {tDash("nextPage")}
-        </button>
-      </nav>
+          <p
+            className="font-mono text-[11px] uppercase tracking-[0.18em] text-pv-muted tabular-nums"
+            aria-live="polite"
+          >
+            {tPagination("pageOf", {
+              page: currentPage,
+              total: totalPages,
+            })}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handlePrev}
+              disabled={!hasPrev}
+              aria-label={tPagination("previous")}
+              className="flex h-11 min-h-[44px] items-center justify-center gap-2 rounded border border-pv-ink/[0.1] bg-pv-bg px-4 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50 focus-ring"
+            >
+              {tPagination("previous")}
+            </button>
+            <button
+              type="button"
+              onClick={handleNext}
+              disabled={!hasNext}
+              aria-label={tPagination("next")}
+              className="flex h-11 min-h-[44px] items-center justify-center gap-2 rounded border border-pv-ink/[0.1] bg-pv-bg px-4 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50 focus-ring"
+            >
+              {tPagination("next")}
+            </button>
+          </div>
+        </nav>
+      ) : null}
 
       <motion.div
         initial={false}
@@ -259,6 +274,7 @@ export default function DashboardVSFilterBar({
         }}
         className={`overflow-hidden ${!advancedOpen ? "pointer-events-none" : ""}`}
         aria-hidden={!advancedOpen}
+        inert={!advancedOpen ? "" : undefined}
       >
         <div className="mt-6 border-t border-pv-ink/[0.06] pt-6">
           <div className="grid grid-cols-1 gap-8 sm:grid-cols-2 sm:gap-x-10 sm:gap-y-6 sm:items-start">
