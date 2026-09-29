@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type KeyboardEvent } from "react";
+import { useCallback, useState, type KeyboardEvent } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { useTranslations } from "next-intl";
 import { ListFilter, RefreshCw, Search, X } from "lucide-react";
@@ -39,6 +39,8 @@ type DashboardVSFilterBarProps = {
   onMinStakeFilterChange: (value: number) => void;
   refreshing?: boolean;
   onRefresh: () => void;
+  page: number;
+  onPageChange: (page: number) => void;
 };
 
 /**
@@ -57,6 +59,8 @@ export default function DashboardVSFilterBar({
   onMinStakeFilterChange,
   refreshing = false,
   onRefresh,
+  page,
+  onPageChange,
 }: DashboardVSFilterBarProps) {
   const tDash = useTranslations("dashboard");
   const tExplore = useTranslations("explore");
@@ -64,6 +68,14 @@ export default function DashboardVSFilterBar({
   const tCat = useTranslations("categories");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const reduceMotion = useReducedMotion();
+
+  const handlePageChange = useCallback(
+    (next: number) => {
+      if (!Number.isFinite(next) || next < 1) return;
+      onPageChange(Math.floor(next));
+    },
+    [onPageChange],
+  );
 
   const handleTabListKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Home") {
@@ -74,6 +86,16 @@ export default function DashboardVSFilterBar({
     if (e.key === "End") {
       e.preventDefault();
       onTabChange("done");
+      return;
+    }
+    if (e.key === "PageUp") {
+      e.preventDefault();
+      handlePageChange(page - 1);
+      return;
+    }
+    if (e.key === "PageDown") {
+      e.preventDefault();
+      handlePageChange(page + 1);
       return;
     }
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -188,6 +210,36 @@ export default function DashboardVSFilterBar({
           </button>
         </div>
       </div>
+
+      <nav
+        className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-pv-ink/[0.06] pt-4"
+        aria-label={tDash("paginationAria")}
+      >
+        <button
+          type="button"
+          onClick={() => handlePageChange(page - 1)}
+          disabled={page <= 1}
+          aria-label={tDash("previousPage")}
+          className="flex h-11 min-h-[44px] shrink-0 items-center justify-center gap-2 rounded border border-pv-ink/[0.1] bg-pv-bg px-5 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {tDash("previousPage")}
+        </button>
+        <span
+          className="font-mono text-xs font-bold tabular-nums text-pv-muted"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {tDash("pageIndicator", { page })}
+        </span>
+        <button
+          type="button"
+          onClick={() => handlePageChange(page + 1)}
+          aria-label={tDash("nextPage")}
+          className="flex h-11 min-h-[44px] shrink-0 items-center justify-center gap-2 rounded border border-pv-ink/[0.1] bg-pv-bg px-5 font-display text-[11px] font-bold uppercase tracking-[0.18em] text-pv-text transition-colors hover:border-pv-emerald/30 hover:bg-pv-ink/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {tDash("nextPage")}
+        </button>
+      </nav>
 
       <motion.div
         initial={false}

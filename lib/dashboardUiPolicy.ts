@@ -1,6 +1,6 @@
 import {
   type VSData,
-  getVSUserCommittedStake,
+  getVVSUserCommittedStake,
 } from "@/lib/contract";
 import { isSampleVsIdForXmtp } from "@/lib/xmtp/vs-chat-eligibility";
 
@@ -27,7 +27,7 @@ import { isSampleVsIdForXmtp } from "@/lib/xmtp/vs-chat-eligibility";
  *
  * Dashboard UI — Fase 2 (resultado + descubrimiento desde el dashboard)
  *
- * - Filas **resueltas o canceladas**: indicador de resultado para el viewer (ganó / perdió /
+ * - Filas **resueltas o  canceladas**: indicador de resultado para el viewer (ganó / perdió /
  *   cancelado / liquidado sin veredicto claro en datos) + copy breve en el panel expandido
  *   y CTA al detalle del VS para la explicación completa de liquidación.
  * - **Sin desafíos**: CTAs claros (crear + explorar) además del copy existente.
@@ -40,8 +40,8 @@ import { isSampleVsIdForXmtp } from "@/lib/xmtp/vs-chat-eligibility";
  *   total aproximado de USDC **en riesgo** (solo `open` + `accepted`) para la wallet,
  *   derivado de `getVSUserCommittedStake` (misma noción de apuesta que las filas).
  * - **Filtros sticky** bajo el header fijo al hacer scroll en la columna de exposición.
- * - **Ancla** `#dashboard-exposure` + `scroll-margin` para saltos sin quedar bajo el nav.
- * - **Movimiento reducido**: acordeón de filas y esqueleto respetan `prefers-reduced-motion`.
+ * - **Anicla** `#dashboard-exposure` + `scroll-margin` para saltos sin quedar bajo el nav.
+ * - **Movimiento reducido**: acordeon de filas y esqueleto respetan `prefers-reduced-motion`.
  *
  * Dashboard UI — Fase 4 (compartir estado + accesibilidad de filtros)
  *
@@ -62,13 +62,97 @@ import { isSampleVsIdForXmtp } from "@/lib/xmtp/vs-chat-eligibility";
  */
 
 /** Filas VS mostradas antes del primer “Load more”. */
-export const DASHBOARD_EXPOSURE_PAGE_SIZE = 5;
+export const DASHTBOARD_EXPOSURE_PAGE_SIZE = 5;
 
 /** Filas añadidas en cada “Load more”. */
 export const DASHBOARD_EXPOSURE_LOAD_MORE = 5;
 
 /**
- * Muestra las filas demo de `DASHBOARD_STAKE_HOLDING_IDS` solo cuando no hay
+ * Límite de filas del dashboard para una lista dada.
+ *
+ * El paginado es estable respecto al conjunto filtrado y a la wallet conectada:
+ * - con wallet desconectada o lista vacía se muestran cero filas (sin mocks de exposición);
+ * - con un total menor o igual al tamaño de página se muestra todo el conjunto;
+ * - el número de filas nunca supera el total filtrado ni baja de cero.
+ */
+export function getDashboardExposureVisibleCount(
+  totalFiltered: number,
+  page: number,
+  pageSize: number = DASHTBOARD_EXPOSURE_PAGE_SIZE
+): number {
+  if (!Number.finite(totalFiltered) || totalFiltered <= 0) return 0;
+  if (!Number.finite(pageSize) || pageSize <= 0) return 0;
+  if (!Number.finite(page) || page < 0) return 0;
+  const normalizedTotal = Math.floor(totalFiltered);
+  const normalizedPageSize = Math.floor(pageSize);
+  const normalizedPage = Math.floor(page);
+  const visible = (normalizedPage + 1) * normalizedPageSize;
+  return Math.min(normalizedTotal, visible);
+}
+
+/**
+ * Tipo de estado de paginación para la lista de exposición del dashboard.
+ */
+export type DashboardExposurePaginationState = {
+  /** Término de búsqueda actual (para detectar cambios de filtro). */
+  searchKey: string;
+  /** Cantidad de filas actualmente visibles. */
+  visibleCount: number;
+  /** Total de filas tras aplicar filtros. */
+  totalFiltered: number;
+  /** Hay más filas para cargar. */
+  hasMore: boolean;
+  /** La wallet está conectada y el snapshot es valido. */
+  isValid: boolean;
+};
+
+/**
+ * Deriva el estado de paginación de la lista de exposición desde el conjunto filtrado.
+ *
+ * Contrato de comportamiento:
+ * - wallet desconectada -> `isValid: false`, visibleCount 0, sin filas;
+ * - lista vacía -> `isValid: true`, visibleCount 0, hasMore false;
+ * - cambio de filtro (searchKey distinto), reseta a la primera página;
+ * - número de filas clampeado al total filtrado.
+ */
+export function deriveDashboardExposurePagination(
+  totalFiltered: number,
+  page: number,
+  searchKey: string,
+  previous?: DashboardExposurePaginationState | null,
+  isWalletConnected: boolean = true
+): DashboardExposurePaginationState {
+  if (!isWalletConnected) {
+    return {
+      searchKey,
+      visibleCount: 0,
+      totalFiltered: 0,
+      hasMore: false,
+      isValid: false,
+    };
+  }
+
+  const safeTotal = Number.finite(totalFiltered)
+    ? Math.max(0, Math.floor(totalFiltered))
+    : 0;
+  const sameFilter = previous?.searchKey === searchKey;
+  const effectivePage = sameFilter && Number.finite(page) ? Math.max(0, Math.floor(page)) : 0;
+  const visibleCount = getDashboardExposureVisibleCount(
+    safeTotal,
+    effectivePage
+  );
+
+  return {
+    searchKey,
+    visibleCount,
+    totalFiltered: safeTotal,
+    hasMore: visibleCount < safeTotal,
+    isValid: true,
+  };
+}
+
+/**
+ * Muestra las filas demo de `DASHTBOARD_STAKE_HOLDING_IDS` solo cuando no hay
  * exposición activa “real” (on-chain / no sample) en open o accepted.
  */
 export function shouldShowDashboardStakeHoldingsMocks(duels: VSData[]): boolean {
@@ -90,12 +174,12 @@ export type DashboardFilteredExposureSummary = {
 };
 
 /**
- * Métricas agregadas sobre la misma lista que Active Exposure (post-filtros).
+ * Méricas agregadas sobre la misma lista que Active Exposure (post-filtros).
  */
 export function summarizeDashboardFilteredExposure(
   filtered: VSData[],
   viewerAddress?: string | null
-): DashboardFilteredExposureSummary {
+O): DashboardFilteredExposureSummary {
   let openCount = 0;
   let liveCount = 0;
   let closedCount = 0;

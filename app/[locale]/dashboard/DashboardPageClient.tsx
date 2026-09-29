@@ -48,6 +48,8 @@ const filterPillActive = "border-pv-emerald/50 bg-pv-emerald text-pv-bg";
 
 const listItemEase = [0.25, 0.1, 0.25, 1] as const;
 
+const DASHBOARD_POSITIONS_PAGE_SIZE = 10;
+
 export default function DashboardPageClient() {
   const { address, isConnected, isConnecting, connect } = useWallet();
   const [duels, setDuels] = useState<VSData[]>([]);
@@ -56,6 +58,7 @@ export default function DashboardPageClient() {
   const [snapshotCache, setSnapshotCache] = useState<VSCacheFreshness | null>(
     null
   );
+  const [positionsPage, setPositionsPage] = useState(1);
   const [loadError, setLoadError] = useState<string | null>(null);
   const {
     tab,
@@ -100,6 +103,7 @@ export default function DashboardPageClient() {
         if (requestId === requestIdRef.current) {
           setDuels(mergePendingVS(results.items, address));
           setSnapshotCache(results.cache ?? null);
+          setPositionsPage(1);
           setLoadError(null);
         }
       } catch (e) {
@@ -150,6 +154,26 @@ export default function DashboardPageClient() {
       }),
     [tabFiltered, categoryFilter, minStakeFilter, searchQuery]
   );
+
+  const positionsTotalPages = Math.max(
+    1,
+    Math.ceil(filtered.length / DASHBOARD_POSITIONS_PAGE_SIZE)
+  );
+  const positionsCurrentPage = Math.min(positionsPage, positionsTotalPages);
+  const paginatedPositions = useMemo(() => {
+    const start = (positionsCurrentPage - 1) * DASHBOARD_POSITIONS_PAGE_SIZE;
+    return filtered.slice(start, start + DASHBOARD_POSITIONS_PAGE_SIZE);
+  }, [filtered, positionsCurrentPage]);
+
+  useEffect(() => {
+    if (positionsPage > positionsTotalPages) {
+      setPositionsPage(positionsTotalPages);
+    }
+  }, [positionsPage, positionsTotalPages]);
+
+  useEffect(() => {
+    setPositionsPage(1);
+  }, [exposureFilterKey]);
 
   const exposureFilterKey = useMemo(
     () => `${tab}-${searchQuery}-${categoryFilter}-${minStakeFilter}`,
@@ -420,7 +444,7 @@ export default function DashboardPageClient() {
 
       <AnimatedItem>
         <DashboardPortfolioSection
-          filteredVsList={filtered}
+          filteredVsList={paginatedPositions}
           showStakeHoldingsMocks={showStakeHoldingsMocks}
           exposureFilterKey={exposureFilterKey}
           onResetFilters={resetFilters}
@@ -432,6 +456,7 @@ export default function DashboardPageClient() {
           exposureLoading={loading && duels.length === 0}
           exposureRefreshing={refreshing}
           stakeHoldingsHeaderExtra={
+            <>
             <DashboardVSFilterBar
               tab={tab}
               onTabChange={setTab}
@@ -447,6 +472,42 @@ export default function DashboardPageClient() {
                 void loadDuels({ forceRefresh: true });
               }}
             />
+            {filtered.length > DASHBOARD_POSITIONS_PAGE_SIZE ? (
+              <nav
+                aria-label={t("positionsPaginationAria")}
+                className="mt-4 flex items-center justify-center gap-2"
+              >
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPositionsPage((p) => Math.max(1, p - 1))
+                  }
+                  disabled={positionsCurrentPage <= 1}
+                  className={`${filterPillBase} disabled:cursor-not-allowed disabled:opacity-40`}
+                >
+                  {t("positionsPrevPage")}
+                </button>
+                <span className="font-mono text-xs text-pv-muted">
+                  {t("positionsPageOf", {
+                    page: positionsCurrentPage,
+                    total: positionsTotalPages,
+                  })}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPositionsPage((p) =>
+                      Math.min(positionsTotalPages, p + 1)
+                    )
+                  }
+                  disabled={positionsCurrentPage >= positionsTotalPages}
+                  className={`${filterPillBase} disabled:cursor-not-allowed disabled:opacity-40`}
+                >
+                  {t("positionsNextPage")}
+                </button>
+              </nav>
+            ) : null}
+            </>
           }
         />
       </AnimatedItem>
