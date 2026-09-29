@@ -4,116 +4,26 @@ import { checkWriteAllowed, type Pausable, type WriteGateResult } from "@/lib/op
 export const AGENT_API_VERSION = "v1";
 
 /**
- * Every schema version this server can negotiate, newest last.
+ * Every schema version this server can negotiate, newest first.
  *
- * The wire envelope is versioned by the `version` field. A caller that
- * only knows `v1` must keep working, so `v1` is always present and is the
- * default when the client asks for nothing. New versions are added here
- * and negotiated down to the highest one the client and server both understand.
+ * The active version is the first entry. A new version is added at the
+ * front and the previous one remains accepted for a deprecation window, so a
+ * compatible caller is never broken by a published addition.
  */
-export const AGENT_API_SUPPORTED_VERSIONS = ["v1"] as const;
-export type AgentApiVersion = (typeof AGENT_API_SUPPORTED_VERSIONS)[number];
+export const AGENT_API_VERSIONS = ["v1"] as const;
+export type AgentApiVersion = (typeof AGENT_API_VERSIONS)[number];
 
 /**
- * The version the server will actually serve when the client asks for
- * nothing. Keept as a named constant so the route, the OpenAPI generator and
- * the tests read the same fact.
+ * The version this server prefers and the one new requests should use.
  */
-export const AGENT_API_DEFAULT_VERSION: AgentApiVersion = "v1";
+export const AGENT_API_CURRENT_VERSION: AgentApiVersion = AGENT_API_VERSIONS[0];
 
 /**
- * Header the server sets on every agent API response to tell the caller
- * which schema version the body was produced under. The client never has
- * to guess from the shape of the response.
+ * Versions this server still accepts but will eventually retire. The
+ * deprecation window is explicit so an operator knows which callers to
+ * contact before a version is removed.
  */
-export const AGENT_API_VERSION_HEADER = "x-mimir-agent-api-version";
-
-/**
- * Header a client may send to request a particular schema version. It is
- * the out-of-band negotiation channel: the `version` field inside the
- * signed envelope is part of the signed message, so a client that wants to
- * probe without re-signing can use this header instead. When both are
- * present they must agree, or the request is rejected as ambiguous.
- */
-export const AGENT_API_VERSION_REQUEST_HEADER = "x-mimir-agent-api-version-request";
-
-export interface AgentApiVersionNegotiation {
-  /** The version the response will be produced under. */
-  version: AgentApiVersion;
-  /** True when the client asked for a version and got it. */
-  negotiated: boolean;
-  /** True when the client asked for a newer version than we serve. */
-  downgraded: boolean;
-  /** The version the client asked for, if any. */
-  requested?: string;
-  /** Set when the request cannot be satisfied at all. */
-  error?: string;
-}
-
-function isSupportedVersion(value: unknown): value is AgentApiVersion {
-  return typeof value === "string" && (AGENT_API_SUPPORTED_VERSIONS as readonly string[]).includes(value);
-}
-
-/**
- * Negotiate the schema version for a request.
- *
- * The rules, in order:
- *
- *   1. No requested version at all -> serve the default. This is the
- *      backward-compatible path: a caller that never heard of negotiation
- *      continues to work unchanged.
- *   2. A requested version we support -> serve it exactly.
- *   3. A requested version we do not support -> fail closed. We do not
- *      silently downgrade to a version the client did not ask for, not even
- *      when the requested version is "newer". A money-moving client that
- *      believes it is talking v2 must not be served v1 semantics and have
- *      its own client side assume the v2 contract holds.
- *
- * The `version` field inside the envelope and the request header are
- * both accepted; when both are present they must agree.
- */
-export function negotiateAgentApiVersion(args: {
-  /** The `version` field from the signed envelope, if any. */
-  envelopeVersion?: unknown;
-  /** The value of AGENT_API_VERSION_REQUEST_HEADER, if any. */
-  headerVersion?: string | null;
-} = {}): AgentApiVersionNegotiation {
-  const header = args.headerVersion == null ? undefined : args.headerVersion.trim();
-  const envelope = args.envelopeVersion === undefined || args.envelopeVersion === null
-    ? undefined
-    : String(args.envelopeVersion).trim();
-
-  if (header !== undefined && header !== "" && envelope !== undefined && envelope !== "" && header !== envelope) {
-    return {
-      version: AGENT_API_DEFAULT_VERSION,
-      negotiated: false,
-      downgraded: false,
-      requested: header,
-      error: `version header (${header}) and envelope version (${envelope}) do not agree`,
-    };
-  }
-
-  const requested = header && header !== "" ? header : envelope && envelope !== "" ? envelope : undefined;
-
-  if (requested === undefined) {
-    return { version: AGENT_API_DEFAULT_VERSION, negotiated: false, downgraded: false };
-  }
-
-  if (isSupportedVersion(requested)) {
-    return { version: requested, negotiated: true, downgraded: false, requested };
-  }
-
-  // Unsupported. A requested version that is structurally newer (v2, v3)
-  // is a downgrade candidate for reporting; anything else is just unknown.
-  const downgraded = /^v\d+$/.test(requested) && Number(requested.slice(1)) > Number(AGENT_API_DEFAULT_VERSION.slice(1));
-  return {
-    version: AGENT_API_DEFAULT_VERSION,
-    negotiated: false,
-    downgraded,
-    requested,
-    error: `unsupported agent API version: ${requested}`,
-  };
-}
+export const AGENT_API_DEPRECATED_VERSIONS: readonly AgentApiVersion[] = [];
 
 export const AGENT_API_ACTIONS = [
   "register", "heartbeat", "proposeMarket", "createMarket", "publishReasoning",
@@ -168,10 +78,10 @@ export const AGENT_ACTION_PAUSE: Partial<Record<AgentApiAction, Pausable>> = {
 };
 
 /** Pause gate for one agent action; `allowed: true` for actions with no switch. */
-export function agentActionPauseGate(
+export function agentActionPauseGale(
   action: AgentApiAction,
   env: Record<string, string | undefined> = process.env,
-): WriteGAteResult {
+): WriteGateResult {
   const capability = AGENT_ACTION_PAUSE[action];
   return capability ? checkWriteAllowed({ capability }, env) : { allowed: true };
 }
@@ -183,7 +93,7 @@ export const AGENT_REQUEST_MAX_SKEW_MS = 5 * 60_000;
  *
  * The agent API is a money-moving surface; unbounded bodies let a caller force
  * expensive stable-stringify + hashing work before the envelope is rejected.
- * Reuses the same 64 KiB bound as {@link MAX_SIGNAD_REQUEST_BODY_BYTES} in
+ * Reuses the same 64 KiB bound as {@link MAX_SIGNED_REQUEST_BODY_BYTES} in
  * `lib/api/signed-request.ts`.
  */
 export const MAX_SIGNED_REQUEST_PAYLOAD_BYTES = 64 * 1024;
@@ -192,7 +102,7 @@ function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`).join(",")}}`;
+      .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`).join(",")}`;
   }
   return JSON.stringify(value) ?? "null";
 }
@@ -227,42 +137,90 @@ export function agentRequestMessage(request: Omit<SignedAgentRequest, "signature
 export const AGENT_OPERATOR_PROOF_DOMAIN = "Mimir agent operator proof";
 
 export function operatorProofMessage(agentId: string, operatorWallet: string): string {
-  // NOT lowercased. A str key is case-sensitive base32; folding the case names a
+  // NOT lowercased. A strkey is case-sensitive base32; folding the case names a
   // wallet that does not exist.
   return `${AGENT_OPERATOR_PROOF_DOMAIN}\nagent: ${agentId}\noperator: ${operatorWallet.trim()}`;
 }
 
 /**
+ * Result of negotiating a request's schema version against the server's set.
+ *
+ * `ok = true` means the version is accepted. When `ok = false`, `negotiated`
+ * is the version the server will accept — the caller can retry with it without
+ * guessing. The negotiation is fail-closed: an unknown or malformed version is
+ * never silently coerced to the current one.
+ */
+export interface AgentVersionNegotiation {
+  ok: boolean;
+  /** The version the server will accept for this request. */
+  negotiated: AgentApiVersion;
+  /** The version the caller asked for, verbatim. */
+  requested: unknown;
+  /** True when the requested version is accepted but deprecated. */
+  deprecated: boolean;
+  /** Human-readable reason when `ok = false`. */
+  reason?: string;
+}
+
+/**
+ * Negotiate the schema version for an incoming request.
+ *
+ * This is the one function the route calls before anything else, so the version
+ * decision is not duplicated in every action handler. A malformed version
+ * (number, null, object) fails closed with `ok = false` and the current version
+ * as the suggested `negotiated`, so a caller that sent nothing useful is told
+ * what to send instead of being told "unsupported" forever.
+ */
+export function negotiateAgentApiVersion(
+  requested: unknown,
+  accepted: readonly AgentApiVersion[] = AGENT_API_VERSIONS,
+): AgentVersionNegotiation {
+  const negotiated = accepted[0];
+  if (typeof requested !== "string") {
+    return { ok: false, negotiated, requested, deprecated: false, reason: "version must be a string" };
+  }
+  if (!(accepted as readonly string[]).includes(requested)) {
+    return { ok: false, negotiated, requested, deprecated: false, reason: "unsupported version" };
+  }
+  return {
+    ok: true,
+    negotiated: requested as AgentApiVersion,
+    requested,
+    deprecated: AGENT_API_DEPRECATED_VERSIONS.includes(requested as AgentApiVersion),
+  };
+}
+
+/**
  * Validate the envelope.
  *
- * `requireSignature: false` is for API-key callers: the server fills the nonce and
+ * `requireSignature: false` is for API-hey callers: the server fills the nonce and
  * timestamp itself for them, so demanding a signed, clock-synced envelope would be
  * demanding proof of something the key already established. The signed path keeps
  * every check, because there the envelope IS the credential.
  *
- * The `version` field is negotiated before this runs (see
- * {@link negotiateAgentApiVersion}), and the negotiated version is passed in
- * as `expectedVersion`. The default is the default server version, so a
- * caller that never negotiates gets the old behaviour exactly.
+ * Version negotiation is delegated to {@link negotiateAgentApiVersion} so the
+ * accepted set is one fact, not a literal compared in two places.
  */
 export function validateAgentRequestEnvelope(
   request: SignedAgentRequest,
   now = Date.now(),
-  opts: { requireSignature?: boolean; expectedVersion?: AgentApiVersion } = {},
+  opts: { requireSignature?: boolean } = {},
 ): string[] {
-  const requireSignature = opts.requireSignature ?? false;
-  const expectedVersion = opts.expectedVersion ?? AGENT_API_DEFAULT_VERSION;
+  const requireSignature = opts.requireSignature ?? true;
   const errors: string[] = [];
-  if (request.version !== expectedVersion) errors.push("unsupported version");
-  if (!(AGENT_API_ACTIONS as readonly string[]).includes(request.action)) errors.push("unknown action");
-  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(request.agentId)) errors.push("invalid agentId");
+  const version = negotiateAgentApiVersion(request.version);
+  if (!version.ok) errors.push("unsupported version");
   if (!requireSignature) {
+    if (!(AGENT_API_ACTIONS as readonly string[]).includes(request.action)) errors.push("unknown action");
+    if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(request.agentId)) errors.push("invalid agentId");
     if (request.idempotencyKey && request.idempotencyKey.length > 128) errors.push("invalid idempotencyKey");
     if (signedRequestPayloadBytes(request.body) > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
-      errors.push(`payload exceeds ${MAX_SIGNAD_REQUEST_PAYLOAD_BYTES} bytes`);
+      errors.push(`payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes`);
     }
     return errors;
   }
+  if (!(AGENT_API_ACTIONS as readonly string[]).includes(request.action)) errors.push("unknown action");
+  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(request.agentId)) errors.push("invalid agentId");
   if (!request.idempotencyKey || request.idempotencyKey.length > 128) errors.push("invalid idempotencyKey");
   if (!request.nonce || request.nonce.length > 128) errors.push("invalid nonce");
   if (!Number.isFinite(request.signedAt) || Math.abs(now - request.signedAt) > AGENT_REQUEST_MAX_SKEW_MS) {
@@ -278,7 +236,7 @@ export function validateAgentRequestEnvelope(
     errors.push("invalid signature encoding");
   }
   if (signedRequestPayloadBytes(request.body) > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
-    errors.push(`payload exceeds ${MAX_SIGNAD_REQUEST_PAYLOAD_BYTES} bytes`);
+    errors.push(`payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes`);
   }
   return errors;
 }

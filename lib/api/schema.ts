@@ -18,10 +18,10 @@
  *    dropping a field is how a caller believes it set a cap that never applied.
  *  - **Every response carries its version**, so a cached body can be identified
  *    later rather than guessed at from its keys.
- *  - **Negotiation is explicit and fail-closed.** A client may advertise a set
- *    of versions it can speak; the server picks the highest mutually supported
- *    one, or refuses. There is no silent downgrade to a version the client did
- *    not offer.
+ *
+ *  - **Negotiation is explicit.** A client may advertise the set of versions it
+ *    accepts; the server picks the highest mutually supported version, or fails
+ *    closed with a machine-readable reason rather than guessing.
  */
 
 export const API_SCHEMA_VERSION = 1;
@@ -29,8 +29,11 @@ export const API_SCHEMA_VERSION = 1;
 /** Header a client uses to state the schema version it speaks. */
 export const SCHEMA_VERSION_HEADER = "x-mimir-schema-version";
 
-/** Header a client uses to advertise every schema version it can speak. */
-export const SCHEMA_VERSIONS_HEADER = "x-mimir-schema-versions";
+/** Header a client uses to advertise the versions it accepts, comma-separated. */
+export const SCHEMA_ACCEPT_HEADER = "x-mimir-schema-accept";
+
+/** Versions this server can speak, newest first. */
+export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [API_SCHEMA_VERSION];
 
 export interface VersionVerdict {
   ok: boolean;
@@ -40,8 +43,10 @@ export interface VersionVerdict {
   detail?: string;
 }
 
-/** Versions this server can speak, newest first. */
-export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [API_SCHEMA_VERSION];
+export interface NegotiatedVersion extends VersionVerdict {
+  /** Versions the client advertised, when negotiation was used. */
+  clientVersions?: number[];
+}
 
 /**
  * Decide which schema version a request is speaking.
@@ -81,54 +86,61 @@ export function resolveRequestVersion(
 }
 
 /**
- * Negotiate a schema version from a client's advertised set.
+ * Negotiate a schema version from an `Accept`-style list.
  *
- * `raw` is the comma-separated `x-mimir-schema-versions` header. The server
- * picks the highest version it supports that the client also advertised. An
- * empty or missing header falls back to `resolveRequestVersion` semantics so
- * existing callers keep working. A malformed entry is refused rather than
- * skipped: a client that cannot format its own version list has not agreed on
- * the format, and guessing which entries it meant is how a caller ends up on a
- * shape it did not ask for.
+ * The client advertises the versions it can speak; the server picks the highest
+ * one it also supports. An empty or absent list falls back to the single-version
+ * behaviour of `resolveRequestVersion`, so existing callers keep working.
+ *
+ * Fail-closed rules:
+ *  - A malformed entry (non-digits) refuses the whole negotiation rather than
+ *    silently skipping it; a client that cannot format its own version list is
+ *    not a client whose payload should be guessed at.
+ *  - A list with no overlap with `SUPPORTED_SCHEMA_VERSIONS` is refused with
+ *    `unsupported_version`, never coerced down to the server's current version.
+ *  - Duplicates are collapsed; order in the header does not imply preference.
  */
 export function negotiateRequestVersion(
-  raw: string | null | undefined,
-  opts: { mutating?: boolean } = {},
-): VersionVerdict {
-  const trimmed = (raw ?? "").trim();
-  if (trimmed.length === 0) {
-    return resolveRequestVersion(null, opts);
+  acceptRaw: string | null | undefined,
+  opts: { mutating?: boolean; explicitRaw?: string | null } = {},
+): NegotiatedVersion {
+  const explicit = (opts.explicitRaw ?? "").trim();
+  if (explicit.length > 0) {
+    const verdict = resolveRequestVersion(explicit, { mutating: opts.mutating });
+    return verdict;
   }
-  const parts = trimmed.split(",").map((p) => p.trim());
-  if (parts.length === 0 || parts.some((p) => p.length === 0)) {
-    return { ok: false, reason: "malformed_version", detail: trimmed };
+
+  const accept = (acceptRaw ?? "").trim();
+  if (accept.length === 0) {
+    return resolveRequestVersion(null, { mutating: opts.mutating });
   }
-  const offered: number[] = [];
+
+  const parts = accept.split(",").map((p) => p.trim()).filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    return resolveRequestVersion(null, { mutating: opts.mutating });
+  }
+
+  const clientVersions: number[] = [];
   for (const part of parts) {
     if (!/^\d+$/.test(part)) {
       return { ok: false, reason: "malformed_version", detail: part };
     }
-    offered.push(Number(part));
+    const n = Number(part);
+    if (!clientVersions.includes(n)) clientVersions.push(n);
   }
-  // Highest mutually supported version wins. No silent downgrade: if the
-  // client did not offer any version this server speaks, refuse.
-  const supported = SUPPORTED_SCHEMA_VERSIONS.filter((v) => offered.includes(v));
-  if (supported.length === 0) {
+
+  const overlap = clientVersions.filter((v) => SUPPORTED_SCHEMA_VERSIONS.includes(v));
+  if (overlap.length === 0) {
     return {
       ok: false,
       reason: "unsupported_version",
-      detail: `server speaks ${SUPPORTED_SCHEMA_VERSIONS.join(", ")}, client offered ${offered.join(", ")}`,
+      detail: `server speaks ${SUPPORTED_SCHEMA_VERSIONS.join(", ")}, client accepts ${clientVersions.join(", ")}`,
+      clientVersions,
     };
   }
-  const version = supported[0];
-  if (opts.mutating && version !== API_SCHEMA_VERSION) {
-    return {
-      ok: false,
-      reason: "unsupported_version",
-      detail: `server speaks ${API_SCHEMA_VERSION} for writes, client offered ${version}`,
-    };
-  }
-  return { ok: true, version };
+
+  const chosen = Math.max(...overlap);
+  return { ok: true, version: chosen, clientVersions };
 }
 
 // ── Minimal shape checking ────────────────────────────────────────────────────
@@ -230,10 +242,8 @@ export function versioned<T>(data: T): VersionedResponse<T> {
 
 /** Header set on every response, so a cached body can be identified later. */
 export function schemaVersionHeaders(): Record<string, string> {
-  return { [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION) };
-}
-
-/** Headers advertising every version this server can speak, newest first. */
-export function schemaVersionsHeaders(): Record<string, string> {
-  return { [SCHEMA_VERSIONS_HEADER]: SUPPORTED_SCHEMA_VERSIONS.join(",") };
+  return {
+    [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION),
+    [SCHEMA_ACCEPT_HEADER]: SUPPORTED_SCHEMA_VERSIONS.join(","),
+  };
 }

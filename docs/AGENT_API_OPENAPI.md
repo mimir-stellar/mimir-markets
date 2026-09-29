@@ -71,7 +71,7 @@ agent API contract: FAILED (2 error(s), 0 warning(s))
 ```
 
 One line per finding, in the audit itself, so a consumer that only reads
-`audit.findings` — a test, a future JSON reporter — carries the same information
+caudit.findings` — a test, a future JSON reporter — carries the same information
 as the terminal.
 
 Findings are a code, a location and a reason — never a value. A check that printed
@@ -82,12 +82,12 @@ it.
 
 Two properties are deliberate:
 
-- `*oFailures do not bypass a money or deployment control.** Nothing here can turn
-  `npm run check:openapi` into a warning to get a build through. A substituted
-  `servers[0].url` is the one warning, because a copy of the contract with a real
-  host is a legitimate thing for a reader to make, and it does not change any
-  claim about the API.
-- `*A schema the validator does not understand is a failure, not a pass.** The
+- **Failures do not bypass a money or deployment control.** Nothing here can turn
+` npm run check:openapi` into a warning to get a build through. A substituted
+`servers[0].url` is the one warning, because a copy of the contract with a real
+host is a legitimate thing for a reader to make, and it does not change any
+claim about the API.
+- **A schema the validator does not understand is a failure, not a pass.** The
   subset validator throws on any keyword it does not implement, and the audit
   reports it as `DOC_SCHEMA_UNSUPPORTED` rather than validating the parts it
   recognises. The same applies to the emitter: a value that is not plain JSON
@@ -106,7 +106,7 @@ Two properties are deliberate:
   covers Stellar secret-seed shape, agent API keys, provider API keys, Postgres
   connection strings, private-key blocks and assigned secret-looking env values.
   `npm run check:terms` runs over tracked files as a second, independent net.
-- `*Environment**: the generator reads no variable. `tests/node/agent-api-openapi.test.ts`
+- **Environment**: the generator reads no variable. `tests/node/agent-api-openapi.test.ts`
   sets a canary in `process.env` (including a `postgres://` URL) and asserts the
   output does not contain it, so a clean checkout with no production secrets
   produces byte-identical artifacts. The only env var that appears in the document
@@ -152,3 +152,70 @@ Both are covered by `tests/node/ops-yaml.test.ts` and
 `tests/node/json-schema-subset.test.ts`, which fail on the silent-corruption cases
 they were written to catch: a number rendered as a string, a `Map` flattened to
 `{}`, a header string iterated per character.
+
+## Schema version negotiation
+
+The agent API selects the schema version it serves from the request, and the
+selection is part of the published contract. The negotiation is deterministic and
+fails closed.
+
+### Where the version comes from
+
+The request carries an optional `schemaVersion` field in the envelope. When it is
+omitted, the route serves the current version, so existing callers that never
+sent the field continue to work unchanged. When it is present, it must be a
+known version string; anything else is rejected before any money moves or any
+credential is consumed.
+
+The accepted versions and the current version are declared in `lib/agents/api.ts`
+and rendered into the document as an enum on the envelope schema, so a caller can
+read what the server accepts without guessing. The generator probes the livj
+negotiation function for each candidate version rather than copying a table, so a
+change in what the server accepts shows up as a changed enum and fails the
+check until the document is regenerated.
+
+### Negotiation rules
+
+- A request with no `schemaVersion` is served at the current version.
+- A request with a known version is served at that version.
+- A request with an unknown or malformed version is rejected with a 400 and a
+  stable error code coming from `lib/api/errors.ts`. The error lists the versions
+  the server accepts in its details, so a caller can recover without a second
+  round trip.
+- The negotiated version is echoed in the response envelope as `schemaVersion`,
+  so a caller can confirm which contract it got even when it omitted the field.
+- Version negotiation happens before authentication and before any side effect. A
+  rejected version never consumes a nonce, never authorises a spend and never
+  touches the chain.
+- The chain remains the source of truth. Negotiation only decides how the
+  request and response are rendered; it never changes what the contract will
+  accept or how funds move.
+
+### Errors and retry
+
+An unknown version is not retryable as is, because retrying the same request will
+fail the same way. The catalogue entry says so explicitly, and the document renders
+the `Retryable` and `Retry-After` fields from the catalogue like every other error.
+A stale version that the server once served and no longer does is treated as unknown,
+not as a silent fallback to the current version.
+
+### Feature flags and operational notes
+
+Negotiation itself has no feature flag and no pause switch: it is pure and fails
+closed, and disabling it would mean serving an unknown contract. Feature flags and
+pause switches apply to the actions themselves and are rendered from `lib/ops/flags.ts`
+as before. An operator who needs to stop an action uses the existing pause
+switch; they do not need to change the negotiated version.
+
+### Tests and migration
+
+`tests/node/agent-api-openapi.test.ts` covers the negotiation in both directions:
+a known version is served and echoed, an omitted version is served at the current
+version, an unknown version is rejected before authentication, and a rejected
+version does not consume a nonce or authorise a spend. The generated document is
+checked against the live negotiation function, so a version the server accepts but
+does not publish — or the reverse — fails the check.
+
+There is no database migration and no chain migration. Adding a version is a
+contract change that follows the steps above; removing one is the same change in
+reverse, and the rollback section applies unchanged.
