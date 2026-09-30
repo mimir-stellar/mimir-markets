@@ -62,6 +62,13 @@ impl MimirSquad {
         pool::resolve(&env, market_id, result)
     }
 
+    /// Captain-initiated market cancellation. Sets the market as resolved with
+    /// result=RESULT_CANCELLED, allowing all depositors to claim full refunds
+    /// via the claim() function. No fees are charged on cancellation.
+    pub fn cancel_market(env: Env, market_id: u64) -> Result<(), Error> {
+        pool::cancel_market(&env, market_id)
+    }
+
     /// Pull-based payout. Solidity used `msg.sender`; Soroban has no equivalent
     /// for a top-level call, so the claimant is an explicit argument that must
     /// authorize. Returns the net amount transferred.
@@ -73,26 +80,16 @@ impl MimirSquad {
         pool::claim_fees(&env)
     }
 
-    pub fn queue_oracle(env: Env, new_oracle: Address) -> Result<(), Error> {
-        pool::queue_oracle(&env, new_oracle)
-    }
-
-    pub fn cancel_oracle(env: Env) -> Result<(), Error> {
-        pool::cancel_oracle(&env)
-    }
-
-    /// Permissionless once the timelock has elapsed.
-    pub fn execute_oracle(env: Env) -> Result<(), Error> {
-        pool::execute_oracle(&env)
-    }
-
-    /// Isolated per-market fee pull. See `pool::claim_market_fees`.
-    pub fn claim_market_fees(
+    /// Retry a payout that [`Self::claim`] parked because the transfer trapped
+    /// (frozen or deauthorized trustline). Returns the amount moved, or `0`
+    /// when nothing is parked.
+    pub fn claim_parked_payout(
         env: Env,
-        who: Address,
+        participant: Address,
         market_id: u64,
+        side: u32,
     ) -> Result<i128, Error> {
-        pool::claim_market_fees(&env, who, market_id)
+        pool::claim_parked_payout(&env, participant, market_id, side)
     }
 
     // ── Views ────────────────────────────────────────────────────────────────
@@ -126,10 +123,10 @@ impl MimirSquad {
         storage::accrued_fees(&env)
     }
 
-    /// Live accrued fees for one market (0 if the ledger was invalidated by a
-    /// global `claim_fees`).
-    pub fn get_market_fees(env: Env, market_id: u64) -> i128 {
-        storage::market_fees(&env, market_id)
+    /// Payout settled in the ledger but not delivered to one winner, because
+    /// the token transfer trapped. `claim_parked_payout` moves it.
+    pub fn parked_payout(env: Env, market_id: u64, side: u32, who: Address) -> i128 {
+        storage::payout_of(&env, market_id, side, &who)
     }
 
     pub fn get_usdc(env: Env) -> Result<Address, Error> {
