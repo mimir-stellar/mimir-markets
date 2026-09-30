@@ -765,7 +765,7 @@ mimir-markets/
 │   ├── x402/                             # config.ts (prices) · stellar-scheme.ts · server.ts · buyer.ts
 │   ├── paid-revenue.ts                   # atomic USDC settlement ledger
 │   ├── contract.ts                       # high-level TypeScript contract client
-│   ├── ops/                              # offline verifiers & gates (projection, artifact provenance, cache backup)
+│   ├── ops/                              # offline verifiers & gates (projection, artifact provenance, cache backup, audit)
 │   │   ├── projection.ts                 # pure chain-events → read-index fold
 │   │   ├── artifact-provenance.ts        # fail-closed Wasm digest verification
 │   │   ├── schema-snapshot.ts            # fail-closed schema fingerprint + migration drift gate
@@ -790,6 +790,7 @@ mimir-markets/
 │   ├── verify-artifact-provenance.ts     # fail-closed Wasm digest / manifest checks
 │   ├── check-schema-snapshot.ts          # verify / write the Postgres schema snapshot (no DATABASE_URL)
 │   ├── verify-cache-backup.ts            # offline cache-backup verification (no DATABASE_URL)
+│   ├── check-npm-audit.ts                # triage npm audit JSON (no production secrets)
 │   ├── backup-read-index.ts              # dump the Neon read-index to a verified archive
 │   ├── restore-read-index.ts             # restore a verified archive (dry-run capable)
 │   ├── onchain-smoke.ts                  # end-to-end on-chain smoke

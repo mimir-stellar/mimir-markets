@@ -5,7 +5,53 @@ CAIP-2 stellar:testnet).
 
 See docs/STELLAR_NETWORK.md for the one-page architecture reference.
 
-## Repository layout
+Repository layout
+Path	Purpose
+contracts-soroban/mimir-market/	Rust/Soroban market contract (USDC escrow, settlement, fee policy)
+contracts-soroban/mimir-squad/	Rust/Soroban two-sided squad pools
+lib/stellar.ts	Stellar Testnet config (RPC/Horizon, passphrase, explorer links, getEvents scans)
+lib/usdc.ts	Circle Testnet USDC: Stellar Asset Contract id, issuer, 7-decimal helpers
+lib/contract.ts	TypeScript contract client (reads + writes through the generated bindings)
+lib/wallet.tsx	Wallet context (Stellar Wallets Kit: Freighter, xBull, Albedo, Lobstr, Hana)
+lib/wallet-connectors.ts	Connector list and per-wallet capability matrix
+lib/stellar-message.ts	SEP-43 signMessage verification (Ed25519, base64)
+lib/content-hash.ts	SHA-256 content hashing — the hash Soroban's host exposes
+lib/agent-wallets.ts	Local Stellar keypairs for oracle / creator / council
+lib/agents/wallet-adapter.ts	Vendor-neutral wallet boundary + budget policy for BYOA
+lib/agents/spend-permissions.ts	Owner-signed spend permissions over the USDC SAC allowance
+lib/x402/config.ts	Network, prices and Bazaar metadata for every paid endpoint
+lib/x402/stellar-scheme.ts	The Stellar-native x402 exact scheme (buyer, seller, verification)
+lib/x402/server.ts	x402 v2 seller paywall (@x402/next) + settlement recording
+lib/x402/buyer.ts	x402 v2 buyer with a hard USDC budget cap (@x402/fetch)
+agents/oracle/index.ts	Off-chain AI oracle agent (LLM + local keypair)
+agents/market-creator/index.ts	Autonomous market creator (LLM + local keypair)
+agents/council/	Ten AI personas that stake as economic actors
+fixtures/ledger/	Versioned public-chain captures for deterministic offline replay
+deploy/deploy.ts	Soroban build/deploy/initialize script
+deploy/contract-artifacts.manifest.json	Pinned Wasm digests for fail-closed provenance checks
+lib/ops/artifact-provenance.ts	Offline SHA-256 artifact provenance verifier
+lib/ops/cache-backup.ts	Offline read-index cache-backup verifier (checksum + privacy, no network)
+lib/ops/dependency-audit.ts	Fail-closed npm audit triage (production high/critical, privacy-safe)
+lib/server/read-index-backup.ts	DB-backed read-index dump / verified restore (restore fingerprint check)
+scripts/verify-artifact-provenance.ts	CLI: verify or --write-pins contract artifacts
+scripts/verify-cache-backup.ts	CLI: offline cache-backup verification (npm run verify:cache-backup)
+scripts/check-npm-audit.ts	CLI: triage npm audit --json (npm run audit:deps, no production secrets)
+scripts/backup-read-index.ts	CLI: dump the Neon read-index to a self-verified archive
+scripts/restore-read-index.ts	CLI: restore a verified archive and fingerprint-check the cache
+scripts/stellar-keys.ts	Keypairs + Friendbot funding + USDC trustline
+scripts/create-agent-wallets.ts	Generate 12 keypairs (oracle + creator + 10 personas)
+scripts/fund-agents.ts	Fund agent accounts from a master seed
+scripts/check-forbidden-terms.mjs	Guardrail: no pre-Stellar chain or bespoke-402 residue
+scripts/run-browser-smoke.mjs	Browser smoke orchestrator: build + serve + test + teardown in a secret-free env
+scripts/lib/browser-smoke-env.mjs	The smoke harness's strict env allowlist (what a smoke build may see)
+tests/browser/ + playwright.config.ts	Playwright browser smoke suite (run via npm run smoke:browser)
+Dependency vulnerability triage
+npm run audit:deps triages npm audit --omit=dev --json with no production
+secrets. High, critical, and unknown severities fail closed; malformed or npm
+error output never counts as a clean tree. CI runs it on every PR and a weekly
+scheduled workflow catches newly published advisories. See
+docs/DEPENDENCY_AUDIT.md for failure, rollback, artifact, secret, and
+environment behavior.
 
 | Path | Purpose |
 |------|---------|
