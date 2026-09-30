@@ -8,11 +8,12 @@ import {
   getMarketContractId,
   isContractAddress,
   isMarketConfigured,
+  validateNetworkPassphrase,
 } from "@/lib/stellar";
 import { publishReasoning } from "@/lib/reasoning/publish";
 import {
-  AGENT_ACTION_PAUSE, AGENT_API_ACTIONS, AGENT_API_VERSION, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
-  agentRequestMessage, validateAgentRequestEnvelope,
+  AGENT_ACTION_PAUSE, AGENT_API_ACTIONS, AGENT_API_VERSION, AGENT_FUNDED_ACTIONS, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
+  agentRequestMessage, operatorProofMessage, validateAgentRequestEnvelope,
   type AgentApiAction, type SignedAgentRequest,
 } from "@/lib/agents/api";
 import { authenticateAgentRequest, requiresOwnerSignature } from "@/lib/agents/authenticate";
@@ -40,6 +41,7 @@ import { getAgentEarningsSummary } from "@/lib/db";
 import { validateAgentApiRequest, schemaVersionHeaders } from "@/lib/api/schema";
 import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
 import { apiError } from "@/lib/api/errors";
+import { tracedRoute } from "@/lib/ops/trace-http";
 
 export const dynamic = "force-dynamic";
 
@@ -68,6 +70,8 @@ function normalizeWallet(value: string): string {
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store", ...schemaVersionHeaders() } });
 }
+
+import { withRequestId } from "@/lib/api/errors";
 
 /** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
 /** Map an authorizeAction() rejection to the typed agent API error envelope. */
@@ -111,8 +115,11 @@ async function audit(request: SignedAgentRequest, outcome: string, reason?: stri
  * Actions that put an owner's USDC at risk. Gated on byoa_funded_actions so the
  * launch-gate document and the code agree: until an operator enables it, an agent
  * can register, read and dry-run but cannot move money.
+ *
+ * The list itself lives in `lib/agents/api.ts` because the published wire contract
+ * reads it from there — a second copy here and in the docs is a copy that drifts.
  */
-const FUNDED_ACTIONS: readonly AgentApiAction[] = ["createMarket", "stake", "vote"];
+const FUNDED_ACTIONS: readonly AgentApiAction[] = AGENT_FUNDED_ACTIONS;
 
 async function register(request: SignedAgentRequest<Record<string, any>>): Promise<Response> {
   // Pause check first: "registration is paused" is more accurate than "not enabled"
@@ -133,8 +140,8 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   if (!(await verify(owner, agentRequestMessage(request), request.signature))) {
     return json({ error: { message: "owner signature rejected" } }, 401);
   }
-  const operatorProofMessage = `Mimir agent operator proof\nagent: ${request.agentId}\noperator: ${operator}`;
-  if (!(await verify(operator, operatorProofMessage, String(body.operatorSignature ?? "")))) {
+  const operatorProof = operatorProofMessage(request.agentId, operator);
+  if (!(await verify(operator, operatorProof, String(body.operatorSignature ?? "")))) {
     return json({ error: { message: "operator signature rejected" } }, 401);
   }
 
@@ -217,16 +224,19 @@ function clientIp(req: Request): string | undefined {
   return forwarded?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || undefined;
 }
 
-export async function POST(req: Request, context: { params: Promise<{ action: string }> }): Promise<Response> {
+async function handleAgentApiPost(
+  req: Request,
+  context: { params: Promise<{ action: string }> },
+): Promise<Response> {
   const { action: rawAction } = await context.params;
-  if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action" } }, 404);
+  if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action", requestId } }, 404);
   const action = rawAction as AgentApiAction;
   // Cap before parse: Content-Length is a cheap fail-closed gate; the body byte
   // check below still applies when the header is absent or wrong.
   const declared = Number(req.headers.get("content-length") ?? NaN);
   if (Number.isFinite(declared) && declared > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
     return json({
-      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes` },
+      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes`, requestId },
     }, 413);
   }
   let raw: string;
@@ -358,10 +368,14 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
       }
       expiresAt = Date.now() + Math.floor(ttl) * 1000;
     }
+    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    if (scopes && scopes.length === 0) {
+      return json({ error: { message: "Cannot issue a key with an empty scope set" } }, 400);
+    }
     const record: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(key),
       keyPrefix: apiKeyPrefix(key), label: String(body.label ?? "").slice(0, 80),
-      createdAt: Date.now(), expiresAt,
+      createdAt: Date.now(), expiresAt, scopes,
     };
     await insertAgentApiKey(record);
     result = {
@@ -421,10 +435,14 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     // Issue the new key first — if the DB is unavailable we do nothing rather
     // than scheduling an expiry on the old key without a replacement.
     const newKey = generateApiKey(body.environment === "test" ? "test" : "live");
+    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    if (scopes && scopes.length === 0) {
+      return json({ error: { message: "Cannot issue a key with an empty scope set" } }, 400);
+    }
     const newRecord: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(newKey),
       keyPrefix: apiKeyPrefix(newKey), label: String(body.label ?? "").slice(0, 80),
-      createdAt: Date.now(),
+      createdAt: Date.now(), scopes,
     };
     await insertAgentApiKey(newRecord);
 
@@ -477,23 +495,89 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     // stops Mimir from drawing further.
     result = { permissionHash: hash, revoked: true, note: "Mimir will draw no further; revoke on chain to withdraw the grant itself." };
   } else if (action === "spendStatus") {
-    const status = await getActiveSpendPermission(agent.agentId);
-    result = { status };
-  } else if (action === "dryRun") {
-    const dryRun = await buildAgentDryRun(agent, request);
-    result = dryRun;
-  } else if (action === "proposeMarket") {
-    // Placeholder for market proposal logic
-    result = { proposed: true };
-  } else if (action === "createMarket") {
-    // Placeholder for market creation logic
-    result = { created: true };
-  } else if (action === "vote") {
-    // Placeholder for voting logic
-    result = { voted: true };
-  } else if (action === "stake") {
-    // Placeholder for staking logic
-    result = { staked: true };
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const permission = await getActiveSpendPermission(agent.agentId, nowSeconds);
+    if (!permission) result = { funded: false, reason: "no active spend permission" };
+    else {
+      const periodStart = currentPeriodStart(permission, nowSeconds);
+      const spent = await getSpentInPeriod(permission.permissionHash, periodStart);
+      const decision = evaluateSpend({
+        permission, spentThisPeriodAtomic: spent, amountAtomic: 0n,
+        nowSeconds, spender: configuredSpender(),
+      });
+      result = {
+        funded: true,
+        permissionHash: permission.permissionHash,
+        account: permission.account,
+        allowanceAtomic: permission.allowanceAtomic.toString(),
+        spentThisPeriodAtomic: spent.toString(),
+        remainingAtomic: decision.remainingAtomic.toString(),
+        periodStart, periodEndsAt: decision.periodEndsAt, endAt: permission.endAt,
+        limits: agent.limits,
+      };
+    }
+  } else if (action === "heartbeat") result = { agentId: agent.agentId, status: agent.status, at: Date.now() };
+  else if (action === "listPositions") result = { positions: await getUserVSDirect(agent.operatorWallet) };
+  else if (action === "listEarnings") {
+    const earnings = await getAgentEarningsSummary(agent.payoutWallet).catch(() => ({ ownerFeesAtomic: 0n, unclaimedAtomic: 0n, x402Atomic: 0n }));
+    result = { payoutWallet: agent.payoutWallet, ownerFeesAtomic: earnings.ownerFeesAtomic.toString(),
+      unclaimedAtomic: earnings.unclaimedAtomic.toString(), x402Atomic: earnings.x402Atomic.toString() };
+  }
+  else if (action === "revoke") {
+    // revoke is in OWNER_SIGNED_ACTIONS, so reaching here means the owner's own
+    // signature verified above — an API key is refused before this point.
+    const revoked = revokeAgent(agent, { requestedBy: agent.ownerWallet, reason: String(body.reason ?? "owner revoked") });
+    if (!revoked.ok) return json({ error: { message: revoked.reason } }, 403);
+    await saveAgent(revoked.agent); result = { agent: revoked.agent };
+  } else if (action === "fetchResearch") {
+    const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
+    if (!gate.allowed) {
+      await audit(request, "rejected", gate.reason);
+      return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
+    }
+    const adapterId = typeof body.adapterId === "string" ? body.adapterId : "";
+    const url = typeof body.url === "string" ? body.url : "";
+    if (!url || !adapterId) {
+      return errorResponse(apiError("invalid_request", "url and adapterId are required"));
+    }
+    const fetchRes = await fetchWithAdapter(adapterId, { url, agentId: agent.agentId });
+    if (!fetchRes.ok) {
+      if (fetchRes.kind === "adapter") return errorResponse(apiError("invalid_request", fetchRes.detail));
+      let code: ApiErrorCode;
+      switch (fetchRes.kind) {
+        case "paused": code = "agent_paused"; break;
+        case "blocked": code = "forbidden"; break;
+        case "budget": code = "budget_exhausted"; break;
+        case "too_many_redirects":
+        case "redirect_loop":
+        case "invalid_redirect":
+        case "protocol_downgrade":
+        case "content_type":
+        case "too_large":
+        case "http_error":
+          code = "invalid_request"; break;
+        case "cancelled":
+        case "dependency_failure":
+        case "transport":
+          code = "upstream_unavailable"; break;
+      }
+      return errorResponse(apiError(code, fetchRes.detail));
+    }
+    result = {
+      ok: true,
+      url: fetchRes.url,
+      finalUrl: fetchRes.finalUrl,
+      status: fetchRes.status,
+      contentType: fetchRes.contentType,
+      body: fetchRes.body,
+      contentHash: fetchRes.contentHash,
+      capturedAt: fetchRes.capturedAt,
+      bytes: fetchRes.bytes,
+      fromCache: fetchRes.fromCache,
+      redirects: fetchRes.redirects,
+      redirectChain: fetchRes.redirectChain,
+      budget: budgetRemaining(agent.agentId),
+    };
   } else if (action === "publishReasoning") {
     await publishReasoning(agent.agentId, body.reasoning);
     result = { published: true };
@@ -503,7 +587,7 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
     if (!gate.allowed) {
       await audit(request, "rejected", gate.reason);
-      return errorResponse(actionVerdictToError(gate, "researcher"));
+      return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
     }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
   } else {
@@ -517,3 +601,9 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
   await audit(request, "accepted");
   return json(result);
 }
+
+// Traced: this is the API an autonomous agent calls, and the failure it gets back
+// carries the id in its body (see `apiError`) and in the `x-mimir-trace-id`
+// header. A signature failure, a pause, and a 500 are all one grep away instead of
+// three log streams read by eye. See docs/TRACE_CORRELATION.md.
+export const POST = tracedRoute("api.agents.v1", handleAgentApiPost);
