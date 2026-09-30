@@ -7,6 +7,19 @@ use soroban_sdk::{contracterror, contracttype, Address, BytesN, String};
 
 pub const MAX_CHALLENGERS: u32 = 100;
 
+/// Maximum number of claim ids accepted by `get_claims_batch` in a single call.
+///
+/// Soroban transactions have a bounded ledger-entry footprint: each claim id in
+/// the batch opens one persistent entry (`DataKey::Claim(id)`). At 50 ids the
+/// simulated footprint stays well inside the limits that the public Soroban RPC
+/// enforces; callers that need more claims should make multiple calls or use the
+/// existing range-read path.
+///
+/// Chosen conservatively: the challenge-roster key (`DataKey::Challengers(id)`)
+/// is NOT read by this function, which deliberately keeps the footprint O(n) in
+/// ids rather than O(n × roster-size).
+pub const MAX_BATCH_SIZE: u32 = 50;
+
 /// Decimals of the escrow token. A Stellar Asset Contract exposes every classic
 /// asset, Circle's USDC included, with exactly 7.
 ///
@@ -37,6 +50,11 @@ pub const MAX_TOTAL_FEE_BPS: u32 = 1_000;
 
 /// A queued policy change cannot take effect before this much time passes.
 pub const FEE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
+
+/// A queued oracle rotation cannot take effect before this much time passes.
+/// Same delay as fee policy so participants get equal notice of trust-boundary
+/// changes that control settlement.
+pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 
 /// Upper bound on the byte length of an invite key.
 ///
@@ -165,6 +183,13 @@ pub struct PendingFeePolicy {
     pub platform_fee_bps: u32,
     pub agent_owner_fee_bps: u32,
     pub platform_recipient: Option<Address>,
+    pub executable_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingOracle {
+    pub next: Address,
     pub executable_at: u64,
 }
 
@@ -377,4 +402,10 @@ pub enum Error {
     /// The claim's combined metadata exceeded `MAX_CLAIM_METADATA_BYTES`. No
     /// stake is pulled and no storage is written for a claim over the budget.
     ClaimMetadataTooLong = 42,
+    /// The parent claim referenced by `parent_id` does not exist.
+    ParentClaimNotFound = 43,
+    /// The parent claim is not in a state that allows creating a rematch.
+    ParentClaimInvalidState = 44,
+    /// The parent claim has already been used for a rematch (no duplicate rematches).
+    ParentClaimAlreadyRematched = 45,
 }

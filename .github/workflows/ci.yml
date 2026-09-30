@@ -13,38 +13,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  # What changed? Fail-closed allowlist: a path is either a known scope or the
+  # job fails. Unknown paths never silently shrink what CI runs — see
+  # scripts/ci/changed-paths.mjs and lib/ci/path-scope.ts.
+  paths:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
+    outputs:
+      tiers_json: ${{ steps.paths.outputs.tiers_json }}
+      unknown: ${{ steps.paths.outputs.unknown }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # This job only reads the tree — it never pushes. Leaving the token in
-          # .git/config lets any later step (or an uploaded artifact) carry a
-          # credential that nothing here needs.
+          # merge-base needs real history; a shallow clone would make the path
+          # job fail closed on every run.
+          fetch-depth: 0
+          persist-credentials: false
+      - id: paths
+        # Exits 1 on an undecidable change set (after emitting the all-tier
+        # fallback) — that is the fail-closed signal, surfaced by the next step.
+        continue-on-error: true
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          args=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            args="--base $BEFORE"
+          fi
+          node scripts/ci/changed-paths.mjs $args
+      - name: surface an undecidable change set
+        run: |
+          if [ "${{ steps.paths.outcome }}" != "success" ]; then
+            echo "::error::changed-paths could not determine the change set (see the step log above). The suites below run ALL tiers as the fail-closed fallback — do not merge until the trigger context is fixed."
+            exit 1
+          fi
+          echo "resolved change set; tiers_json=${{ steps.paths.outputs.tiers_json }} unknown=${{ steps.paths.outputs.unknown }}"
+
+  # Tier suites. The union of all tiers equals the old single verify job; a
+  # tier runs only when a path in its scope changed (or when the change set was
+  # undecidable, in which case every tier runs).
+  suites:
+    needs: paths
+    if: ${{ !cancelled() && needs.paths.outputs.tiers_json != '' && needs.paths.outputs.tiers_json != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: ${{ fromJSON(needs.paths.outputs.tiers_json) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Audit production dependencies
-        run: |
-          set -uo pipefail
-          # npm audit exits 1 when any advisory exists; the checker is the
-          # fail-closed source of truth for high/critical/unknown findings.
-          npm audit --omit=dev --json > npm-audit.json || true
-          node --import tsx scripts/check-npm-audit.ts --json npm-audit.json --out npm-audit-report.md
-      - name: Upload dependency audit evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: npm-audit-${{ github.run_id }}
-          path: |
-            npm-audit.json
-            npm-audit-report.md
-          if-no-files-found: error
-          retention-days: 14
+      - name: Verify lockfile reproducibility
+        run: git diff --exit-code package-lock.json
+      - run: npm audit --omit=dev --audit-level=high
+        if: matrix.tier != 'contracts'
       - run: npm run check:terms
       - run: npm run check:toolchains
       - run: npm run check:schema-snapshot
@@ -54,6 +83,9 @@ jobs:
       # run `npm run check:openapi -- --write` and commit the result.
       - run: npm run check:openapi
       - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
+      # Release readiness: the offline half of the checklist (docs/RELEASE_READINESS.md).
+      # No secrets, no .env, no network — reproducible from a clean checkout.
+      - run: npm run verify:release-readiness
       - run: npm run test:smoke
       - name: test:coverage
         run: npm run test:coverage
@@ -146,10 +178,18 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: .cache/node-tests
+          key: node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('scripts/run-node-tests.mjs') }}
+          restore-keys: |
+            node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-
       - run: npm ci
+      - name: Verify lockfile reproducibility
+        run: git diff --exit-code package-lock.json
       - run: npm run check:terms
       - run: npm run typecheck
-      - run: npm run test:smoke
+      - run: npm run test:node
       - run: npm run smoke:browser
         env:
           CI: "true"

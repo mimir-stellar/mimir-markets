@@ -243,8 +243,8 @@ export async function gatherCouncilVerdict(args: {
   const capUnits = usdcToUnits(args.capUsdc ?? 0.005);
   const quorum = normalizeQuorum(args.quorum ?? 3);
   const claimState: ClaimSettleState = args.claimState ?? "active";
-  // Cancelled / resolved claims never buy votes — chain already decided.
-  if (claimState === "cancelled" || claimState === "resolved") {
+  // Cancelled / resolved / paused claims never buy votes — chain already decided.
+  if (claimState === "cancelled" || claimState === "resolved" || claimState === "paused") {
     const gate = evaluateQuorum([], quorum, { claimState });
     console.warn(`[council] ${gate.reason}`);
     return null;

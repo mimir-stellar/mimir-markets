@@ -53,10 +53,52 @@ scheduled workflow catches newly published advisories. See
 docs/DEPENDENCY_AUDIT.md for failure, rollback, artifact, secret, and
 environment behavior.
 
-Browser smoke flow (must stay green on release)
-npm run smoke:browser builds the app with a secret-free allowlist, serves it
-locally, drives the Playwright suite in tests/browser/ with the system
-Chrome/Chromium, and tears down. CI runs it as the browser-smoke job. When you
+| Path | Purpose |
+|------|---------|
+| `contracts-soroban/mimir-market/` | Rust/Soroban market contract (USDC escrow, settlement, fee policy) |
+| `contracts-soroban/mimir-squad/` | Rust/Soroban two-sided squad pools |
+| `lib/stellar.ts` | Stellar Testnet config (RPC/Horizon, passphrase, explorer links, `getEvents` scans) |
+| `lib/usdc.ts` | Circle Testnet USDC: Stellar Asset Contract id, issuer, 7-decimal helpers |
+| `lib/contract.ts` | TypeScript contract client (reads + writes through the generated bindings) |
+| `lib/wallet.tsx` | Wallet context (Stellar Wallets Kit: Freighter, xBull, Albedo, Lobstr, Hana) |
+| `lib/wallet-connectors.ts` | Connector list and per-wallet capability matrix |
+| `lib/stellar-message.ts` | SEP-43 `signMessage` verification (Ed25519, base64) |
+| `lib/content-hash.ts` | SHA-256 content hashing — the hash Soroban's host exposes |
+| `lib/agent-wallets.ts` | Local Stellar keypairs for oracle / creator / council |
+| `lib/agents/wallet-adapter.ts` | Vendor-neutral wallet boundary + budget policy for BYOA |
+| `lib/agents/spend-permissions.ts` | Owner-signed spend permissions over the USDC SAC allowance |
+| `lib/x402/config.ts` | Network, prices and Bazaar metadata for every paid endpoint |
+| `lib/x402/stellar-scheme.ts` | The Stellar-native x402 `exact` scheme (buyer, seller, verification) |
+| `lib/x402/server.ts` | x402 v2 seller paywall (`@x402/next`) + settlement recording |
+| `lib/x402/buyer.ts` | x402 v2 buyer with a hard USDC budget cap (`@x402/fetch`) |
+| `agents/oracle/index.ts` | Off-chain AI oracle agent (LLM + local keypair) |
+| `agents/market-creator/index.ts` | Autonomous market creator (LLM + local keypair) |
+| `agents/council/` | Ten AI personas that stake as economic actors |
+| `fixtures/ledger/` | Versioned public-chain captures for deterministic offline replay |
+| `deploy/deploy.ts` | Soroban build/deploy/initialize script |
+| `deploy/contract-artifacts.manifest.json` | Pinned Wasm digests for fail-closed provenance checks |
+| `lib/ops/artifact-provenance.ts` | Offline SHA-256 artifact provenance verifier |
+| `lib/ops/cache-backup.ts` | Offline read-index cache-backup verifier (checksum + privacy, no network) |
+| `lib/server/read-index-backup.ts` | DB-backed read-index dump / verified restore (restore fingerprint check) |
+| `scripts/verify-artifact-provenance.ts` | CLI: verify or `--write-pins` contract artifacts |
+| `scripts/verify-cache-backup.ts` | CLI: offline cache-backup verification (`npm run verify:cache-backup`) |
+| `scripts/backup-read-index.ts` | CLI: dump the Neon read-index to a self-verified archive |
+| `scripts/restore-read-index.ts` | CLI: restore a verified archive and fingerprint-check the cache |
+| `scripts/stellar-keys.ts` | Keypairs + Friendbot funding + USDC trustline |
+| `scripts/create-agent-wallets.ts` | Generate 12 keypairs (oracle + creator + 10 personas) |
+| `scripts/fund-agents.ts` | Fund agent accounts from a master seed |
+| `scripts/check-forbidden-terms.mjs` | Guardrail: no pre-Stellar chain or bespoke-402 residue |
+| `scripts/run-browser-smoke.mjs` | Browser smoke orchestrator: build + serve + test + teardown in a secret-free env |
+| `scripts/run-node-tests.mjs` | Node test runner: deterministic discovery, process isolation, compile cache, and LCOV artifacts |
+| `tests/node/node-test-runner.test.ts` | Regression tests for runner safety, cache invalidation, failure handling, and coverage publication |
+| `scripts/lib/browser-smoke-env.mjs` | The smoke harness's strict env allowlist (what a smoke build may see) |
+| `tests/browser/` + `playwright.config.ts` | Playwright browser smoke suite (run via `npm run smoke:browser`) |
+
+## Browser smoke flow (must stay green on release)
+
+`npm run smoke:browser` builds the app with a **secret-free allowlist**, serves it
+locally, drives the Playwright suite in `tests/browser/` with the system
+Chrome/Chromium, and tears down. CI runs it as the `browser-smoke` job. When you
 add a page, a wallet gate, or an env-read, keep it green:
 
 Never let real settings into the smoke build. The harness moves every
@@ -118,9 +160,128 @@ When a contract in contracts-soroban/ changes, regenerate bindings
 Categories: sports, weather, crypto, culture, custom (English).
 Sync/read-index changes must pass npm run check:ledger-fixture; see
 docs/LEDGER_REPLAY.md for artifact, secret, release, and rollback policy.
+Release readiness
+npm run verify:release-readiness is the release checklist as data
+(lib/ops/release-readiness.ts, documented in docs/RELEASE_READINESS.md). It
+runs on a clean checkout with no .env, no DATABASE_URL, no seeds and no
+network:
+
+Default (develop) mode verifies what it can run itself - checklist
+coherence, artifact provenance, the cache-backup fixture, the saved-ledger
+replay and the release SBOM - and reports every other gate as not
+evidenced (a warning), never as a pass.
+--mode=release is the funded-release gate: a blocking gate with no
+recorded evidence is an error. Evidence is a small JSON file passed with
+--evidence; status is only ever pass or fail, so a gate cannot be
+waived, skipped or bypassed.
+Privacy: a recorded detail/artifact that looks like a credential
+(Stellar seed, sk-/rk- key, gh*_ token, phc_ key, AKIA key, PEM
+private key, or a URL with embedded credentials) is refused, not redacted.
+Changing a gate: update lib/ops/release-readiness.ts and
+docs/RELEASE_READINESS.md in the same pull request. The CLI fails when the
+doc stops describing a gate id or its command, and
+tests/node/release-readiness.test.ts pins the registry fingerprint, so the
+checklist cannot drift silently.
+Rollback: the checklist deploys nothing and writes nothing to the chain or
+the database. --out writes a deterministic JSON release record (no
+timestamps unless --stamp) that can be diffed between releases.
 Oracle agent
 Bash
 
+- Contract state is the source of truth. Neon Postgres is a read-index cache only.
+- **Two assets, one job each.** Native **XLM** pays the ledger fee and the account
+  reserve, and nothing else — it is never an argument to a contract call, because
+  Soroban has no payable invocation. **USDC** (7 decimals, Circle's Testnet issuance
+  reached through its Stellar Asset Contract) carries every value flow: market
+  stakes, payouts, agent bankrolls and x402 payments.
+- **Every account funds its own fees.** There is no sponsorship, by product
+  decision: an operation costs ~100 stroops, so there is nothing worth sponsoring.
+- Stakes need **no allowance**. Soroban authorises per invocation:
+  `challenge_claim` carries an authorisation entry permitting exactly one USDC
+  transfer of exactly the staked amount. `lib/contract.ts` builds one transaction,
+  the user signs once. Allowances (`lib/agents/spend-permissions.ts`) exist only for
+  the delegated BYOA case.
+- **A first-time account signs twice, once.** A USDC trustline is a classic
+  operation and a transaction containing a Soroban operation must contain exactly
+  one operation, so the trustline cannot ride along with the stake.
+- Resolution is oracle-only. `resolve_claim` requires authorisation from the
+  `oracle` address stored in the contract. Do not expose user-triggered resolution.
+- **Challenger settlement is pull-based.** `resolve_claim` deliberately does not
+  loop over challengers: a transaction is capped on its ledger-entry footprint and
+  ~100 challengers do not fit. It seeds `remaining_escrow`; each winner calls
+  `claim_challenger_payout` once, O(1), and the last claimant absorbs the dust.
+  `withdraw` and `claim_fees` are the other two pull paths.
+- Hash with **SHA-256** (`lib/content-hash.ts`), never keccak. `env.crypto().sha256()`
+  is the Soroban host primitive, so a contract can recompute the digest; there is no
+  keccak host function. Both are 32 bytes, so every `BytesN<32>` field takes it
+  unchanged — but a pre-migration digest will not match a fresh one.
+- Agents sign with **local Stellar seeds** held only in the worker process env
+  (`STELLAR_ORACLE_SECRET`, `CREATOR_SECRET`, `COUNCIL_<SLUG>_SECRET`). The web
+  server never sees a seed — only `G…` addresses for display and payment routing.
+- **`G…`/`C…` strkeys are case-sensitive base32.** Never lowercase one for
+  comparison; the EVM `toLowerCase()` habit turns a valid address into one that
+  matches nothing.
+- Paid endpoints speak **x402 v2** only, in the Stellar-native `exact` scheme: the
+  buyer submits its own USDC `Payment` and presents a signed proof; the seller reads
+  the transaction back off Horizon. No facilitator, no HTTP third party. Never
+  reintroduce manual transaction inspection or custom payment headers.
+- Money is accounted in **atomic integers**. `payments_v2.amount_atomic` is
+  `NUMERIC(78,0)`; decimals are applied at the API/UI edge only.
+- When a contract in `contracts-soroban/` changes, regenerate bindings
+  (`npm run stellar:bindings`) and keep `lib/contract.ts` in sync.
+- Categories: `sports`, `weather`, `crypto`, `culture`, `custom` (English).
+- Sync/read-index changes must pass `npm run check:ledger-fixture`; see
+  `docs/LEDGER_REPLAY.md` for artifact, secret, release, and rollback policy.
+
+## Node test workflow (must stay green on release)
+
+The release entry point is `npm run test:node`; `test:smoke` remains an alias
+for callers that already use it. The runner discovers all
+`tests/node/*.test.ts` files in deterministic order and explicitly preserves
+Node's process-per-file isolation. It never uses shared-process test mode or
+reruns only previously failed files.
+
+The default runner creates `.cache/node-tests/` with Node's
+`NODE_COMPILE_CACHE`. This is a compile-only optimization: no test result,
+assertion, or coverage data is reused as a pass signal. The cache directory is
+versioned by the Node version, lockfile, `tsx` version, and runner version;
+a dependency, runtime, or runner change therefore misses the cache. Use
+`--no-cache` for a forced cold run and `--clear-cache` before diagnosing a
+cache problem. CI caches the same directory, but the manifest and versioned
+path prevent stale entries from being trusted.
+
+The runner uses a strict child-environment allowlist. It does not load
+`.env.local` and does not pass production seeds, Stellar credentials, LLM keys,
+database URLs, or arbitrary environment variables. Database-backed tests skip
+unless the operator explicitly supplies `--with-db`; that option is for an
+isolated test database only. A clean checkout must be able to run the default
+suite with no network credentials, wallet seed, LLM key, or database.
+
+`npm run test:node:coverage` runs the same complete suite and writes a fresh
+LCOV report. On success the atomic artifact is
+`coverage/node/node-tests.lcov`; on test failure it is
+`coverage/node/node-tests.failed.lcov`, and the process still exits nonzero.
+CI uploads either report with `if: always()` so a failed or cache-cold run is
+observable. Reports contain source paths and coverage data, not environment
+values or credentials. Coverage is supplemental reporting, not a reason to
+skip tests, lower thresholds, or switch to shared process isolation.
+
+Release and rollback rules:
+
+- Run `npm run lint`, `npm run typecheck`, `npm run test:node:coverage`, and
+  the contract/artifact checks before merging a runner change. A coverage
+  report is not a substitute for the passing test exit status.
+- Keep the cache and coverage directories ignored; never upload or commit
+  either directory as a source artifact.
+- To roll back, revert the runner, package scripts, and CI cache/artifact
+  wiring. Removing `.cache/node-tests/` is sufficient for a local cache
+  rollback. No contract, chain, database, or deployment rollback is required
+  because the workflow performs no writes outside the ignored local/CI cache
+  and coverage directories.
+
+## Oracle agent
+
+```bash
 # Start the oracle (needs STELLAR_ORACLE_SECRET + an LLM key)
 npm run oracle
 The oracle polls for active claims past their deadline, fetches evidence,

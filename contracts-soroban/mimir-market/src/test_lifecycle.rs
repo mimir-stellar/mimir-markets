@@ -1,6 +1,6 @@
 #![cfg(test)]
 //! Claim creation, challenging, gating and cancellation.
-
+//! Validates rematch parent links to preserve contract-first accounting, clear market semantics, and safe agent operations.
 extern crate std;
 
 use crate::test_common::{Fixture, USDC};
@@ -219,20 +219,17 @@ fn the_creator_cannot_challenge_their_own_claim() {
 }
 
 #[test]
-fn the_same_address_cannot_challenge_twice() {
+fn the_same_address_can_retry_a_challenge_without_paying_twice() {
     let f = Fixture::new(0, 0);
     let creator = f.user(100 * USDC);
     let c1 = f.user(100 * USDC);
     let id = f.client().create_claim(&creator, &f.params(10 * USDC));
 
     f.client().challenge_claim(&c1, &id, &(4 * USDC), &None);
-    let err = f
-        .client()
-        .try_challenge_claim(&c1, &id, &(4 * USDC), &None)
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, Error::AlreadyChallenged);
+    f.client().challenge_claim(&c1, &id, &(4 * USDC), &None);
     assert_eq!(f.escrow_balance(), 14 * USDC);
+    assert_eq!(f.client().get_claim(&id).challenger_count, 1);
+    assert_eq!(f.client().get_challenger_list(&id).len(), 1);
 }
 
 #[test]
@@ -882,6 +879,11 @@ fn a_market_filled_to_max_challengers_pays_out_all_one_hundred() {
     let mut params = f.params(creator_stake);
     params.max_challengers = MAX_CHALLENGERS;
     let id = f.client().create_claim(&creator, &params);
+
+    // Simulate a claim created before the hard cap was enforced at admission.
+    let mut claim = f.env.as_contract(&f.client().address, || crate::storage::get_claim(&f.env, id).unwrap());
+    claim.market.max_challengers = crate::types::MAX_CHALLENGERS + 1;
+    f.env.as_contract(&f.client().address, || crate::storage::set_claim(&f.env, id, &claim));
 
     let stake = 2 * USDC;
     let mut challengers = std::vec::Vec::new();
