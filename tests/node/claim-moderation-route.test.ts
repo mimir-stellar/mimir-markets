@@ -50,7 +50,9 @@ async function run(body: unknown) {
 
 async function runWith(
   body: unknown,
-  moderateClaim: Parameters<typeof handleClaimModerationPost>[0]["moderateClaim"]
+  moderateClaim: Parameters<
+    typeof handleClaimModerationPost
+  >[0]["moderateClaim"],
 ) {
   return handleClaimModerationPost({
     request: makeRequest(body),
@@ -174,12 +176,9 @@ test("POST /api/claim-moderation: rate-limited upstream triggers 429 and cooldow
   };
   moderationResultCache.delete(hashModerationInput(body));
 
-  const response = await runWith(
-    body,
-    async () => {
-      throw new Error("Moderation request failed (429): RESOURCE_EXHAUSTED");
-    }
-  );
+  const response = await runWith(body, async () => {
+    throw new Error("Moderation request failed (429): RESOURCE_EXHAUSTED");
+  });
 
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("Retry-After"), "35");
@@ -213,4 +212,3 @@ test("POST /api/claim-moderation: global cooldown returns 429 + Retry-After", as
 
   setGlobalCooldownMs(0);
 });
-
