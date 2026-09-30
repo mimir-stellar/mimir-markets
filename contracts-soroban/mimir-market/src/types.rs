@@ -377,4 +377,10 @@ pub enum Error {
     /// The claim's combined metadata exceeded `MAX_CLAIM_METADATA_BYTES`. No
     /// stake is pulled and no storage is written for a claim over the budget.
     ClaimMetadataTooLong = 42,
+    /// The parent claim referenced by `parent_id` does not exist.
+    ParentClaimNotFound = 43,
+    /// The parent claim is not in a state that allows creating a rematch.
+    ParentClaimInvalidState = 44,
+    /// The parent claim has already been used for a rematch (no duplicate rematches).
+    ParentClaimAlreadyRematched = 45,
 }

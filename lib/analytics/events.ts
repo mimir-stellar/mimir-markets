@@ -16,6 +16,9 @@
  */
 
 import { STELLAR_NETWORK, getMarketContractId } from "../stellar";
+// The leaf module, not lib/ops/trace.ts: this file ships to the browser, and the
+// full trace module imports node:async_hooks.
+import { isTraceId } from "../ops/trace-id";
 import type { ProductModifier, SettlementMode, SubjectType } from "../market-modes";
 
 /**
@@ -80,6 +83,21 @@ export interface EventEnvelope {
   source_surface: SourceSurface;
   locale?: string;
   tx_status?: TxStatus;
+  /**
+   * The `mh_…` trace this event was captured under, when the call site was inside
+   * one (see `lib/ops/trace.ts`).
+   *
+   * Additive and optional, so this is NOT an envelope version bump: v2 is about
+   * the shape of the fields that exist, and rows written before this one stay
+   * measurable. What it buys is the join — an event that preceded a failed stake
+   * becomes findable from the worker span that settled it, instead of being
+   * correlated by a timestamp.
+   *
+   * A trace id is a random 128-bit value, never a wallet, a key, or anything else
+   * derived from the user. It is validated on the way in, so a browser cannot
+   * choose the value it is filed under.
+   */
+  trace_id?: string;
 }
 
 /** Every funnel event Mimir emits. Adding one here is the only way to emit it. */
@@ -169,6 +187,7 @@ export const EVENT_PROPERTY_SCHEMA: Record<AnalyticsEvent, Readonly<Record<strin
   copy_executed: {},
   copy_skipped: {},
   copy_revoked: {},
+  basket_ownership_transferred: {},
 };
 
 export function conformEventProperties(
@@ -219,6 +238,10 @@ export function buildEnvelope(
   if (partial.agent_id) envelope.agent_id = partial.agent_id;
   if (partial.locale) envelope.locale = partial.locale;
   if (partial.tx_status) envelope.tx_status = partial.tx_status;
+  // Only a well-formed id passes. A caller that has one is inside a trace; a
+  // caller that passes an arbitrary string is not, and must not be able to file an
+  // event under an id it chose.
+  if (isTraceId(partial.trace_id)) envelope.trace_id = partial.trace_id;
   return envelope;
 }
 

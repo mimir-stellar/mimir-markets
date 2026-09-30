@@ -1,6 +1,6 @@
 #![cfg(test)]
 //! Claim creation, challenging, gating and cancellation.
-
+//! Validates rematch parent links to preserve contract-first accounting, clear market semantics, and safe agent operations.
 extern crate std;
 
 use crate::test_common::{Fixture, USDC};
@@ -882,6 +882,11 @@ fn a_market_filled_to_max_challengers_pays_out_all_one_hundred() {
     let mut params = f.params(creator_stake);
     params.max_challengers = MAX_CHALLENGERS;
     let id = f.client().create_claim(&creator, &params);
+
+    // Simulate a claim created before the hard cap was enforced at admission.
+    let mut claim = crate::storage::get_claim(&f.env, id).unwrap();
+    claim.market.max_challengers = MAX_CHALLENGERS + 1;
+    crate::storage::set_claim(&f.env, id, &claim);
 
     let stake = 2 * USDC;
     let mut challengers = std::vec::Vec::new();

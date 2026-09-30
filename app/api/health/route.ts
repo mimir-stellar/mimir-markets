@@ -31,7 +31,11 @@ export async function GET() {
     // Without a database there are no signals at all, and pretending otherwise
     // would report a green probe for a system that cannot serve a single market.
     return NextResponse.json(
-      { status: "critical", alarms: [{ id: "db.unconfigured", severity: "critical", message: "DATABASE_URL is not configured" }] },
+      {
+        status: "critical",
+        alarms: [{ id: "db.unconfigured", severity: "critical", message: "DATABASE_URL is not configured" }],
+        operationalStatusUrl: "/api/health/status",
+      },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -95,8 +99,14 @@ export async function GET() {
     report.status = "critical";
   }
 
-  return NextResponse.json(report, {
-    status: healthHttpStatus(report.status),
-    headers: { "Cache-Control": "no-store" },
-  });
+  return NextResponse.json(
+    {
+      ...report,
+      operationalStatusUrl: "/api/health/status",
+    },
+    {
+      status: healthHttpStatus(report.status),
+      headers: { "Cache-Control": "no-store" },
+    },
+  );
 }

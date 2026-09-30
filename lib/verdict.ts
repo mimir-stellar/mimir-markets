@@ -115,9 +115,10 @@ export type VerdictParseError = {
    *                       was triggered too early.
    *  cancelled          — claim state is "cancelled"; must not be settled.
    *  dependency-failure — a required upstream step (evidence fetch, council
-   *                       quorum, etc.) failed and the oracle cannot proceed
-   *                       without it for this claim.
-   */
+    *                       quorum, etc.) failed and the oracle cannot proceed
+    *                       without it for this claim.
+    *  paused             — claim state is "paused"; must not be settled.
+    */
   reason:
     | "invalid-json"
     | "invalid-verdict"
@@ -126,6 +127,7 @@ export type VerdictParseError = {
     | "duplicate"
     | "stale"
     | "cancelled"
+    | "paused"
     | "dependency-failure";
   /** Developer-readable detail, never surfaced to end users. */
   detail: string;
@@ -280,7 +282,7 @@ export function validateVerdictFields(raw: unknown): VerdictPayload | null {
  */
 export interface VerdictGuardContext {
   /** Current on-chain state of the claim. */
-  claimState: "open" | "active" | "resolved" | "cancelled";
+  claimState: "open" | "active" | "resolved" | "cancelled" | "paused";
   /** Unix seconds — claim deadline. */
   deadline: number;
   /** Unix seconds — current time (injectable for tests). Defaults to Date.now()/1000. */
@@ -311,6 +313,14 @@ export function checkSettlementGuards(ctx: VerdictGuardContext): VerdictParseErr
       ok: false,
       reason: "duplicate",
       detail: `Claim is already resolved (state='resolved'). Skipping to avoid double-settlement.`,
+    };
+  }
+
+  if (ctx.claimState === "paused") {
+    return {
+      ok: false,
+      reason: "paused",
+      detail: `Claim is in state 'paused' and cannot be settled.`,
     };
   }
 

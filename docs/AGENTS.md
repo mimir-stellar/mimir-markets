@@ -44,6 +44,8 @@ See `docs/STELLAR_NETWORK.md` for the one-page architecture reference.
 | `scripts/fund-agents.ts` | Fund agent accounts from a master seed |
 | `scripts/check-forbidden-terms.mjs` | Guardrail: no pre-Stellar chain or bespoke-402 residue |
 | `scripts/run-browser-smoke.mjs` | Browser smoke orchestrator: build + serve + test + teardown in a secret-free env |
+| `scripts/run-node-tests.mjs` | Node test runner: deterministic discovery, process isolation, compile cache, and LCOV artifacts |
+| `tests/node/node-test-runner.test.ts` | Regression tests for runner safety, cache invalidation, failure handling, and coverage publication |
 | `scripts/lib/browser-smoke-env.mjs` | The smoke harness's strict env allowlist (what a smoke build may see) |
 | `tests/browser/` + `playwright.config.ts` | Playwright browser smoke suite (run via `npm run smoke:browser`) |
 
@@ -115,6 +117,52 @@ add a page, a wallet gate, or an env-read, keep it green:
 - Categories: `sports`, `weather`, `crypto`, `culture`, `custom` (English).
 - Sync/read-index changes must pass `npm run check:ledger-fixture`; see
   `docs/LEDGER_REPLAY.md` for artifact, secret, release, and rollback policy.
+
+## Node test workflow (must stay green on release)
+
+The release entry point is `npm run test:node`; `test:smoke` remains an alias
+for callers that already use it. The runner discovers all
+`tests/node/*.test.ts` files in deterministic order and explicitly preserves
+Node's process-per-file isolation. It never uses shared-process test mode or
+reruns only previously failed files.
+
+The default runner creates `.cache/node-tests/` with Node's
+`NODE_COMPILE_CACHE`. This is a compile-only optimization: no test result,
+assertion, or coverage data is reused as a pass signal. The cache directory is
+versioned by the Node version, lockfile, `tsx` version, and runner version;
+a dependency, runtime, or runner change therefore misses the cache. Use
+`--no-cache` for a forced cold run and `--clear-cache` before diagnosing a
+cache problem. CI caches the same directory, but the manifest and versioned
+path prevent stale entries from being trusted.
+
+The runner uses a strict child-environment allowlist. It does not load
+`.env.local` and does not pass production seeds, Stellar credentials, LLM keys,
+database URLs, or arbitrary environment variables. Database-backed tests skip
+unless the operator explicitly supplies `--with-db`; that option is for an
+isolated test database only. A clean checkout must be able to run the default
+suite with no network credentials, wallet seed, LLM key, or database.
+
+`npm run test:node:coverage` runs the same complete suite and writes a fresh
+LCOV report. On success the atomic artifact is
+`coverage/node/node-tests.lcov`; on test failure it is
+`coverage/node/node-tests.failed.lcov`, and the process still exits nonzero.
+CI uploads either report with `if: always()` so a failed or cache-cold run is
+observable. Reports contain source paths and coverage data, not environment
+values or credentials. Coverage is supplemental reporting, not a reason to
+skip tests, lower thresholds, or switch to shared process isolation.
+
+Release and rollback rules:
+
+- Run `npm run lint`, `npm run typecheck`, `npm run test:node:coverage`, and
+  the contract/artifact checks before merging a runner change. A coverage
+  report is not a substitute for the passing test exit status.
+- Keep the cache and coverage directories ignored; never upload or commit
+  either directory as a source artifact.
+- To roll back, revert the runner, package scripts, and CI cache/artifact
+  wiring. Removing `.cache/node-tests/` is sufficient for a local cache
+  rollback. No contract, chain, database, or deployment rollback is required
+  because the workflow performs no writes outside the ignored local/CI cache
+  and coverage directories.
 
 ## Oracle agent
 
