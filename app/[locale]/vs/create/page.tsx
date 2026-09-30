@@ -15,6 +15,7 @@ import { StrKey } from "@stellar/stellar-sdk";
 import { useLocale, useMessages, useTranslations } from "next-intl";
 import { usePathname, useRouter } from "@/i18n/navigation";
 import { useWallet } from "@/lib/wallet";
+import { evaluateUsdcTrustlineGate } from "@/lib/usdcTrustlineGate";
 import {
   createClaim,
   createRematch,
@@ -82,8 +83,19 @@ import {
 import { toast } from "sonner";
 import PageTransition, { AnimatedItem } from "@/components/PageTransition";
 import { GlassCard, Button, Input, ListboxField } from "@/components/ui";
+import {
+  UsdcTrustlineGate,
+  useUsdcTrustline,
+} from "@/components/wallet/UsdcTrustlineGate";
 import ClaimStrengthCard from "@/components/ClaimStrengthCard";
 import CreateChallengeTicket from "@/components/vs/CreateChallengeTicket";
+import {
+  CREATE_DESKTOP_CTA_WRAP_CLASS,
+  CREATE_MOBILE_CTA_BAR_CLASS,
+  CREATE_PAGE_SHELL_CLASS,
+  CREATE_STAKE_CUSTOM_CELL_CLASS,
+  CREATE_STAKE_PRESET_GRID_CLASS,
+} from "@/lib/createFormResponsive";
 import { BlueprintHeading } from "@/components/BlueprintGrid";
 import CreateMockFundingOverlay, {
   type CreateMockOverlayPhase,
@@ -92,6 +104,10 @@ import CreateSuccessScreen from "@/components/vs/CreateSuccessScreen";
 import Confetti from "@/components/Confetti";
 import { sealStamp } from "@/lib/animations/rituals";
 import { draftOutcomeSidesFromQuestion } from "@/lib/outcomeDraft";
+import {
+  formatSettlementRuleWithSourceMetadata,
+  type ResolutionSourceType,
+} from "@/lib/resolutionSourceMetadata";
 import {
   ChevronDown,
   Clock,
@@ -185,7 +201,9 @@ export default function CreatePage() {
   const router = useRouter();
   const pathname = usePathname();
   const { address, isConnected, connect, signer } = useWallet();
+  const trustline = useUsdcTrustline();
   const t = useTranslations("create");
+  const tWallet = useTranslations("wallet");
   const tc = useTranslations("common");
   const tQuality = useTranslations("quality");
   const tCat = useTranslations("categories");
@@ -232,6 +250,9 @@ export default function CreatePage() {
   const [challengerPayoutBps, setChallengerPayoutBps] = useState(20_000);
   const [poolSlots, setPoolSlots] = useState(10);
   const [settlementRule, setSettlementRule] = useState("");
+  const [resolutionSourceType, setResolutionSourceType] =
+    useState<ResolutionSourceType | "">("");
+  const [resolutionTarget, setResolutionTarget] = useState("");
   const [, setMaxChallengers] = useState(1);
   /** Texto del 4º slot (custom); vacío cuando el valor coincide con preset 1/2/5 para mostrar placeholder "–". */
   const [, setMaxChallengersSlotDraft] = useState("");
@@ -274,6 +295,24 @@ export default function CreatePage() {
   const mockFlowTimersRef = useRef<number[]>([]);
   /** `/vs/create?demo=1`: flujo sin wallet ni contrato (no compatible con rematch). */
   const isCreateDemoSession = isCreateDemoUrl && rematchId === null;
+  function setResolutionSourceUrl(
+    nextUrl: string,
+    sourceType: ResolutionSourceType | "" = ""
+  ) {
+    setUrl(nextUrl);
+    setResolutionSourceType(sourceType);
+    setResolutionTarget("");
+  }
+
+  const createTrustlineGate = evaluateUsdcTrustlineGate({
+    action: rematchId === null ? "create" : "rematch",
+    status: trustline.status,
+    loading: trustline.loading,
+    stale: trustline.stale,
+    isConnected,
+    hasSigner: Boolean(signer),
+  });
+  const createTrustlineBlocked = !isCreateDemoSession && !createTrustlineGate.allowed;
   const ticketWalletAddress =
     isCreateDemoSession && !address ? MOCK_DEMO_CREATOR_ADDRESS : address;
   /** Evita mismatch de hidratación: fechas relativas y `min` del input dependen de zona horaria y del reloj del cliente. */
@@ -300,8 +339,12 @@ export default function CreatePage() {
     [challengerPayoutBps, stake],
   );
 
+  const chainSettlementRule = formatSettlementRuleWithSourceMetadata(
+    settlementRule,
+    { sourceType: resolutionSourceType, resolutionTarget }
+  );
   const ticketSettlementPreview =
-    settlementRule.trim() || recommendedSettlementTemplate;
+    chainSettlementRule.trim() || recommendedSettlementTemplate;
   /**
    * What the user must revisit before re-running a market.
    *
@@ -517,12 +560,12 @@ export default function CreatePage() {
         creator_position: creatorPos,
         opponent_position: opponentPos,
         resolution_url: url,
-        settlement_rule: settlementRule,
+        settlement_rule: chainSettlementRule,
         category,
         deadline: Number.isFinite(deadlineTs) ? deadlineTs : 0,
       };
     },
-    [category, creatorPos, customDeadline, opponentPos, question, settlementRule, url]
+    [category, chainSettlementRule, creatorPos, customDeadline, opponentPos, question, url]
   );
 
   function autofillOutcomeSidesFromQuestion() {
@@ -543,7 +586,7 @@ export default function CreatePage() {
       creatorPos.trim(),
       opponentPos.trim(),
       category.trim(),
-      settlementRule.trim(),
+      chainSettlementRule.trim(),
       normalizedSourceUrl.trim(),
     ];
     return parts.join("|");
@@ -553,7 +596,7 @@ export default function CreatePage() {
     normalizedSourceUrl,
     opponentPos,
     question,
-    settlementRule,
+    chainSettlementRule,
   ]);
 
   const moderationInputReady = useMemo(() => {
@@ -690,7 +733,7 @@ export default function CreatePage() {
     setBestOf(rawBestOf === 3 || rawBestOf === 5 ? rawBestOf : null);
     const normalizedSourceSeed = normalizeResolutionSource(rawSourceUrl);
     if (normalizedSourceSeed) {
-      setUrl(normalizedSourceSeed);
+      setResolutionSourceUrl(normalizedSourceSeed);
       setSourceSeedUrl(normalizedSourceSeed);
       setSourceDraftOpen(true);
     }
@@ -721,7 +764,7 @@ export default function CreatePage() {
       setQuestion(source.question);
       setCreatorPos(source.creator_position);
       setOpponentPos(source.counter_position ?? source.opponent_position);
-      setUrl(source.resolution_url);
+      setResolutionSourceUrl(source.resolution_url);
       setStake(source.creator_stake ?? source.stake_amount);
       const normalizedRematchMarketType = normalizeSupportedMarketType(
         source.market_type ?? "binary"
@@ -804,7 +847,7 @@ export default function CreatePage() {
       setQuestion(prefillValues.q);
       setCreatorPos(prefillValues.a);
       setOpponentPos(prefillValues.b);
-      setUrl(prefillValues.u);
+      setResolutionSourceUrl(prefillValues.u);
     }
   }
 
@@ -859,11 +902,20 @@ export default function CreatePage() {
   }
 
   function applySourceDraft(candidate: SourceClaimDraftCandidate) {
+    const candidateSourceUrl = normalizeResolutionSource(
+      candidate.primaryResolutionSource
+    );
+    const draftedSourceUrl = normalizeResolutionSource(draftResult?.sourceUrl ?? "");
+    const sourceType =
+      candidateSourceUrl && candidateSourceUrl === draftedSourceUrl
+        ? draftResult?.sourceType ?? ""
+        : "";
+
     startApplyingDraft(() => {
       setQuestion(candidate.claimText);
       setCreatorPos(candidate.sideA);
       setOpponentPos(candidate.sideB);
-      setUrl(candidate.primaryResolutionSource);
+      setResolutionSourceUrl(candidate.primaryResolutionSource, sourceType);
       setCategory(normalizeCategoryId(candidate.category));
       setMarketType("binary");
       setSettlementRule(candidate.settlementRule);
@@ -942,7 +994,7 @@ export default function CreatePage() {
             creator_position: creatorPos,
             opponent_position: opponentPos,
             category,
-            settlement_rule: settlementRule.trim(),
+            settlement_rule: chainSettlementRule.trim(),
             resolution_url: normalizedSourceUrl,
           },
         }),
@@ -1046,7 +1098,7 @@ export default function CreatePage() {
     normalizedSourceUrl,
     opponentPos,
     question,
-    settlementRule,
+    chainSettlementRule,
     t,
     tQuality,
   ]);
@@ -1107,6 +1159,11 @@ export default function CreatePage() {
       return;
     }
 
+    if (!isDemoCreate && !createTrustlineGate.allowed) {
+      toast.error(tWallet(createTrustlineGate.messageKey));
+      return;
+    }
+
     const {
       question: parsedQuestion,
       creatorPosition: parsedCreatorPos,
@@ -1119,6 +1176,10 @@ export default function CreatePage() {
       maxChallengers: normalizedMaxChallengers,
       challengerPayoutBps: normalizedChallengerPayoutBps,
     } = preflight.parsed;
+    const settlementRuleWithSourceMetadata = formatSettlementRuleWithSourceMetadata(
+      parsedSettlementRule,
+      { sourceType: resolutionSourceType, resolutionTarget }
+    );
 
     // The chain stores the loose strings; the canonical mode decides what they
     // are. A duel is escrowed as a one-slot pool — see lib/market-modes.ts.
@@ -1139,7 +1200,7 @@ export default function CreatePage() {
       // rejected by validateMode, and the contract would price payouts off it.
       challenger_payout_bps: normalizedChallengerPayoutBps,
       handicap_line: "",
-      settlement_rule: parsedSettlementRule,
+      settlement_rule: settlementRuleWithSourceMetadata,
       max_challengers: normalizedMaxChallengers,
       visibility,
       invite_key: inviteKey,
@@ -1150,6 +1211,11 @@ export default function CreatePage() {
       if (!moderationOk) {
         return;
       }
+    }
+
+    if (!isDemoCreate && !createTrustlineGate.allowed) {
+      toast.error(tWallet(createTrustlineGate.messageKey));
+      return;
     }
 
     let releaseLock: (() => void) | undefined;
@@ -1204,7 +1270,7 @@ export default function CreatePage() {
             odds_mode: normalizedOddsMode,
             max_challengers: normalizedMaxChallengers,
             is_private: isPrivate,
-            settlement_rule: settlementRule.trim(),
+            settlement_rule: settlementRuleWithSourceMetadata,
             handicap_line: "",
             challenger_payout_bps: 0,
           },
@@ -1331,7 +1397,7 @@ export default function CreatePage() {
           setQuestion("");
           setCreatorPos("");
           setOpponentPos("");
-          setUrl("");
+          setResolutionSourceUrl("");
           setSettlementRule("");
           setVisibility("public");
           setCreatedExplorerTxHash("");
@@ -1352,7 +1418,7 @@ export default function CreatePage() {
         subtitleSuccess={t("mockOverlaySuccessHint")}
       />
       <PageTransition>
-      <div className="mx-auto w-full max-w-[1280px] px-4 pb-12 sm:px-6">
+      <div className={CREATE_PAGE_SHELL_CLASS}>
         <AnimatedItem>
           <div className="mb-8 w-full sm:mb-10">
           {rematchId && (
@@ -1471,7 +1537,7 @@ export default function CreatePage() {
                       spellCheck={false}
                       placeholder={t("verificationUrlPlaceholder")}
                       value={url}
-                      onChange={(event) => setUrl(event.target.value)}
+                      onChange={(event) => setResolutionSourceUrl(event.target.value)}
                       className="form-field-pv min-h-[3.25rem] flex-1 font-mono text-xs"
                     />
                     <Button
@@ -1814,7 +1880,7 @@ export default function CreatePage() {
                 </span>
                 {t("stakeSectionTitle")}
               </h3>
-              <div className="grid grid-cols-5 gap-2">
+              <div className={CREATE_STAKE_PRESET_GRID_CLASS}>
                 {STAKE_PRESET_AMOUNTS.map((amount) => (
                   <motion.button
                     key={amount}
@@ -1834,7 +1900,7 @@ export default function CreatePage() {
                   </motion.button>
                 ))}
                 <div
-                  className={`flex min-h-[2.75rem] w-full min-w-0 items-center justify-center rounded-lg border px-1.5 py-1.5 transition-[border-color,background-color,color,box-shadow] sm:min-h-[3.25rem] sm:px-2 sm:py-2 ${
+                  className={`flex ${CREATE_STAKE_CUSTOM_CELL_CLASS} items-center justify-center rounded-lg border px-1.5 py-1.5 transition-[border-color,background-color,color,box-shadow] sm:min-h-[3.25rem] sm:px-2 sm:py-2 ${
                     customStakeFocused || !isPresetStakeAmount(stake)
                       ? "border-pv-emerald bg-pv-emerald/[0.12] text-pv-emerald shadow-[0_0_16px_-8px_rgba(51,79,169,0.3)]"
                       : "border border-pv-ink/[0.12] bg-pv-surface text-pv-muted"
@@ -2001,16 +2067,76 @@ export default function CreatePage() {
                 spellCheck={false}
                 placeholder={t("verificationUrlPlaceholder")}
                 value={url}
-                onChange={(event) => setUrl(event.target.value)}
+                onChange={(event) => setResolutionSourceUrl(event.target.value)}
+                aria-invalid={sourceNeedsWork}
+                aria-describedby="create-source-url-hint"
                 className="form-field-pv min-h-[3.25rem] font-mono text-xs"
               />
               <p
+                id="create-source-url-hint"
                 className={`text-xs leading-relaxed ${
                   sourceNeedsWork ? "text-amber-300" : "text-pv-muted"
                 }`}
               >
                 {sourceNeedsWork ? t("qualitySource") : t("sourceStrengthHint")}
               </p>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label
+                    htmlFor="create-resolution-source-type"
+                    className="block text-[10px] font-bold uppercase tracking-[0.16em] text-pv-muted"
+                  >
+                    {t("resolutionSourceTypeLabel")}
+                  </label>
+                  <select
+                    id="create-resolution-source-type"
+                    value={resolutionSourceType}
+                    onChange={(event) =>
+                      setResolutionSourceType(
+                        event.target.value as ResolutionSourceType | ""
+                      )
+                    }
+                    className="form-field-pv min-h-[3.25rem] text-sm"
+                  >
+                    <option value="">{t("resolutionSourceTypeNone")}</option>
+                    <option value="official">{t("resolutionSourceTypeOfficial")}</option>
+                    <option value="media">{t("resolutionSourceTypeMedia")}</option>
+                    <option value="other">{t("resolutionSourceTypeOther")}</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label
+                    htmlFor="create-resolution-target"
+                    className="block text-[10px] font-bold uppercase tracking-[0.16em] text-pv-muted"
+                  >
+                    {t("resolutionSourceTargetLabel")}
+                  </label>
+                  <textarea
+                    id="create-resolution-target"
+                    rows={2}
+                    maxLength={240}
+                    value={resolutionTarget}
+                    onChange={(event) => setResolutionTarget(event.target.value)}
+                    placeholder={t("resolutionSourceTargetPlaceholder")}
+                    className="form-field-pv min-h-[3.25rem] resize-y text-sm"
+                  />
+                </div>
+              </div>
+              <p className="text-xs leading-relaxed text-pv-muted">
+                {t("resolutionSourceMetadataHint")}
+              </p>
+              {normalizedSourceUrl ? (
+                <p
+                  role="status"
+                  className="break-all rounded-lg border border-pv-emerald/15 bg-pv-emerald/[0.04] px-3 py-2 text-xs text-pv-muted"
+                >
+                  <span className="font-semibold text-pv-emerald">
+                    {t("resolutionSourceCanonicalUrl")}:
+                  </span>{" "}
+                  <span className="font-mono">{normalizedSourceUrl}</span>
+                </p>
+              ) : null}
 
               <div className="space-y-3 rounded-xl border border-pv-ink/[0.08] bg-pv-bg/70 p-4 sm:p-5">
                 <h4 className="text-[11px] font-bold uppercase tracking-[0.16em] text-pv-emerald/85">
@@ -2024,7 +2150,7 @@ export default function CreatePage() {
                     <button
                       key={example}
                       type="button"
-                      onClick={() => setUrl(example)}
+                      onClick={() => setResolutionSourceUrl(example)}
                       className="rounded-full border border-pv-ink/[0.08] bg-pv-ink/[0.03] px-3 py-1.5 font-mono text-[10px] font-medium text-pv-muted/70 transition-colors hover:border-pv-ink/[0.14] hover:text-pv-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pv-emerald/30 focus-visible:ring-offset-2 focus-visible:ring-offset-pv-bg"
                     >
                       {example}
@@ -2407,6 +2533,10 @@ export default function CreatePage() {
                     </div>
                   </div>
                 ) : null}
+                {!isCreateDemoSession && isConnected && (
+                  <UsdcTrustlineGate trustline={trustline} className="mb-3" />
+                )}
+                <div className={CREATE_DESKTOP_CTA_WRAP_CLASS}>
                 {isConnected || isCreateDemoSession ? (
                   <Button
                     variant="primary"
@@ -2416,7 +2546,7 @@ export default function CreatePage() {
                       mockOverlayPhase === "loading" ||
                       moderationLoading
                     }
-                    disabled={isFormMockBusy || moderationLoading}
+                    disabled={isFormMockBusy || moderationLoading || createTrustlineBlocked}
                     className="rounded-2xl py-5 font-display text-sm font-bold uppercase tracking-widest"
                   >
                     {mockOverlayPhase === "loading" || loading ? (
@@ -2445,9 +2575,53 @@ export default function CreatePage() {
                 <p className="text-center text-[9px] font-bold uppercase tracking-widest text-pv-muted/55 leading-snug">
                   {t("ticketSignatureNote")}
                 </p>
+                </div>
               </div>
             </AnimatedItem>
           </aside>
+        </div>
+
+        <div className={CREATE_MOBILE_CTA_BAR_CLASS} data-testid="create-mobile-cta">
+          <div className="mx-auto flex w-full max-w-[1280px] flex-col gap-2">
+            {isConnected || isCreateDemoSession ? (
+              <Button
+                variant="primary"
+                onClick={handleSubmit}
+                loading={
+                  loading ||
+                  mockOverlayPhase === "loading" ||
+                  moderationLoading
+                }
+                disabled={isFormMockBusy || moderationLoading || createTrustlineBlocked}
+                className="min-h-[44px] rounded-2xl py-4 font-display text-sm font-bold uppercase tracking-widest"
+              >
+                {mockOverlayPhase === "loading" || loading ? (
+                  mockOverlayPhase === "loading"
+                    ? t("mockOverlayFunding")
+                    : t("funding")
+                ) : (
+                  <>
+                    <span>
+                      {rematchId
+                        ? t("createRematchAndFund", { amount: stake })
+                        : t("createAndFund", { amount: stake })}
+                    </span>
+                    <Zap className="size-5 shrink-0" aria-hidden />
+                  </>
+                )}
+              </Button>
+            ) : (
+              <Button
+                onClick={connect}
+                className="min-h-[44px] rounded-2xl py-4 font-display text-sm font-bold uppercase tracking-widest"
+              >
+                {t("connectWallet")}
+              </Button>
+            )}
+            <p className="text-center text-[9px] font-bold uppercase tracking-widest text-pv-muted/55 leading-snug">
+              {t("ticketSignatureNote")}
+            </p>
+          </div>
         </div>
       </div>
     </PageTransition>

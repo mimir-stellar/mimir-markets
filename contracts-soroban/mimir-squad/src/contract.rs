@@ -53,6 +53,11 @@ impl MimirSquad {
         pool::withdraw_before_deadline(&env, participant, market_id, side, amount)
     }
 
+    
+    pub fn transition_deadline(env: Env, market_id: u64) -> Result<(), Error> {
+        pool::transition_deadline(&env, market_id)
+    }
+
     pub fn resolve(env: Env, market_id: u64, result: u32) -> Result<(), Error> {
         pool::resolve(&env, market_id, result)
     }
@@ -73,6 +78,18 @@ impl MimirSquad {
 
     pub fn claim_fees(env: Env) -> Result<i128, Error> {
         pool::claim_fees(&env)
+    }
+
+    /// Retry a payout that [`Self::claim`] parked because the transfer trapped
+    /// (frozen or deauthorized trustline). Returns the amount moved, or `0`
+    /// when nothing is parked.
+    pub fn claim_parked_payout(
+        env: Env,
+        participant: Address,
+        market_id: u64,
+        side: u32,
+    ) -> Result<i128, Error> {
+        pool::claim_parked_payout(&env, participant, market_id, side)
     }
 
     // ── Views ────────────────────────────────────────────────────────────────
@@ -104,6 +121,12 @@ impl MimirSquad {
 
     pub fn get_accrued_fees(env: Env) -> i128 {
         storage::accrued_fees(&env)
+    }
+
+    /// Payout settled in the ledger but not delivered to one winner, because
+    /// the token transfer trapped. `claim_parked_payout` moves it.
+    pub fn parked_payout(env: Env, market_id: u64, side: u32, who: Address) -> i128 {
+        storage::payout_of(&env, market_id, side, &who)
     }
 
     pub fn get_usdc(env: Env) -> Result<Address, Error> {
