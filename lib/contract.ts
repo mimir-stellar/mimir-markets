@@ -154,6 +154,16 @@ export interface ClaimData {
   context_hash?: string;
   /** Escrow still owed to challengers after resolution, display USDC. */
   remaining_escrow?: number;
+  /**
+   * Dependency health categories for this claim.
+   *
+   * `invalid`       — structural validation failed (e.g. missing resolution URL).
+   * `stale`         — no activity since the deadline passed without resolution.
+   * `duplicated`    — content hash matches an existing resolved claim.
+   * `cancelled`     — explicitly cancelled by the creator before resolution.
+   * `dependency-failure` — an external dependency (e.g. oracle, resolver) failed.
+   */
+  dependency_health?: "invalid" | "stale" | "duplicated" | "cancelled" | "dependency-failure";
   /** How many challengers have already pulled their settlement. */
   challenger_claims?: number;
   /** @deprecated not used — the oracle resolves automatically */
@@ -723,6 +733,37 @@ export function decodeClaim(
 export async function getClaim(claimId: number): Promise<ClaimData | null> {
   return readClaimRaw(claimId);
 }
+/**
+ * Compute dependency health categories for a claim.
+ *
+ * This function encapsulates the logic for determining the health status of a
+ * claim based on its state, deadline, and challenger activity. It ensures that
+ * the health categories are consistent and predictable across the application.
+ *
+ * @param claim - The decoded claim data.
+ * @param claimId - The unique identifier of the claim.
+ * @returns The dependency health category or undefined if no specific health issue is detected.
+ */
+function computeDependencyHealth(
+  claim: MimirMarket.Claim,
+  claimId: number,
+): ClaimData["dependency_health"] | undefined {
+  // If the claim is already resolved or cancelled, health is not applicable
+  if (claim.state === MimirMarket.ClaimState.Resolved || claim.state === MimirMarket.ClaimState.Cancelled) {
+    return undefined;
+  }
+
+  // Check for stale claims: no activity since the deadline passed
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (nowSec > Number(claim.deadline) && claim.state === MimirMarket.ClaimState.Active) {
+    return "stale";
+  }
+
+  // Placeholder for other health checks (e.g., invalid, duplicated, dependency-failure)
+  // These would be implemented based on specific business rules and external dependencies.
+  return undefined;
+}
+
 
 export async function getClaimCount(): Promise<number> {
   if (!isMarketConfigured()) return 0;

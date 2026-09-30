@@ -4,13 +4,12 @@
  * Public but deliberately thin: severities, thresholds and the measurements
  * behind them, and nothing about users, markets or addresses. A status page
  * nobody can reach during an incident is not a status page, so this stays
- * unauthenticated — which is also why it must never leak anything an attacker
+ * unauthenticated - which is also why it must never leak anything an attacker
  * could use.
  *
  * Returns 503 only when something is actually broken. A warning stays 200,
  * because a load balancer that pulls the app out of rotation over a slow research
- * source turns a degradation into an outage.
- */
+ * source turns a degradation into an outage. */
 
 import { NextResponse } from "next/server";
 
@@ -72,8 +71,8 @@ export async function GET() {
       Number.isFinite(lastSyncMs) && lastSyncMs > 0
         ? Math.max(0, Math.round((nowMs - lastSyncMs) / 1000))
         : null,
-    // Job queueing is the workers' own poll interval today, so there is no
-    // separate queue to lag. Reported as zero rather than invented.
+    /* Job queueing is the workers' own poll interval today, so there is no
+     /* separate queue to lag. Reported as zero rather than invented. */
     oldestQueuedJobAgeSec: 0,
     oldestOverdueSettlementSec: backlog?.oldestOverdueSec ?? 0,
     oracleBacklog: backlog?.count ?? 0,
@@ -85,9 +84,9 @@ export async function GET() {
 
   const report = evaluateHealth(snapshot, nowMs);
 
-  // A failed backlog query means the claims table is unreadable, which the
-  // snapshot above would otherwise report as an empty, healthy backlog.
-  if (backlog === null) {
+  /* A failed backlog query means the claims table is unreadable, which the
+   * snapshot above would otherwise report as an empty, healthy backlog.
+   if (backlog === null) {
     report.alarms.unshift({
       id: "db.claims_unreadable",
       severity: "critical",
