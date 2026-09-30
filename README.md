@@ -1231,6 +1231,30 @@ For a local cache reset, remove `.cache/node-tests`. A rollback is limited to
 reverting the runner, package scripts, and CI cache/artifact steps; it does not
 require a contract migration, chain action, or deployment rollback.
 
+### CI: fail-closed path filters
+
+CI decides what to run from an allowlist (`.github/workflows/ci.yml`). The
+`paths` job classifies every changed path via `scripts/ci/changed-paths.mjs`
+(mirrored and under test in `lib/ci/path-scope.ts`), then the `suites` matrix
+runs only the tiers (`app`, `agents`, `contracts`, `tests`) the change touches.
+The rules that keep it honest:
+
+- **Fail closed.** A path matching no scope is UNKNOWN and fails the job. When
+  the change set cannot be determined at all (missing event payload, failed
+  fetch, no merge-base), every tier runs. A green check never hides suites.
+- **Adding a scope is a reviewed decision.** New top-level directories, root
+  files and docs exemptions must be added to both `lib/ci/path-scope.ts` and
+  `scripts/ci/changed-paths.mjs`; `npm run check:driver-parity` fails when the
+  two drift, and `tests/node/ci-path-scope.test.ts` pins the behaviour.
+- **Doc-only changes** (README, CHANGELOG, LICENSE, `docs/`) are the only changes that
+  enable nothing.
+
+To preview what CI would run for your branch:
+
+```bash
+npm run ci:changed-paths -- --base origin/main
+```
+
 ---
 
 ## Game modes roadmap
