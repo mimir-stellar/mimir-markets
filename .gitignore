@@ -39,11 +39,17 @@ traction-wallets.env
 # ========================
 # Testing & coverage
 # ========================
+.cache/node-tests/
 coverage/
+coverage/node/
 .nyc_output/
 *.lcov
 __pycache__/
 *.pyc
+
+# Browser smoke suite artifacts (playwright.config.ts writes these)
+test-results/
+playwright-report/
 
 # ========================
 # Logs
