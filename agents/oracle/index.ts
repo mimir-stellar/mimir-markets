@@ -111,19 +111,7 @@ import {
 import { normalizeQuorum } from "../../lib/council/quorum";
 // Confidence tiers + fetcher-trust cap: pure and fixture-calibrated (#97).
 import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tiers";
-import {
-  BackoffError,
-  DependencyFailureError,
-  MalformedInputError,
-  StaleStateError,
-  DuplicateActionError,
-  CancelledByOperatorError,
-  PausedWorkerError,
-  ORACLE_BACKOFF,
-  computeBackoff,
-  describeBackoffError,
-  withBackoff,
-} from "../../lib/ops/backoff-policies";
+import { RiskManager } from "../../lib/oracle-risk";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -178,6 +166,7 @@ async function throttledLLM(
 const challengedClaimIds = new Set<number>();
 // Track evaluated-but-not-challenged (to avoid repeated LLM calls)
 const evaluatedClaimIds = new Set<number>();
+const riskManager = new RiskManager();
 
 requireEnv(["ORACLE_SECRET"]);
 requireAnyLLMKey();
@@ -661,6 +650,12 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
     return;
   }
 
+  const preGate = riskManager.canChallenge(claim, CHALLENGE_STAKE_USDC);
+  if (!preGate.ok) {
+    console.log(`[risk] skip claim #${claim.id}: ${preGate.reason}`);
+    return;
+  }
+
   // Evaluate early
   console.log(`\n[challenge] Evaluating claim #${claim.id}: "${claim.question.slice(0, 60)}..."`);
   evaluatedClaimIds.add(claim.id);
@@ -694,6 +689,12 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
   const kellyStake = Math.max(CHALLENGE_STAKE_USDC, Math.min(bankroll * kelly, bankroll * 0.1));
   const stakeUsdc = Math.round(kellyStake * 100) / 100;
 
+  const gate = riskManager.canChallenge(claim, stakeUsdc);
+  if (!gate.ok) {
+    console.log(`[risk] skip claim #${claim.id}: ${gate.reason}`);
+    return;
+  }
+
   console.log(`[challenge] Kelly: ${(kelly * 100).toFixed(1)}% of USDC bankroll → ${stakeUsdc} USDC stake`);
   console.log(`[challenge] Staking ${stakeUsdc} USDC on challenger side...`);
 
@@ -702,6 +703,7 @@ async function challengeIfMispriced(claim: ClaimOnChain): Promise<void> {
   const staked = await challengeClaim(ORACLE.signer, claim.id, stakeUsdc);
 
   challengedClaimIds.add(claim.id);
+  riskManager.recordChallenge(claim, stakeUsdc);
   console.log(`[challenge] ✓ Staked ${stakeUsdc} USDC — ${staked.explorerUrl ?? staked.txHash}`);
   console.log(`[challenge] Oracle: "${verdict.explanation.slice(0, 120)}"`);
 }
@@ -737,6 +739,9 @@ async function poll(): Promise<void> {
     if (claim.state === "active" && claim.deadline <= now) {
       expiredActive.push(claim);
       continue;
+    }
+    if (claim.state !== "open" && claim.state !== "active") {
+      riskManager.release(claim.id);
     }
 
     try {

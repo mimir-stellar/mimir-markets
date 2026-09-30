@@ -27,3 +27,11 @@ export function formatUsdcBare(amount: number): string {
     minimumFractionDigits: 0,
   }).format(amount);
 }
+
+/**
+ * Validates basis points as an integer-safe math value (0-10,000).
+ * Protects against floating-point dust that would break contract logic.
+ */
+export function isValidBps(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 10_000;
+}
