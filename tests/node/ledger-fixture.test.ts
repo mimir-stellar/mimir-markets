@@ -33,9 +33,8 @@ test("tampered money data fails the reviewed fingerprint", async () => {
   );
 });
 test("incomplete capture fails closed on orphan events", async () => {
-  const fixture = await loadLedgerFixture(fixturePath);
-  fixture.events = fixture.events.slice(1);
-  assert.throws(() => replayLedgerFixture(fixture), /orphan event/);
+  const fixture = await loadLedgerFixture(fixturePath); fixture.events = fixture.events.slice(1);
+  assert.throws(() => replayLedgerFixture(fixture), /2 orphan event/);
 });
 test("conflicting events at one ledger position are rejected", () => {
   const base = {

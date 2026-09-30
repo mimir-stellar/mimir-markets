@@ -76,8 +76,6 @@ test("POST /api/claim-moderation: feature disabled returns 404", async () => {
 
   assert.equal(response.status, 404);
   const payload = await response.json();
-  // The route answers with the standardized API code (lib/api/errors.ts),
-  // not the internal feature flag reason.
   assert.equal(payload?.error?.code, "not_found");
 });
 
