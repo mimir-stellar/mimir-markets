@@ -120,6 +120,10 @@ export const STELLAR_NETWORK = publicEnv("network") ?? "testnet";
 export const NETWORK_PASSPHRASE =
   publicEnv("networkPassphrase") ?? "Test SDF Network ; September 2015";
 
+export function validateNetworkPassphrase() {
+  if (!NETWORK_PASSPHRASE) throw new Error("Network passphrase is required");
+}
+
 const DEFAULT_RPC_URL = "https://soroban-testnet.stellar.org";
 const DEFAULT_HORIZON_URL = "https://horizon-testnet.stellar.org";
 
@@ -365,10 +369,56 @@ export interface StellarTxOutcome {
   hash: string;
   status: rpc.Api.GetTransactionStatus;
   succeeded: boolean;
+  /**
+   * Lifecycle state derived from the transaction status and response data.
+   * Used by UI components to render clear, contract-backed feedback.
+   */
   /** Still `NOT_FOUND` when the poll budget ran out. */
   pending: boolean;
   explorerUrl: string;
   response: rpc.Api.GetTransactionResponse | null;
+}
+
+/**
+ * Wait for a submitted transaction to land.
+ *
+ * Stellar closes a ledger every ~5s and a transaction is final the moment it is
+ * included — there are no reorgs and no confirmation count to wait for, so a
+ * single `pollTransaction` is the whole story. A budget that expires is reported
+ * as `pending` rather than thrown: the transaction may still be in flight and a
+ * caller must not tell the user it failed.
+ */
+export async function waitForTransaction(
+  hash: string,
+  opts: { attempts?: number; server?: rpc.Server } = {},
+): Promise<StellarTxOutcome> {
+  const server = opts.server ?? createSorobanRpcServer();
+  const explorerUrl = getExplorerTxUrl(hash);
+  try {
+    const response = await server.pollTransaction(hash, { attempts: opts.attempts ?? 12 });
+    const status = response.status;
+    const succeeded = status === rpc.Api.GetTransactionStatus.SUCCESS;
+    const failed = status === rpc.Api.GetTransactionStatus.FAIL;
+    const notFound = status === rpc.Api.GetTransactionStatus.NOT_FOUND;
+
+    return {
+      hash,
+      status,
+      succeeded,
+      pending: notFound,
+      explorerUrl,
+      response,
+    };
+  } catch {
+    return {
+      hash,
+      status: rpc.Api.GetTransactionStatus.NOT_FOUND,
+      succeeded: false,
+      pending: true,
+      explorerUrl,
+      response: null,
+    };
+  }
 }
 
 /**
@@ -608,33 +658,3 @@ export function formatXlmAmount(stroops: bigint | number | string, decimals = 5)
   return `${stroopsToXlm(stroops).toFixed(decimals)} XLM`;
 }
 
-/**
- * Aggregate dependency health status for the Stellar chain layer.
- *
- * This function checks the health of all critical dependencies (Market, Squad, USDC SAC)
- * and maps their internal states to the exposed dependency health categories.
- *
- * @returns An object containing the overall health status and individual dependency statuses.
- */
-export function getDependencyHealth(): {
-  overall: DependencyHealthCategory;
-  dependencies: Record<string, DependencyHealthCategory>;
-} {
-  const marketHealthy = isMarketConfigured();
-  const squadHealthy = isSquadHealthy();
-  const usdcHealthy = isUsdcSacHealthy();
-
-  const dependencies = {
-    market: marketHealthy ? "healthy" : "dependency-failure",
-    squad: squadHealthy ? "healthy" : "dependency-failure",
-    usdc: usdcHealthy ? "healthy" : "dependency-failure",
-  };
-
-  const overall =
-    marketHealthy && squadHealthy && usdcHealthy ? "healthy" : "dependency-failure";
-
-  return {
-    overall,
-    dependencies,
-  };
-}

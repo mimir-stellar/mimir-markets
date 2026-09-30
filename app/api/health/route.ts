@@ -13,26 +13,11 @@
 
 import { NextResponse } from "next/server";
 
-import { getSettlementBacklog, getSyncMeta, isDbConfigured } from "@lib/db";
-import { evaluateHealth, healthHttpStatus, type HealthSnapshot } from "@lib/ops/health";
-import { readFailureWindow, readWorkerBeats } from "@lib/ops/heartbeat";
-
-//*
- * Dependency health categories.
- * These categories expose the state of external dependencies (nodes, services, oracles)
- * without leaking private user data or internal implementation details.
- * This enables contract-first consumers to map dependency status to business logic.
- */
-export type DependencyCategory =
-  | "invalid"
-  | "stale"
-  | "duplicated"
-  | "cancelled"
-  | "dependency-failure"
-  | "ok";
-
-/** Structured dependency health information for external consumers. */
-import type { DependencyHealth} from "@lib/ops/health";
+import { getSettlementBacklog, getSyncMeta, isDbConfigured } from "@/lib/db";
+import { evaluateHealth, healthHttpStatus, type HealthSnapshot } from "@/lib/ops/health";
+import { readFailureWindow, readWorkerBeats } from "@/lib/ops/heartbeat";
+import { readAgentBalances } from "@/lib/agent-wallets";
+import { isAccountAddress } from "@/lib/stellar";
 
 export const dynamic = "force-dynamic";
 
@@ -45,18 +30,38 @@ export async function GET() {
     // Without a database there are no signals at all, and pretending otherwise
     // would report a green probe for a system that cannot serve a single market.
     return NextResponse.json(
-      { status: "critical", alarms: [{ id: "db.unconfigured", severity: "critical", message: "DATABASE_URL is not configured" ]},
+      {
+        status: "critical",
+        alarms: [{ id: "db.unconfigured", severity: "critical", message: "DATABASE_URL is not configured" }],
+        operationalStatusUrl: "/api/health/status",
+      },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
 
-  const [workers, lastSyncAt, backlog, rpc, facilitator, sources] = await Promise.all([
+  const agentRoles = [
+    { name: "oracle", pub: process.env.ORACLE_PUBLIC ?? process.env.STELLAR_ORACLE_PUBLIC },
+    { name: "market_creator", pub: process.env.CREATOR_PUBLIC ?? process.env.STELLAR_CREATOR_PUBLIC },
+  ];
+
+  const [workers, lastSyncAt, backlog, rpc, facilitator, sources, agentBalancesList] = await Promise.all([
     readWorkerBeats(),
     getSyncMeta("last_sync_at").catch(() => null),
     getSettlementBacklog().catch(() => null),
     readFailureWindow("rpc", nowMs),
     readFailureWindow("facilitator", nowMs),
     readFailureWindow("sources", nowMs),
+    Promise.all(
+      agentRoles.map(async (role) => {
+        if (!role.pub || !isAccountAddress(role.pub)) return { name: role.name, balance: null };
+        try {
+          const bal = await readAgentBalances(role.pub);
+          return { name: role.name, balance: bal.usdc };
+        } catch {
+          return { name: role.name, balance: null };
+        }
+      })
+    ),
   ]);
 
   const lastSyncMs = Number(lastSyncAt ?? "0");
@@ -74,6 +79,7 @@ export async function GET() {
     rpc,
     facilitator,
     sources: sources ?? EMPTY_WINDOW,
+    agentBalancesUsdc: Object.fromEntries(agentBalancesList.map((a) => [a.name, a.balance])),
   };
 
   const report = evaluateHealth(snapshot, nowMs);
@@ -92,46 +98,14 @@ export async function GET() {
     report.status = "critical";
   }
 
-  /*
-   * Expose dependency health categories for contract-first consumers.
-   * This information is privacy-safe, containing no user, market, or address data.
-   * Categories are mapped from the internal health status to standardized values.
-   */
-  const dependencyHealth: DependencyHealth = {
-    category: defaultDependencyCategory(report.status),
-    status: report.status,
-    alarms: report.alarms.map((alarm) => ({
-      id: alarm.id,
-      severity: alarm.severity,
-      message: alarm.message,
-      observed: alarm.observed ?? 0,
-      threshold: alarm.threshold ?? 0,
-      unit: alarm.unit ?? "count",
-    })),
-  };
-
   return NextResponse.json(
     {
-      ... report,
-      dependencyHealth,
+      ...report,
+      operationalStatusUrl: "/api/health/status",
     },
-    { status: healthTtpStatus(report.status), headers: { "Cache-Control": "no-store" } },
+    {
+      status: healthHttpStatus(report.status),
+      headers: { "Cache-Control": "no-store" },
+    },
   );
-}
-
-/*
- * Default mapping from internal health status to dependency category.
- * This mapping is designed to be conservative and privacy-safe.
- */
-function defaultDependencyCategory(status: string): DependencyCategory {
-  if (status === "critical") {
-    // Critical health indicates a fundamental dependency failure or unavailability.
-    return "dependency-failure";
-  }
-  if (status === "warning") {
-    // Warning indicates stale or degraded service, which may compromise data freshness.
-    return "stale";
-  }
-  // Default to ok for normal operation.
-  return "ok";
 }

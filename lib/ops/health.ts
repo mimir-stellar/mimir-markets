@@ -415,7 +415,12 @@ export function decodeHeartbeat(raw: string | null): HeartbeatPayload | null {
  *     overdue market instead.
  */
 
+import { isTraceId } from "./trace-id";
+
 export type Severity = "ok" | "warn" | "critical";
+
+/** Re-exported so a collector can validate an id it did not mint itself. */
+export { isTraceId };
 
 export interface Alarm {
   /** Stable id so an alert route can dedupe and route it. */
@@ -443,6 +448,15 @@ export interface WorkerBeat {
    * would alarm permanently and train everyone to ignore worker alarms.
    */
   expectedIntervalSec?: number;
+  /**
+   * Trace id of the cycle that produced this beat, when it ran inside one.
+   *
+   * This is what makes the alarm actionable: "the oracle is failing" becomes
+   * "the oracle is failing, cycle `mh_…`, here are its spans" without reconstructing
+   * a time window. Absent for a beat written outside a cycle, which is the honest
+   * reading — an invented id would point an operator at the wrong logs.
+   */
+  lastTraceId?: string;
 }
 
 export interface FailureWindow {
@@ -470,6 +484,11 @@ export interface HealthSnapshot {
   facilitator: FailureWindow;
   /** Research source fetches — a soft dependency, so warn only. */
   sources: FailureWindow;
+  /**
+   * Decimal USDC balances for the worker agents.
+   * Keyed by the worker role (e.g., "oracle").
+   */
+  agentBalancesUsdc: Record<string, number | null>;
 }
 
 export interface Thresholds {
@@ -488,6 +507,8 @@ export interface Thresholds {
   facilitatorFailureWarn: number;
   facilitatorFailureCritical: number;
   sourceFailureWarn: number;
+  agentBalanceWarnUsdc: number;
+  agentBalanceCriticalUsdc: number;
 }
 
 /**
@@ -513,6 +534,8 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   facilitatorFailureWarn: 0.05,
   facilitatorFailureCritical: 0.25,
   sourceFailureWarn: 0.3,
+  agentBalanceWarnUsdc: 1,
+  agentBalanceCriticalUsdc: 0.1,
 };
 
 /**
@@ -579,6 +602,12 @@ export interface HealthReport {
     facilitatorFailureRatio: number;
     sourceFailureRatio: number;
     workerAgesSec: Record<string, number | null>;
+    /**
+     * Trace id of each worker's last cycle, so the endpoint names the logs an
+     * operator should open. Null where there is none to name — a beat written
+     * outside a cycle, or a worker that has never reported.
+     */
+    workerTraceIds: Record<string, string | null>;
   };
 }
 
@@ -590,8 +619,12 @@ export function evaluateHealth(
   const t = { ...DEFAULT_THRESHOLDS, ...overrides };
   const alarms: Alarm[] = [];
   const workerAgesSec: Record<string, number | null> = {};
+  const workerTraceIds: Record<string, string | null> = {};
 
   for (const worker of snapshot.workers) {
+    // Validated again here rather than trusted from the snapshot: this function
+    // is the one place the id reaches a public, unauthenticated response.
+    workerTraceIds[worker.name] = isTraceId(worker.lastTraceId) ? worker.lastTraceId : null;
     if (worker.lastBeatAtMs === null) {
       // Rule 1: never reported is the worst case, not an unknown to ignore.
       workerAgesSec[worker.name] = null;
@@ -714,6 +747,35 @@ export function evaluateHealth(
   );
   if (sources) alarms.push(sources);
 
+  for (const [name, balance] of Object.entries(snapshot.agentBalancesUsdc)) {
+    if (balance === null) {
+      alarms.push({
+        id: `agent.${name}.untrusted`,
+        severity: "critical",
+        message: `agent ${name} has no USDC trustline or account`,
+        observed: 0,
+        threshold: t.agentBalanceCriticalUsdc,
+        unit: "count",
+      });
+    } else {
+      const balanceAlarm = threshold(
+        `agent.${name}.balance`,
+        -balance,
+        -t.agentBalanceWarnUsdc,
+        -t.agentBalanceCriticalUsdc,
+        "count",
+        (level) => `agent ${name} USDC balance is low: ${balance.toFixed(2)} (${level})`,
+      );
+      if (balanceAlarm) {
+        alarms.push({
+          ...balanceAlarm,
+          observed: balance,
+          threshold: balanceAlarm.severity === "critical" ? t.agentBalanceCriticalUsdc : t.agentBalanceWarnUsdc,
+        });
+      }
+    }
+  }
+
   return {
     status: worstSeverity(alarms),
     // Critical first so a truncated pager message still carries the worst news.
@@ -727,6 +789,7 @@ export function evaluateHealth(
       facilitatorFailureRatio: failureRatio(snapshot.facilitator),
       sourceFailureRatio: failureRatio(snapshot.sources),
       workerAgesSec,
+      workerTraceIds,
     },
   };
 }
@@ -765,6 +828,8 @@ export interface HeartbeatPayload {
    * process's environment variables.
    */
   intervalSec?: number;
+  /** Trace id of the cycle this beat came from, for log correlation. */
+  traceId?: string;
 }
 
 export function encodeHeartbeat(payload: HeartbeatPayload): string {
@@ -775,6 +840,12 @@ export function encodeHeartbeat(payload: HeartbeatPayload): string {
  * A malformed or missing heartbeat decodes to "never reported" rather than
  * throwing — a corrupt row must not take the health endpoint down with it, and
  * rule 1 already makes "never reported" the loud case.
+ *
+ * `traceId` is validated on read with the same rule the HTTP edge applies. The row
+ * is written by a worker, but a health endpoint that echoes whatever a `sync_meta`
+ * row contains is a public endpoint echoing whatever is in that row — and this one
+ * is unauthenticated on purpose. A row that cannot be a trace id yields no trace
+ * id, which is the fail-closed direction.
  */
 export function decodeHeartbeat(raw: string | null): HeartbeatPayload | null {
   if (!raw) return null;
@@ -785,7 +856,8 @@ export function decodeHeartbeat(raw: string | null): HeartbeatPayload | null {
     if (typeof atMs !== "number" || !Number.isFinite(atMs)) return null;
     const error = (parsed as { error?: unknown }).error;
     const intervalSec = (parsed as { intervalSec?: unknown }).intervalSec;
-    return {
+    const traceId = (parsed as { traceId?: unknown }).traceId;
+    const payload: HeartbeatPayload = {
       atMs,
       error: typeof error === "string" && error.length > 0 ? error : undefined,
       intervalSec:
@@ -793,6 +865,14 @@ export function decodeHeartbeat(raw: string | null): HeartbeatPayload | null {
           ? intervalSec
           : undefined,
     };
+    // Omitted rather than set to `undefined`: this field is additive, and a row
+    // written before it existed must decode to exactly what it always did. An
+    // explicit `traceId: undefined` key is a different object under deep equality,
+    // which is the kind of difference that breaks a caller's comparison for no
+    // reason. A malformed id is dropped the same way — the row is still a good
+    // heartbeat, it just cannot name a trace.
+    if (isTraceId(traceId)) payload.traceId = traceId;
+    return payload;
   } catch {
     return null;
   }
