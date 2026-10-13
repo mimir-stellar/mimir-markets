@@ -24,6 +24,17 @@ export default function Confetti({ active }: { active: boolean }) {
       setParticles([]);
       return;
     }
+
+    const mediaQuery =
+      typeof window !== "undefined"
+        ? window.matchMedia("(prefers-reduced-motion: reduce)")
+        : null;
+
+    if (mediaQuery?.matches) {
+      setParticles([]);
+      return;
+    }
+
     setParticles(
       Array.from({ length: PARTICLE_COUNT }, (_, i) => ({
         id: i,
@@ -36,9 +47,24 @@ export default function Confetti({ active }: { active: boolean }) {
         delay: Math.random() * 0.5,
       }))
     );
+
+    const handleChange = (e: MediaQueryListEvent) => {
+      if (e.matches) {
+        setParticles([]);
+      }
+    };
+
+    mediaQuery?.addEventListener?.("change", handleChange);
+    return () => {
+      mediaQuery?.removeEventListener?.("change", handleChange);
+    };
   }, [active]);
 
-  if (!active || particles.length === 0) return null;
+  const prefersReducedMotion =
+    typeof window !== "undefined" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  if (!active || prefersReducedMotion || particles.length === 0) return null;
 
   return (
     <div
