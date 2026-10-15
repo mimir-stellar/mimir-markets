@@ -19,6 +19,25 @@ import { Link } from "@/i18n/navigation";
 import { getExplorerAddressUrl } from "@/lib/stellar";
 import { shortenAddress } from "@/lib/constants";
 
+export type CopyState = "idle" | "success" | "error";
+
+export function getAddressCopyFeedback(
+  state: CopyState,
+  options?: { label?: string }
+): string {
+  if (state === "success") {
+    return options?.label
+      ? `${options.label} address copied`
+      : "Address copied";
+  }
+  if (state === "error") {
+    return options?.label
+      ? `Failed to copy ${options.label} address`
+      : "Failed to copy address";
+  }
+  return "";
+}
+
 export function AddressChip({
   address,
   className = "",
@@ -39,17 +58,16 @@ export function AddressChip({
    */
   linkToProfile?: boolean;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<CopyState>("idle");
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(address);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      setCopyState("success");
+      window.setTimeout(() => setCopyState("idle"), 1600);
     } catch {
-      // Clipboard blocked (insecure context, permissions): the explorer link still
-      // gets the user to the address, so this stays silent rather than alarming.
-      setCopied(false);
+      setCopyState("error");
+      window.setTimeout(() => setCopyState("idle"), 2400);
     }
   }
 
@@ -70,13 +88,17 @@ export function AddressChip({
         type="button"
         onClick={copy}
         title={address}
-        aria-label={copied ? "Address copied" : `Copy ${label ? `${label} ` : ""}address ${address}`}
+        aria-label={`Copy ${label ? `${label} ` : ""}address ${address}`}
         className="inline-flex items-center transition-colors hover:text-pv-text focus-ring"
       >
-        {copied
+        {copyState === "success"
           ? <Check className="h-3 w-3 text-pv-emerald" aria-hidden />
           : <Copy className="h-3 w-3 opacity-60" aria-hidden />}
       </button>
+      <span role="status" aria-live="polite" className="sr-only">
+        {getAddressCopyFeedback(copyState, { label })}
+      </span>
+
       <a
         href={getExplorerAddressUrl(address)}
         target="_blank"
