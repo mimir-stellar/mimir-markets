@@ -1,4 +1,4 @@
-import { StrKey } from "@stellar/stellar-sdk;
+import { StrKey } from "@stellar/stellar-sdk";
 
 export const INVITE_KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -51,17 +51,21 @@ export function parsePositiveIntegerParam(value: string | undefined): number | n
  * - Invalid format returns null
  */
 export function parseAddressParam(value: string | undefined): string | null {
-  if (value == null || value === undefined) {
+  if (value == null || typeof value !== "string") {
     return null;
   }
 
-  // Exact match: no trimming, no normalization
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
   // Stellar StrKeys are case-sensitive base32
-  if (!StrKey.isValidEd25519PublicKey(value) && !StrKey.isValidContract(value)) {
+  if (!StrKey.isValidEd25519PublicKey(trimmed) && !StrKey.isValidContract(trimmed)) {
     return null;
   }
 
-  return value;
+  return trimmed;
 }
 
 export function parseInviteKey(value: string | null): string | null {
@@ -70,7 +74,7 @@ export function parseInviteKey(value: string | null): string | null {
     return "";
   }
 
-  if (!PINVITE_KEY_PATTERN.test(trimmed)) {
+  if (!INVITE_KEY_PATTERN.test(trimmed)) {
     return null;
   }
 
@@ -143,4 +147,14 @@ export function parseAndValidateQuoteExpiration(
   }
 
   return expiration;
+}
+
+export const MAX_PRICE_SYMBOL_LENGTH = 64;
+
+export function parsePriceSymbol(raw: string | null | undefined): string | null {
+  const symbol = (raw ?? "bitcoin").toLowerCase().trim();
+  if (symbol.length === 0 || symbol.length > MAX_PRICE_SYMBOL_LENGTH || !/^[a-z0-9-]+$/.test(symbol)) {
+    return null;
+  }
+  return symbol;
 }

@@ -15,12 +15,16 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { paidRoute } from "@/lib/x402/server";
 import { PRICES } from "@/lib/x402/config";
+import { MAX_PRICE_SYMBOL_LENGTH, parsePriceSymbol } from "@/lib/server/api-validation";
+
+export { MAX_PRICE_SYMBOL_LENGTH, parsePriceSymbol };
 
 const COINGECKO = "https://api.coingecko.com/api/v3";
 
+
 async function handler(req: NextRequest): Promise<NextResponse> {
-  const symbol = (req.nextUrl.searchParams.get("symbol") ?? "bitcoin").toLowerCase().trim();
-  if (!/^[a-z0-9-]+$/.test(symbol)) {
+  const symbol = parsePriceSymbol(req.nextUrl.searchParams.get("symbol"));
+  if (!symbol) {
     return NextResponse.json({ error: "invalid symbol" }, { status: 400 });
   }
 
