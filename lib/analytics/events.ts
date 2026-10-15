@@ -151,7 +151,7 @@ export type EventProperties = Record<string, string | number | boolean | string[
 
 export interface EventInput {
   event: AnalyticsEvent;
-  envelope: Partial<EventEnvelope> & PickEventEnvelope, "actor_type" | "source_surface">;
+  envelope: Partial<EventEnvelope> & Pick<EventEnvelope, "actor_type" | "source_surface">;
   properties?: EventProperties;
 }
 
@@ -217,7 +217,7 @@ export function conformEventProperties(
 
 /** Fill in the parts of the envelope that are the same for every event. */
 export function buildEnvelope(
-  partial: Partial<EventEnvelope> & PickEventEnvelope, "actor_type" | "source_surface">,
+  partial: Partial<EventEnvelope> & Pick<EventEnvelope, "actor_type" | "source_surface">,
 ): EventEnvelope {
   const contract = partial.contract ?? getMarketContractId();
   const envelope: EventEnvelope = {

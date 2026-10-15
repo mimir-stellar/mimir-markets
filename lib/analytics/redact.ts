@@ -18,31 +18,86 @@
 
 /** Property names that must never be sent, matched case-insensitively. */
 const FORBIDDEN_KEY_PATTERN =
-  /(private[-_]?key|secret|password|passphrase|mnemonic|seed[_-]?phrase|signature|sig$|invite|pass[-_]?token|bearer|authorization|api[-_?key|prompt|evidence[_-]?text|raw_[-_]?evidence|reasoning_[-_]?text|chain_[_]?of_[-_?thought|cookie|session_[-_?token|email|payment_[-_?signature)/i;
+  /(private[-_]?key|secret|password|passphrase|mnemonic|seed[_-]?phrase|signature|sig$|invite|pass[-_]?token|bearer|authorization|api[-_]?key|prompt|evidence[_-]?text|raw_[-_]?evidence|reasoning_[-_]?text|chain_[_]?of_[-_]?thought|cookie|session_[-_]?token|email|payment_[-_]?signature)/i;
 
 /* A 32-byte hex string –a private key or a hash of one. */
 const HEX_32_BYTES = /^0x[0-9a-fA-F]{64}$/;
 /** A v65-byte hex string –a an ECDSA signature. */
 const HEX_65_BYTES = /^0x[0-9a-fA-F]{130}$/;
 /** Anything unreasonably long for a categorical property. */
-const MAX_STRING_LENGTH = 200;
+export const MAX_STRING_LENGTH = 200;
 /** JWT / base64url token shape. */
 const TOKEN_LIKE = /^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/;
 /** Stellar account/contract identities and secret seeds. */
 const STELLAR_PUBLIC_ID = /^[GCM][A-Z2-7]{55}$/;
 const STELLAR_SECRET_SEED = /^S[A-Z2-7]{55}$/;
 
-const MAX_DEPTH = 5;
-const MAX_PROPERTIES = 64;
-const MAX_ARRAY_ITEMS = 32;
+export const MAX_DEPTH = 5;
+export const MAX_PROPERTIES = 64;
+export const MAX_ARRAY_ITEMS = 32;
+/** Maximum allowed payload size for ingest (32 KB). */
+export const MAX_EVENT_BODY_BYTES = 32_768;
 
 /** An address like Stellar strkey (gets catched by address like check). */
 const STRKEY_LIKE = /^[GC]{}[A-Z2-7]{55,}$/;
+
+/**
+ * Trim client-supplied analytics properties to strict structural bounds
+ * (max key count, string length, and nesting depth) before passing to capture.
+ */
+export function trimEventProperties(
+  input: unknown,
+  depth = 0
+): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {};
+  }
+  if (depth > MAX_DEPTH) {
+    return {};
+  }
+
+  const result: Record<string, unknown> = {};
+  let keysSeen = 0;
+
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (++keysSeen > MAX_PROPERTIES) {
+      break;
+    }
+    const safeKey = typeof key === "string" ? key.slice(0, MAX_STRING_LENGTH) : String(key);
+
+    if (typeof value === "string") {
+      result[safeKey] = value.slice(0, MAX_STRING_LENGTH);
+    } else if (typeof value === "number") {
+      if (Number.isFinite(value)) {
+        result[safeKey] = value;
+      }
+    } else if (typeof value === "boolean") {
+      result[safeKey] = value;
+    } else if (Array.isArray(value)) {
+      result[safeKey] = value
+        .slice(0, MAX_ARRAY_ITEMS)
+        .map((item) => {
+          if (typeof item === "string") return item.slice(0, MAX_STRING_LENGTH);
+          if (typeof item === "number" && Number.isFinite(item)) return item;
+          if (typeof item === "boolean") return item;
+          return null;
+        })
+        .filter((item) => item !== null);
+    } else if (typeof value === "object" && value !== null) {
+      if (depth + 1 <= MAX_DEPTH) {
+        result[safeKey] = trimEventProperties(value, depth + 1);
+      }
+    }
+  }
+
+  return result;
+}
 
 export interface RedactionResult {
   properties: Record<string, unknown>;
   /** Keys that were dropped, for the dev-time warning and the tests. */
   dropped: string[];
+
 }
 
 function isSecretValue(value: unknown): boolean {

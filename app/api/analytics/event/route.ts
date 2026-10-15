@@ -18,6 +18,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { capture, type CaptureArgs } from "@/lib/analytics/server";
 import { isAnalyticsEvent } from "@/lib/analytics/events";
 import { tracedRoute } from "@/lib/ops/trace-http";
+import { MAX_EVENT_BODY_BYTES, trimEventProperties } from "@/lib/analytics/redact";
 
 export const dynamic = "force-dynamic";
 
@@ -30,9 +31,25 @@ async function ingest(req: NextRequest): Promise<NextResponse> {
   const noContent = new NextResponse(null, { status: 204 });
   if (serverSideOptOut(req)) return noContent;
 
+  const contentLength = Number(req.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > MAX_EVENT_BODY_BYTES) {
+    return noContent;
+  }
+
+  let bodyText: string;
+  try {
+    bodyText = await req.text();
+  } catch {
+    return noContent;
+  }
+
+  if (bodyText.length > MAX_EVENT_BODY_BYTES) {
+    return noContent;
+  }
+
   let body: unknown;
   try {
-    body = await req.json();
+    body = JSON.parse(bodyText);
   } catch {
     return noContent;
   }
@@ -49,22 +66,27 @@ async function ingest(req: NextRequest): Promise<NextResponse> {
   const surface = input.envelope?.source_surface;
   if (typeof surface !== "string") return noContent;
 
+  // Trim properties to bounded key count, string length, and depth.
+  const properties = input.properties ? trimEventProperties(input.properties) : undefined;
+  const envelopeProps = input.envelope ? trimEventProperties(input.envelope) : {};
+
   // A browser client may never assert it is an agent: agent events are captured
   // server-side from the workers, where the identity is actually known. Same for
   // actor_type — the client does not get to label itself.
   await capture({
     event: input.event,
     envelope: {
-      ...(input.envelope ?? {}),
+      ...envelopeProps,
       actor_type: "human",
       source_surface: surface,
     } as CaptureArgs["envelope"],
-    properties: input.properties as CaptureArgs["properties"],
+    properties: properties as CaptureArgs["properties"],
     address: input.address ?? null,
     isAgent: false,
     idempotencyKey: input.idempotencyKey,
     consented: true,
   });
+
 
   return noContent;
 }

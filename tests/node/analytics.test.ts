@@ -9,7 +9,17 @@ import {
   hasRequiredEnvelope,
   isAnalyticsEvent,
 } from "../../lib/analytics/events";
-import { containsRawAddress, redactProperties, redactWalletAddresses } from "../../lib/analytics/redact";
+import {
+  MAX_ARRAY_ITEMS,
+  MAX_DEPTH,
+  MAX_EVENT_BODY_BYTES,
+  MAX_PROPERTIES,
+  MAX_STRING_LENGTH,
+  containsRawAddress,
+  redactProperties,
+  redactWalletAddresses,
+  trimEventProperties,
+} from "../../lib/analytics/redact";
 import {
   ANON_ACTOR_ID,
   actorIdForAddress,
@@ -536,3 +546,91 @@ test("every roadmap success metric has an owned, non-financial-analytics source"
     if (/revenue|pnl/i.test(metric.name)) assert.notEqual(metric.source, "posthog");
   }
 });
+
+// ── Property Size & Depth Capping ─────────────────────────────────────────────
+
+test("trimEventProperties trims long string properties to MAX_STRING_LENGTH (200)", () => {
+  assert.equal(MAX_STRING_LENGTH, 200);
+  const longStr = "a".repeat(500);
+  const trimmed = trimEventProperties({ longField: longStr });
+  assert.equal(typeof trimmed.longField, "string");
+  assert.equal((trimmed.longField as string).length, 200);
+  assert.equal(trimmed.longField, "a".repeat(200));
+});
+
+test("trimEventProperties trims property keys to MAX_STRING_LENGTH", () => {
+  const overlongKey = "k".repeat(300);
+  const trimmed = trimEventProperties({ [overlongKey]: "value" });
+  const keys = Object.keys(trimmed);
+  assert.equal(keys.length, 1);
+  assert.equal(keys[0].length, 200);
+  assert.equal(keys[0], "k".repeat(200));
+});
+
+test("trimEventProperties bounds key count to MAX_PROPERTIES (64)", () => {
+  assert.equal(MAX_PROPERTIES, 64);
+  const massiveObject: Record<string, number> = {};
+  for (let i = 0; i < 200; i++) {
+    massiveObject[`prop_${i}`] = i;
+  }
+  const trimmed = trimEventProperties(massiveObject);
+  const keys = Object.keys(trimmed);
+  assert.equal(keys.length, 64);
+});
+
+test("trimEventProperties bounds array items to MAX_ARRAY_ITEMS (32) and trims elements", () => {
+  assert.equal(MAX_ARRAY_ITEMS, 32);
+  const largeArray: string[] = [];
+  for (let i = 0; i < 100; i++) {
+    largeArray.push("item_" + "x".repeat(300));
+  }
+  const trimmed = trimEventProperties({ items: largeArray });
+  const resultItems = trimmed.items as string[];
+  assert.equal(Array.isArray(resultItems), true);
+  assert.equal(resultItems.length, 32);
+  assert.equal(resultItems[0].length, 200);
+});
+
+test("trimEventProperties bounds deeply nested payloads to MAX_DEPTH (5)", () => {
+  assert.equal(MAX_DEPTH, 5);
+  // Construct 10 levels of nesting: level0 -> level1 -> ... -> level10
+  let deep: Record<string, unknown> = { leaf: "deep-value" };
+  for (let i = 9; i >= 0; i--) {
+    deep = { [`level_${i}`]: deep };
+  }
+
+  const trimmed = trimEventProperties(deep);
+
+  // Depth 0: level_0
+  // Depth 1: level_1
+  // Depth 2: level_2
+  // Depth 3: level_3
+  // Depth 4: level_4
+  // Depth 5: level_5
+  // Beyond depth 5: dropped
+  let current: unknown = trimmed;
+  let depth = 0;
+  while (current && typeof current === "object" && !("leaf" in (current as Record<string, unknown>))) {
+    const keys = Object.keys(current as Record<string, unknown>);
+    if (keys.length === 0) break;
+    current = (current as Record<string, unknown>)[keys[0]];
+    depth++;
+  }
+
+  // Deeper than MAX_DEPTH (5) must be truncated/empty object
+  assert.ok(depth <= 6, `Nesting exceeded MAX_DEPTH: reached depth ${depth}`);
+  assert.deepEqual(current, {});
+});
+
+test("trimEventProperties handles non-object, null, and empty inputs gracefully", () => {
+  assert.deepEqual(trimEventProperties(null), {});
+  assert.deepEqual(trimEventProperties(undefined), {});
+  assert.deepEqual(trimEventProperties("not an object"), {});
+  assert.deepEqual(trimEventProperties(12345), {});
+  assert.deepEqual(trimEventProperties([]), {});
+});
+
+test("MAX_EVENT_BODY_BYTES constant bounds maximum request size", () => {
+  assert.equal(MAX_EVENT_BODY_BYTES, 32_768);
+});
+
