@@ -3,7 +3,7 @@
 use soroban_sdk::{Bytes, BytesN, Env, String};
 
 use crate::types::{
-    Claim, CreateParams, Error, MAX_CLAIM_METADATA_BYTES, MAX_INVITE_KEY_BYTES, MAX_METADATA_BYTES,
+    Claim, ClaimState, CreateParams, Error, MAX_CLAIM_METADATA_BYTES, MAX_INVITE_KEY_BYTES, MAX_METADATA_BYTES,
 };
 
 /// keccak256 of a `String`'s UTF-8 bytes.
@@ -126,6 +126,31 @@ pub fn validate_resolution_summary(claim: &Claim, summary: &String) -> Result<()
         && stored.checked_add(summary_len).ok_or(Error::Overflow)? > MAX_CLAIM_METADATA_BYTES
     {
         return Err(Error::ClaimMetadataTooLong);
+    }
+    Ok(())
+}
+
+pub fn assert_claim_conservation(claim: &Claim) -> Result<(), Error> {
+    if claim.remaining_escrow < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    if claim.total_challenger_stake < 0 || claim.creator_stake < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    if claim.reserved_creator_liability < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    if claim.reserved_creator_liability > claim.creator_stake {
+        return Err(Error::ConservationViolation);
+    }
+    if claim.state == ClaimState::Resolved {
+        let total = claim
+            .creator_stake
+            .checked_add(claim.total_challenger_stake)
+            .ok_or(Error::Overflow)?;
+        if claim.remaining_escrow > total {
+            return Err(Error::ConservationViolation);
+        }
     }
     Ok(())
 }

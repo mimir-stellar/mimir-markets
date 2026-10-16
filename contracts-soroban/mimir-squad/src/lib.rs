@@ -36,3 +36,5 @@ mod test_lifecycle;
 mod test_membership_cap;
 #[cfg(test)]
 mod test_payouts;
+#[cfg(test)]
+mod test_cancellation;

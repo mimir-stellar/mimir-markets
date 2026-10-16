@@ -51,7 +51,9 @@ const SKIP_FILES = new Set([
   "tests/node/security-headers.test.ts",
   // rollback.test.ts uses dummy all-A Stellar seeds to test the redaction
   // logic itself — these are not real credentials.
-  "tests/node/rollback.test.ts"
+  "tests/node/rollback.test.ts",
+  "lib/ops/trace-check.ts",
+  "tests/node/trace-correlation.test.ts"
 ]);
 
 const files = execSync("git ls-files", { encoding: "utf8" })

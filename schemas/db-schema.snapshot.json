@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "hashAlgorithm": "sha256",
   "source": "lib/db.ts",
-  "fingerprint": "dcb9b04499f8cbd2c66e41dbc47f1d24c3cba2fcdf4a6974f715e25c03cb93f3",
-  "statementCount": 85,
+  "fingerprint": "3683d24074c7825d81fa31a1c62ec16a432cf1eadc8151d5ccacaf684d131000",
+  "statementCount": 88,
   "tables": [
     "schema_migrations",
     "claims",
@@ -75,6 +75,8 @@
     "idx_fee_claims_recipient",
     "idx_market_proposals_created",
     "idx_market_proposals_disposition",
+    "idx_market_proposals_review_status",
+    "idx_market_proposals_queued",
     "idx_basket_transfers_basket",
     "idx_basket_transfers_from",
     "idx_basket_transfers_to"

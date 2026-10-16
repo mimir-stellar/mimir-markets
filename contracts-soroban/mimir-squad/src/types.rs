@@ -38,6 +38,9 @@ pub const BPS_DIVISOR: i128 = 10_000;
 /// `initialize` refuses a token that reports any other.
 pub const USDC_DECIMALS: u32 = 7;
 
+/// A queued oracle rotation cannot take effect before this much time passes.
+pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
+
 // ── Storage shapes ───────────────────────────────────────────────────────────
 
 #[contracttype]

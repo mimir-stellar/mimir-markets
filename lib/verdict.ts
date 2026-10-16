@@ -115,9 +115,10 @@ export type VerdictParseError = {
    *                       was triggered too early.
    *  cancelled          — claim state is "cancelled"; must not be settled.
    *  dependency-failure — a required upstream step (evidence fetch, council
-   *                       quorum, etc.) failed and the oracle cannot proceed
-   *                       without it for this claim.
-   */
+    *                       quorum, etc.) failed and the oracle cannot proceed
+    *                       without it for this claim.
+    *  paused             — claim state is "paused"; must not be settled.
+    */
   reason:
     | "invalid-json"
     | "invalid-verdict"
@@ -126,6 +127,7 @@ export type VerdictParseError = {
     | "duplicate"
     | "stale"
     | "cancelled"
+    | "paused"
     | "dependency-failure";
   /** Developer-readable detail, never surfaced to end users. */
   detail: string;
@@ -280,7 +282,7 @@ export function validateVerdictFields(raw: unknown): VerdictPayload | null {
  */
 export interface VerdictGuardContext {
   /** Current on-chain state of the claim. */
-  claimState: "open" | "active" | "resolved" | "cancelled";
+  claimState: "open" | "active" | "resolved" | "cancelled" | "paused";
   /** Unix seconds — claim deadline. */
   deadline: number;
   /** Unix seconds — current time (injectable for tests). Defaults to Date.now()/1000. */
@@ -314,6 +316,14 @@ export function checkSettlementGuards(ctx: VerdictGuardContext): VerdictParseErr
     };
   }
 
+  if (ctx.claimState === "paused") {
+    return {
+      ok: false,
+      reason: "paused",
+      detail: `Claim is in state 'paused' and cannot be settled.`,
+    };
+  }
+
   if (ctx.deadline > now) {
     return {
       ok: false,
@@ -326,6 +336,33 @@ export function checkSettlementGuards(ctx: VerdictGuardContext): VerdictParseErr
 }
 
 // ── Primary entry point ───────────────────────────────────────────────────────
+
+/**
+ * Defensive fallback for injected extractors that return a greedy concatenation
+ * of JSON objects. The production extractor already returns the first balanced
+ * object, but keeping this boundary defensive makes malformed-output handling
+ * deterministic for every caller and fixture.
+ */
+function firstBalancedObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}" && --depth === 0) return text.slice(start, i + 1);
+  }
+  return null;
+}
 
 /**
  * Parse and validate a raw LLM text response into a typed `VerdictPayload`.
@@ -366,11 +403,28 @@ export function parseVerdictPayload(
   try {
     parsed = JSON.parse(jsonStr);
   } catch (err) {
-    return {
-      ok: false,
-      reason: "invalid-json",
-      detail: `JSON.parse threw: ${err instanceof Error ? err.message : String(err)}. Extracted: ${jsonStr.slice(0, 120)}`,
-    };
+    // Some adapters use a greedy extractor. If it returned two adjacent JSON
+    // objects, parse only the first balanced object so the normal missing-field
+    // classification remains available; never salvage prose or a truncated
+    // object.
+    const first = firstBalancedObject(jsonStr);
+    if (first && first !== jsonStr) {
+      try {
+        parsed = JSON.parse(first);
+      } catch {
+        return {
+          ok: false,
+          reason: "invalid-json",
+          detail: `JSON.parse threw: ${err instanceof Error ? err.message : String(err)}. Extracted: ${jsonStr.slice(0, 120)}`,
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        reason: "invalid-json",
+        detail: `JSON.parse threw: ${err instanceof Error ? err.message : String(err)}. Extracted: ${jsonStr.slice(0, 120)}`,
+      };
+    }
   }
 
   // ── Field validation ──────────────────────────────────────────────────────

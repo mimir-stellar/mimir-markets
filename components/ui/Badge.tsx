@@ -1,4 +1,4 @@
-"use client";
+" use client ";
 
 import { useTranslations } from "next-intl";
 
@@ -6,16 +6,25 @@ interface BadgeProps {
   status: string;
   large?: boolean;
   compact?: boolean;
+  /**
+   * Optional aria-label for accessibility. Defaults to the translated label.
+   */
+  ariaLabel?: string;
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  open:      "pv-cyan",
+  open:     "pv-cyan",
   accepted:  "pv-fuch",
   resolved:  "pv-emerald",
-  won:       "pv-emerald",
+  won:      "pv-emerald",
   lost:      "pv-danger",
-  draw:      "pv-muted",
+  draw:     "pv-muted",
   cancelled: "zinc-500",
+  // Copy-trading specific statuses
+  active:    "pv-emerald",
+  paused:    "pv-muted",
+  error:     "pv-danger",
+  pending:   "pv-cyan",
 };
 
 const colorMap: Record<string, string> = {
@@ -32,21 +41,26 @@ export default function Badge({
   status,
   large = false,
   compact = false,
+  ariaLabel,
 }: BadgeProps) {
   const t = useTranslations("badges");
-  const color   = STATUS_COLORS[status] ?? "pv-muted";
+  const color  = STATUS_COLORS[status] ?? "pv-muted";
   const classes = colorMap[color] ?? colorMap["pv-muted"];
-  const label   = t(status as any);
+  
+  // Fallback to status string if translation key is missing
+  const label   = t(status as any) || status;
+  const labelToRender = ariaLabel || label;
 
   return (
     <span
       className={`inline-flex items-center gap-1.5 border font-bold uppercase tracking-[0.1em] rounded ${classes} ${
         compact
-          ? "px-2 py-0.5 text-[9px]"
+          ? "px-2 py-0.5 text[9px]"
           : large
-            ? "px-3 py-1.5 text-[11px]"
-            : "px-2.5 py-1 text-[10px]"
+            ? "px-3 py-1.5 text[11px]"
+            : "px-2.5 py-1 text[10px]"
       }`}
+      aria-label={labelToRender}
     >
       <span
         className={`rounded-full flex-shrink-0 ${

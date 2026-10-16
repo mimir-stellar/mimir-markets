@@ -6,7 +6,7 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String};
 use crate::escrow;
 use crate::pool;
 use crate::storage;
-use crate::types::{ClaimResult, Error, Market};
+use crate::types::{ClaimResult, Error, Market, PendingOracle};
 
 #[contract]
 pub struct MimirSquad;
@@ -60,6 +60,13 @@ impl MimirSquad {
 
     pub fn resolve(env: Env, market_id: u64, result: u32) -> Result<(), Error> {
         pool::resolve(&env, market_id, result)
+    }
+
+    /// Captain-initiated market cancellation. Sets the market as resolved with
+    /// result=RESULT_CANCELLED, allowing all depositors to claim full refunds
+    /// via the claim() function. No fees are charged on cancellation.
+    pub fn cancel_market(env: Env, market_id: u64) -> Result<(), Error> {
+        pool::cancel_market(&env, market_id)
     }
 
     /// Pull-based payout. Solidity used `msg.sender`; Soroban has no equivalent
@@ -128,6 +135,10 @@ impl MimirSquad {
 
     pub fn get_oracle(env: Env) -> Result<Address, Error> {
         storage::oracle(&env)
+    }
+
+    pub fn get_pending_oracle(env: Env) -> Option<PendingOracle> {
+        storage::pending_oracle(&env)
     }
 
     pub fn get_fee_recipient(env: Env) -> Result<Address, Error> {
