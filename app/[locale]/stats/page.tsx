@@ -14,6 +14,12 @@ import { getPersonaForAddress } from "@/lib/council-resolver";
 import type { PersonaSpec } from "@/agents/council/personas";
 import { BlueprintHeading } from "@/components/BlueprintGrid";
 
+export const metadata = {
+  title: "Mimir · Stats",
+  description:
+    "Live on-chain stats — total wagered, stakers, claims resolved, oracle accuracy and settlement history on Stellar Testnet.",
+};
+
 // Every fetch* below re-scans the chain (a `get_claim` per id, plus one
 // `getEvents` walk). That's fine once per 30s, not once per page view — cache
 // each so concurrent/rapid visits share one chain round-trip instead of each

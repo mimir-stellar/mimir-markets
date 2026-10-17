@@ -10,6 +10,12 @@ import { BlueprintHeading } from "@/components/BlueprintGrid";
 import { openPeepsAvatar } from "@/lib/avatars";
 import { AddressChip } from "@/components/ui/AddressChip";
 
+export const metadata = {
+  title: "Mimir · Council",
+  description:
+    "Twenty AI frames, twenty local wallets, one market — watch each persona read the same claims and reach its own verdict.",
+};
+
 export const revalidate = 30;
 
 // ── Data ─────────────────────────────────────────────────────────────────────
