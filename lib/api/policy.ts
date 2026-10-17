@@ -1,5 +1,5 @@
 /**
- * Access tiers for API routes (§11).
+ * Access tiers for API routes (#11).
  *
  * Four kinds of caller reach these routes and they need different things checked.
  * Before this, each route decided for itself — which is how one of them ends up
@@ -50,6 +50,8 @@ export interface TierPolicy {
   requiresSignature: boolean;
   /** The shared worker secret must match. */
   requiresWorkerSecret: boolean;
+  /** Requires browser-origin validation for mutating requests (CSRF protection). */
+  requiresOriginValidation: boolean;
   /** Rate-limit dimensions that apply. */
   limitDimensions: LimitRule["dimension"][];
 }
@@ -60,6 +62,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresOriginValidation: false,
     // IP and route only: an anonymous caller has no wallet to bucket by.
     limitDimensions: ["ip", "route"],
   },
@@ -68,6 +71,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: true,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresOriginValidation: true,
     limitDimensions: ["ip", "wallet", "route"],
   },
   registered_agent: {
@@ -75,6 +79,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: true,
     requiresSignature: true,
     requiresWorkerSecret: false,
+    requiresOriginValidation: false,
     limitDimensions: ["agent", "route"],
   },
   /**
@@ -92,6 +97,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: false,
+    requiresOriginValidation: false,
     limitDimensions: ["agent", "ip", "route"],
   },
   internal_worker: {
@@ -99,6 +105,7 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresWallet: false,
     requiresSignature: false,
     requiresWorkerSecret: true,
+    requiresOriginValidation: false,
     // Route only: a worker's own bursts are a scheduling problem, not abuse, and
     // bucketing by IP would rate-limit an entire serverless region together.
     limitDimensions: ["route"],
@@ -119,6 +126,20 @@ export interface RequestContext {
   /** True when this call moves money or changes authority. */
   mutatesValue?: boolean;
   idempotencyKey?: string;
+  /** True if the origin was verified against the host. */
+  originValid?: boolean;
+  /** True when the route is currently paused by an operational flag. */
+  paused?: boolean;
+  /** True when a dependency (db: read-index, x402 verifier) failed. */
+  dependencyFailed?: boolean;
+  /** True when the caller replays an already-seen envelope/idempotency key. */
+  replayDetected?: boolean;
+  /** True when the caller's credential/payment is expired. */
+  expired?: boolean;
+  /** True when the caller is known to be underfunded for the requested amount. */
+  underfunded?: boolean;
+  /** True when the request payload failed structural validation. */
+  malformed?: boolean;
 }
 
 export interface AuthorizeResult {
@@ -157,6 +178,18 @@ export function authorizeRequest(
     tier,
   });
 
+  // Operational kill switch: a paused route refuses every caller, including the worker.
+  // This must come first so a pause cannot be bypassed by a missing secret or wallet.
+  if (ctx.paused) {
+    return refuse("forbidden", "route is paused by an operational flag");
+  }
+
+  // Fail closed on dependency failure: we cannot prove the caller is authorized,
+  // so we refuse rather than guessing. This includes the worker tier.
+  if (ctx.dependencyFailed) {
+    return refuse("dependency_failure", "authorization dependency is unavailable");
+  }
+
   if (policy.requiresWorkerSecret) {
     const expected = ctx.expectedSecret?.trim();
     // An unset secret refuses rather than waves everyone through: a deploy that
@@ -181,9 +214,40 @@ export function authorizeRequest(
     }
   }
 
-  // A retried money-moving call without an idempotency key is a second payment.
-  if (ctx.mutatesValue && tier !== "public_read" && !ctx.idempotencyKey?.trim()) {
-    return refuse("invalid_request", "an idempotency key is required for this operation");
+  // Replay protection: a seen envelope or idlempotency key must not be re-honoured.
+  // Reject before the rate limiter so a replay never consumes a caller's budget.
+  if (ctx.replayDetected) {
+    return refuse("invalid_request", "replay detected for this request");
+  }
+
+  if (ctx.expired) {
+    return refuse("unauthenticated", "credential or payment has expired");
+  }
+
+  if (ctx.underfunded) {
+    return refuse("insufficient_funds", "caller is underfunded for this request");
+  }
+
+  if (ctx.malformed) {
+    return refuse("invalid_request", "request payload is malformed");
+  }
+
+  // A payload that moves value must carry an idempotency key at any tier above
+  // public read. A public read tier is not allowed to mutate at all.
+  if (ctx.mutatesValue) {
+    if (tier === "public_read") {
+      return refuse("forbidden", "public_read routes cannot move value or change authority");
+    }
+    if (!ctx.idempotencyKey?.trim()) {
+      return refuse("invalid_request", "an idempotency key is required for this operation");
+    }
+  }
+
+  // Enforce browser-origin policy (CSRF) for mutating requests.
+  if (ctx.mutatesValue && policy.requiresOriginValidation) {
+    if (ctx.originValid !== true) {
+      return refuse("forbidden", "cross-origin mutations are not allowed");
+    }
   }
 
   const keys: RateLimitKeys = {

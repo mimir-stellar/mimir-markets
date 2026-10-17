@@ -1,49 +1,32 @@
-import { authorizeRequest } from "@/lib/api/policy";
 import { NextResponse } from "next/server";
 
-import { createApiError } from "@/lib/server/api-validation";
+import { apiError } from "@/lib/api/errors";
+import { authorizeCronRequest } from "@/lib/api/cron-auth";
 import { refreshChallengeOpportunitiesIndex } from "@/lib/server/challenge-opportunities";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-/**
- * Worker-tier authorization, delegated to lib/api/policy.ts.
- *
- * Was a local Bearer-token string comparison duplicated in two routes. Two
- * copies of an auth check is two places for one of them to drift, and a plain
- * string compare on a secret leaks its length through timing. The tier also
- * applies the route rate limit, which this route previously had none of.
- */
-function authorizeWorker(request: Request, route: string) {
-  const header = request.headers.get("authorization") ?? "";
-  const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
-  return authorizeRequest("internal_worker", {
-    route,
-    presentedSecret: presented,
-    expectedSecret: process.env.CRON_SECRET,
-  });
-}
-
 export async function GET(request: Request) {
+  // Authorize outside the try: an unauthenticated caller must never reach the
+  // refresh below, not even through the error path. The tier fails closed when
+  // CRON_SECRET is unset, and the helper is the only place that reads it.
+  const auth = authorizeCronRequest(request, "/api/cron/challenge-opportunities");
+  if (!auth.allowed && auth.error) {
+    // The tier's error already carries a machine-readable code, a retryable flag
+    // and a Retry-After when waiting can help.
+    return NextResponse.json(auth.error.body, {
+      status: auth.error.status,
+      headers: auth.error.headers,
+    });
+  }
+
+  if (process.env.NEXT_PUBLIC_FEATURE_SOURCE_DRAFTS !== "1") {
+    const err = apiError("not_found", "Challenge opportunities are not enabled");
+    return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+  }
+
   try {
-    const auth = authorizeWorker(request, "/api/cron/challenge-opportunities");
-    if (!auth.allowed && auth.error) {
-      // The tier's error already carries a machine-readable code, a retryable flag
-      // and a Retry-After when waiting can help.
-      return NextResponse.json(auth.error.body, {
-        status: auth.error.status,
-        headers: auth.error.headers,
-      });
-    }
-
-    if (process.env.NEXT_PUBLIC_FEATURE_SOURCE_DRAFTS !== "1") {
-      return NextResponse.json(
-        createApiError("feature_disabled", "Challenge opportunities are not enabled"),
-        { status: 404 }
-      );
-    }
-
     const summary = await refreshChallengeOpportunitiesIndex();
 
     return NextResponse.json(
@@ -64,9 +47,9 @@ export async function GET(request: Request) {
         ? error.message
         : "Unable to refresh challenge opportunities";
 
-    return NextResponse.json(
-      createApiError("internal_error", message),
-      { status: /not configured/i.test(message) ? 503 : 500 }
-    );
+    const code = /not configured/i.test(message) ? "upstream_unavailable" : "internal_error";
+    const err = apiError(code, message);
+
+    return NextResponse.json(err.body, { status: err.status, headers: err.headers });
   }
 }
