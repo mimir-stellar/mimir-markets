@@ -302,7 +302,7 @@ export function useVsDetail({
     await fetchVs({ isManual: true });
   }, [fetchVs]);
 
-  // ── Poll while tab is visible ─────────────────────────────────────────────
+  // ── Push channel (SSE) with background-safe polling fallback ─────────────
 
   useEffect(() => {
     if (!isValidVsId(vsId) || isSampleVS) {
@@ -313,24 +313,104 @@ export function useVsDetail({
     // Initial load.
     void fetchVs();
 
-    const intervalId = setInterval(() => {
-      // Only poll when the tab is in the foreground.
-      if (document.visibilityState === "hidden") return;
-      void fetchVs();
-    }, VS_DETAIL_POLL_INTERVAL_MS);
+    let eventSource: EventSource | null = null;
+    let fallbackPollInterval: NodeJS.Timeout | null = null;
+    let isCleanedUp = false;
 
-    // Resume immediately when the tab becomes visible so users never see
-    // more than one poll-interval worth of stale data after a background stay.
+    function startPollingFallback() {
+      if (fallbackPollInterval || isCleanedUp) return;
+      fallbackPollInterval = setInterval(() => {
+        if (document.visibilityState === "hidden") return;
+        void fetchVs();
+      }, VS_DETAIL_POLL_INTERVAL_MS);
+    }
+
+    function stopPollingFallback() {
+      if (fallbackPollInterval) {
+        clearInterval(fallbackPollInterval);
+        fallbackPollInterval = null;
+      }
+    }
+
+    function connectSse() {
+      if (isCleanedUp) return;
+      if (typeof window === "undefined" || typeof window.EventSource === "undefined") {
+        startPollingFallback();
+        return;
+      }
+
+      try {
+        const sseUrl = inviteKey
+          ? `/api/vs/${vsId}/events?invite=${encodeURIComponent(inviteKey)}`
+          : `/api/vs/${vsId}/events`;
+
+        const es = new EventSource(sseUrl);
+        eventSource = es;
+
+        es.onopen = () => {
+          // SSE connected successfully — ensure polling interval is stopped.
+          stopPollingFallback();
+        };
+
+        const handleUpdate = () => {
+          if (document.visibilityState !== "hidden") {
+            void fetchVs();
+          }
+        };
+
+        es.onmessage = handleUpdate;
+        es.addEventListener("change", handleUpdate);
+
+        es.onerror = () => {
+          // If the EventSource closed fatally (e.g. 404, 500), fall back to polling.
+          if (es.readyState === EventSource.CLOSED) {
+            es.close();
+            if (eventSource === es) {
+              eventSource = null;
+            }
+            startPollingFallback();
+          }
+          // Note: when the server closes cleanly at max duration (45s), readyState is
+          // EventSource.CONNECTING, and the browser automatically reconnects.
+        };
+      } catch {
+        // Fall back to polling if EventSource creation throws
+        startPollingFallback();
+      }
+    }
+
+    function disconnectSse() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    }
+
+    // Connect SSE when tab is visible
+    if (document.visibilityState !== "hidden") {
+      connectSse();
+    }
+
+    // Background-safe management: pause when hidden, resume + immediate fetch when visible.
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
         void fetchVs();
+        if (!eventSource) {
+          connectSse();
+        }
+      } else {
+        // Tab hidden: close SSE and stop polling to avoid burning serverless/network resources.
+        disconnectSse();
+        stopPollingFallback();
       }
     }
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
-      clearInterval(intervalId);
+      isCleanedUp = true;
+      disconnectSse();
+      stopPollingFallback();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       // Invalidate any in-flight fetch so it doesn't land after cleanup.
       generationRef.current += 1;
@@ -338,7 +418,7 @@ export function useVsDetail({
     // fetchVs is stable across vsId changes because the useEffect above resets
     // the generation counter, so including it here is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchVs, isSampleVS, vsId]);
+  }, [fetchVs, inviteKey, isSampleVS, vsId]);
 
   // ── Return ────────────────────────────────────────────────────────────────
 

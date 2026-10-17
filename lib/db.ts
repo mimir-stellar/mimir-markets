@@ -2244,6 +2244,21 @@ export async function getReasoningFeed(filters: ReasoningFeedFilters): Promise<R
 }
 
 /**
+ * Cheap count of active reasoning events for a claim (used by SSE change detection).
+ * Excludes withheld and tombstoned rows.
+ */
+export async function getReasoningCount(claimId: number): Promise<number> {
+  const pool = await getDb();
+  const result = await execute(pool, {
+    sql: `SELECT COUNT(*) AS count FROM agent_reasoning_events
+      WHERE claim_id = ? AND visibility <> 'withheld' AND tombstoned_at IS NULL`,
+    args: [claimId],
+  });
+  const row = result.rows[0];
+  return row ? getNumber(row.count) : 0;
+}
+
+/**
  * Withdraw an event. The row is kept and marked, never deleted — a deletion would
  * silently rewrite the record of what an agent said.
  */
