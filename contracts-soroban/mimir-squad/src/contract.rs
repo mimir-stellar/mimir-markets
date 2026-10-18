@@ -1,12 +1,12 @@
 //! Public contract surface. Bodies live in `pool`; this file is the single
 //! `#[contractimpl]` block plus the read-only views.
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 use crate::escrow;
 use crate::pool;
 use crate::storage;
-use crate::types::{ClaimResult, Error, Market, PendingOracle};
+use crate::types::{ClaimResult, Error, Market, PendingOracle, MAX_BATCH_SIZE};
 
 #[contract]
 pub struct MimirSquad;
@@ -96,6 +96,24 @@ impl MimirSquad {
 
     pub fn get_market(env: Env, market_id: u64) -> Result<Market, Error> {
         storage::get_market(&env, market_id)
+    }
+
+    pub fn get_markets_batch(
+        env: Env,
+        ids: Vec<u64>,
+    ) -> Result<Vec<Option<Market>>, Error> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+
+        let mut results: Vec<Option<Market>> = Vec::new(&env);
+        for id in ids.iter() {
+            results.push_back(storage::get_market_opt(&env, id));
+        }
+        Ok(results)
     }
 
     pub fn get_deposit(env: Env, market_id: u64, side: u32, who: Address) -> i128 {

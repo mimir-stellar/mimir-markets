@@ -22,6 +22,9 @@ pub const MAX_SQUAD_MEMBERS: u32 = 400;
 pub const MIN_DURATION: u64 = 600; // 10 minutes
 pub const MAX_DURATION: u64 = 31_536_000; // 365 days
 
+/// Maximum number of market ids accepted by `get_markets_batch` in a single call.
+pub const MAX_BATCH_SIZE: u32 = 50;
+
 /// Upper bound on the byte length of a market question.
 ///
 /// The question is free text supplied by the captain and carried on the
@@ -128,4 +131,6 @@ pub enum Error {
     NothingQueued = 31,
     /// `execute_oracle` was called before the rotation's timelock elapsed.
     Timelocked = 32,
+    /// `get_markets_batch` was called with more than `MAX_BATCH_SIZE` ids. Refused before reading storage.
+    BatchTooLarge = 33,
 }

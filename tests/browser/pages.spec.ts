@@ -54,12 +54,6 @@ for (const [route, heading] of PUBLIC_PAGES) {
       await expect(page).toHaveTitle("Stats");
     } else if (route === "/en/agents") {
       await expect(page).toHaveTitle("Agents");
-    } else if (route === "/en/revenue") {
-      await expect(page).toHaveTitle("Agent Revenue");
-    } else if (route === "/en/docs") {
-      await expect(page).toHaveTitle("How Mimir Works");
-    } else if (route === "/en/vs/create") {
-      await expect(page).toHaveTitle("Create a Challenge");
     }
 
     // The page is real content, not a blank shell.

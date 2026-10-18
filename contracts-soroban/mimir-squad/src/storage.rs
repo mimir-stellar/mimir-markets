@@ -120,6 +120,19 @@ pub fn get_market(env: &Env, id: u64) -> Result<Market, Error> {
     Ok(market)
 }
 
+pub fn get_market_opt(env: &Env, id: u64) -> Option<Market> {
+    let key = DataKey::Market(id);
+    match env.storage().persistent().get::<_, Market>(&key) {
+        Some(market) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
+            Some(market)
+        }
+        None => None,
+    }
+}
+
 pub fn set_market(env: &Env, id: u64, market: &Market) {
     let key = DataKey::Market(id);
     env.storage().persistent().set(&key, market);
