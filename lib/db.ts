@@ -2557,27 +2557,17 @@ export async function getAgentTradeRows(address: string): Promise<AgentTradeRow[
   return rows;
 }
 
-/** Registry listing for the agents page. Revoked agents are shown, not hidden. */
-export async function listAgentRecords(limit = 100): Promise<AgentRecord[]> {
-  const pool = await getDb();
-  const [records, capabilities] = await Promise.all([
-    execute(pool, {
-      sql: "SELECT * FROM agent_registry ORDER BY created_at ASC LIMIT ?",
-      args: [limit],
-    }),
-    execute(pool, {
-      sql: "SELECT agent_id, capability FROM agent_capabilities WHERE revoked_at IS NULL",
-    }),
-  ]);
-
+function mapAgentRecords(
+  recordRows: unknown[], capabilityRows: unknown[],
+): AgentRecord[] {
   const byAgent = new Map<string, string[]>();
-  for (const raw of capabilities.rows) {
+  for (const raw of capabilityRows) {
     const row = raw as Record<string, unknown>;
     const id = getString(row.agent_id);
     byAgent.set(id, [...(byAgent.get(id) ?? []), getString(row.capability)]);
   }
 
-  return records.rows.map((raw) => {
+  return recordRows.map((raw) => {
     const row = raw as Record<string, unknown>;
     const agentId = getString(row.agent_id);
     let limits: AgentRecord["limits"];
@@ -2604,6 +2594,39 @@ export async function listAgentRecords(limit = 100): Promise<AgentRecord[]> {
       revokedReason: row.revoked_reason == null ? undefined : getString(row.revoked_reason),
     };
   });
+}
+
+/** Registry listing for the agents page. Revoked agents are shown, not hidden. */
+export async function listAgentRecords(limit = 100): Promise<AgentRecord[]> {
+  const pool = await getDb();
+  const [records, capabilities] = await Promise.all([
+    execute(pool, {
+      sql: "SELECT * FROM agent_registry ORDER BY created_at ASC LIMIT ?",
+      args: [limit],
+    }),
+    execute(pool, {
+      sql: "SELECT agent_id, capability FROM agent_capabilities WHERE revoked_at IS NULL",
+    }),
+  ]);
+  return mapAgentRecords(records.rows, capabilities.rows);
+}
+
+/** Registry agents owned by this exact, case-sensitive Stellar address. */
+export async function listAgentRecordsByOwner(ownerWallet: string): Promise<AgentRecord[]> {
+  const pool = await getDb();
+  const records = await execute(pool, {
+    sql: "SELECT * FROM agent_registry WHERE owner_wallet = ? ORDER BY created_at ASC",
+    args: [ownerWallet],
+  });
+  if (records.rows.length === 0) return [];
+
+  const capabilities = await execute(pool, {
+    sql: `SELECT ac.agent_id, ac.capability FROM agent_capabilities ac
+      JOIN agent_registry ar ON ar.agent_id = ac.agent_id
+      WHERE ar.owner_wallet = ? AND ac.revoked_at IS NULL`,
+    args: [ownerWallet],
+  });
+  return mapAgentRecords(records.rows, capabilities.rows);
 }
 
 // ── User-created baskets ──────────────────────────────────────────────────────

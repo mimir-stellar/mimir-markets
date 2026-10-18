@@ -17,7 +17,10 @@ import {
   computeAgentPerformance, windowSinceMs,
   type AgentPerformance, type AgentTradeResult, type TimeWindow,
 } from "@/lib/agents/performance";
-import { getAgentTradeRows, listAgentRecords } from "@/lib/db";
+import {
+  getAgentRecord, getAgentTradeRows, listAgentRecordsByOwner,
+} from "@/lib/db";
+import type { AgentRecord } from "@/lib/agents/registry";
 import { listDirectoryAgents, type DirectoryAgent } from "./agent-directory";
 import { parseAddressParam } from "./api-validation";
 
@@ -40,8 +43,40 @@ export interface ProfileView {
   agentsSettled: number;
 }
 
+export interface ProfileDataSources {
+  listDirectoryAgents: typeof listDirectoryAgents;
+  listAgentRecordsByOwner: typeof listAgentRecordsByOwner;
+  getAgentRecord: typeof getAgentRecord;
+  getAgentTradeRows: typeof getAgentTradeRows;
+}
+
+const defaultDataSources: ProfileDataSources = {
+  listDirectoryAgents,
+  listAgentRecordsByOwner,
+  getAgentRecord,
+  getAgentTradeRows,
+};
+
+function ownedDirectoryAgent(record: AgentRecord): DirectoryAgent | null {
+  if (!parseAddressParam(record.operatorWallet)) return null;
+  return {
+    id: record.agentId,
+    displayName: record.displayName || record.agentId,
+    emoji: "🤖",
+    description: record.description,
+    track: "byoa",
+    address: record.operatorWallet,
+    authorityLevel: record.authorityLevel,
+    capabilities: record.capabilities,
+    status: record.status,
+    ownerWallet: record.ownerWallet,
+    createdAt: record.createdAt,
+  };
+}
+
 export async function buildProfile(
   rawAddress: string, window: TimeWindow = "all", nowMs = Date.now(),
+  dataSources: ProfileDataSources = defaultDataSources,
 ): Promise<ProfileView | null> {
   // A Stellar strkey, used verbatim from here on. The `/^0x…{40}$/` guard this
   // replaced rejected every real address, so every profile page returned null;
@@ -50,22 +85,22 @@ export async function buildProfile(
   if (!address) return null;
   const sinceMs = windowSinceMs(window, nowMs);
 
-  const [directory, records, ownRows] = await Promise.all([
-    listDirectoryAgents().catch(() => []),
-    listAgentRecords(200).catch(() => []),
-    getAgentTradeRows(address).catch(() => []),
+  const [directory, ownerRecords, ownRows] = await Promise.all([
+    dataSources.listDirectoryAgents().catch(() => []),
+    dataSources.listAgentRecordsByOwner(address).catch(() => []),
+    dataSources.getAgentTradeRows(address).catch(() => []),
   ]);
 
   const agent = directory.find((candidate) => candidate.address === address) ?? null;
 
   // An owner's agents operate from their own wallets, so their P&L is looked up
   // per agent rather than rolled into the owner's own trading.
-  const owned = directory.filter((candidate) => {
-    const record = records.find((r) => r.agentId === candidate.id);
-    return record?.ownerWallet === address;
-  });
+  const owned = ownerRecords
+    .filter((record) => record.ownerWallet === address)
+    .map(ownedDirectoryAgent)
+    .filter((candidate): candidate is DirectoryAgent => candidate !== null);
   const ownedRows = await Promise.all(
-    owned.map((candidate) => getAgentTradeRows(candidate.address).catch(() => [])),
+    owned.map((candidate) => dataSources.getAgentTradeRows(candidate.address).catch(() => [])),
   );
 
   let agentsRealisedPnlAtomic = 0n;
@@ -91,7 +126,9 @@ export async function buildProfile(
 }
 
 /** Owner wallet for an agent id, for the "created by" line on an agent page. */
-export async function findAgentOwner(agentId: string): Promise<string | null> {
-  const records = await listAgentRecords(200).catch(() => []);
-  return records.find((record) => record.agentId === agentId)?.ownerWallet ?? null;
+export async function findAgentOwner(
+  agentId: string,
+  getRecord: typeof getAgentRecord = defaultDataSources.getAgentRecord,
+): Promise<string | null> {
+  return (await getRecord(agentId).catch(() => null))?.ownerWallet ?? null;
 }
