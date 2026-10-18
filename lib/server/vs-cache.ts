@@ -251,9 +251,13 @@ export async function refreshVSIndex() {
   return ensureSnapshot(true);
 }
 
-export async function getAllVSFast(): Promise<VSData[]> {
+export async function getAllVSFastSnapshot(): Promise<{ items: VSData[]; syncedAt: number }> {
   const snapshot = await ensureSnapshot();
-  return snapshot.items;
+  return { items: snapshot.items, syncedAt: snapshot.syncedAt };
+}
+
+export async function getAllVSFast(): Promise<VSData[]> {
+  return (await getAllVSFastSnapshot()).items;
 }
 
 export async function getVSByIdFast(vsId: number): Promise<VSData | null> {

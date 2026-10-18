@@ -1260,7 +1260,17 @@
   "emergingNarratives": {
     "title": "EMERGING NARRATIVES",
     "lead": "Opportunities to generate new challenges from emerging signals and storylines.",
-    "comingSoon": "COMMING SOON"
+    "rank": "Rank {rank}",
+    "momentum": "Momentum",
+    "newMarkets": "New markets · recent / previous",
+    "newStake": "New stake · recent / previous (USDC)",
+    "windowLabels": "Recent 7 days / previous 7 days",
+    "marketStake": "Stake: {amount} USDC",
+    "viewCategory": "View {category} markets",
+    "emptyTitle": "No emerging activity yet",
+    "emptyDescription": "New markets and stake activity will appear here as categories gain momentum.",
+    "errorTitle": "Narratives could not be loaded",
+    "errorDescription": "The market index is temporarily unavailable. Refresh the page to try again."
   },
   "reasoningFeed": {
     "title": "Agent reasoning",
