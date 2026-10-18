@@ -16,8 +16,18 @@
 import { NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api/policy";
 import { pruneExpiredNonces } from "@/lib/server/nonce-store";
+import { apiError } from "@/lib/api/errors";
 
 export const dynamic = "force-dynamic";
+
+let customPrune: typeof pruneExpiredNonces | null = null;
+
+/**
+ * Override the prune function for testing.
+ */
+export function _setPruneExpiredNoncesForTest(fn: typeof pruneExpiredNonces | null): void {
+  customPrune = fn;
+}
 
 function authorizeWorker(request: Request, route: string) {
   const header = request.headers.get("authorization") ?? "";
@@ -29,7 +39,10 @@ function authorizeWorker(request: Request, route: string) {
   });
 }
 
-export async function GET(request: Request) {
+export async function GET(
+  request: Request,
+  deps?: { pruneExpiredNonces?: typeof pruneExpiredNonces },
+) {
   const auth = authorizeWorker(request, "/api/cron/nonce-prune");
   if (!auth.allowed && auth.error) {
     return NextResponse.json(auth.error.body, {
@@ -38,16 +51,22 @@ export async function GET(request: Request) {
     });
   }
 
+  const prune = deps?.pruneExpiredNonces ?? customPrune ?? pruneExpiredNonces;
   try {
-    const pruned = await pruneExpiredNonces();
+    const pruned = await prune();
     return NextResponse.json(
       { pruned, at: Date.now() },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
-    return NextResponse.json(
-      { error: "prune failed", detail: error instanceof Error ? error.message : String(error) },
-      { status: 500, headers: { "Cache-Control": "no-store" } },
-    );
+    console.error("[cron/nonce-prune] Failed to prune expired nonces:", error);
+    const err = apiError("internal_error", "Failed to prune expired nonces");
+    return NextResponse.json(err.body, {
+      status: err.status,
+      headers: {
+        ...err.headers,
+        "Cache-Control": "no-store",
+      },
+    });
   }
 }
