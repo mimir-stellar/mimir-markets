@@ -28,6 +28,30 @@ const PUBLIC_PAGES: ReadonlyArray<readonly [string, RegExp]> = [
   ["/en/docs", /how mimir works/i],
 ];
 
+// The three server-rendered pages with dedicated metadata exports (issue #389).
+// Each must produce its own unique <title> instead of falling back to the root
+// "Mimir Markets" default, so tabs and link previews tell pages apart.
+const TITLED_PAGES: ReadonlyArray<readonly [string, string]> = [
+  ["/en/council", "Mimir · Council"],
+  ["/en/stats", "Mimir · Stats"],
+  ["/en/agents", "Mimir · Agents"],
+];
+
+for (const [route, title] of TITLED_PAGES) {
+  test(`renders ${route} with its own title`, async ({ page }) => {
+    const errors: string[] = [];
+    trackPageErrors(page, errors);
+
+    await page.goto(route, { waitUntil: "domcontentloaded" });
+    await expectMainLandmark(page);
+
+    // Unique per-page title from the page's own metadata export.
+    await expect(page).toHaveTitle(title);
+
+    expect(errors).toEqual([]);
+  });
+}
+
 for (const [route, heading] of PUBLIC_PAGES) {
   test(`renders ${route}`, async ({ page }) => {
     const errors: string[] = [];
