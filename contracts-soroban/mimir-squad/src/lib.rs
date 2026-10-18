@@ -40,3 +40,5 @@ mod test_payouts;
 mod test_cancellation;
 #[cfg(test)]
 mod test_oracle;
+#[cfg(test)]
+mod test_preview_parity;

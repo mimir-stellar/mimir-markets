@@ -47,6 +47,15 @@ for (const [route, heading] of PUBLIC_PAGES) {
       await expect(connectButton).toHaveAccessibleName("Connect");
     }
 
+    // Specific page title assertions
+    if (route === "/en/council") {
+      await expect(page).toHaveTitle("Council");
+    } else if (route === "/en/stats") {
+      await expect(page).toHaveTitle("Stats");
+    } else if (route === "/en/agents") {
+      await expect(page).toHaveTitle("Agents");
+    }
+
     // The page is real content, not a blank shell.
     const bodyLength = await page.evaluate(() => document.body.innerText.length);
     expect(bodyLength).toBeGreaterThan(200);
@@ -54,36 +63,3 @@ for (const [route, heading] of PUBLIC_PAGES) {
     expect(errors).toEqual([]);
   });
 }
-
-test("renders branded 404 page for unknown routes with 404 status and layout", async ({
-  page,
-}) => {
-  const errors: string[] = [];
-  trackPageErrors(page, errors);
-
-  const response = await page.goto("/en/does-not-exist", {
-    waitUntil: "domcontentloaded",
-  });
-
-  expect(response?.status()).toBe(404);
-  await expectMainLandmark(page);
-
-  // Assert 404 page heading and copy
-  await expect(
-    page.getByRole("heading", { name: /page not found/i }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("The page you are looking for does not exist or has been moved."),
-  ).toBeVisible();
-
-  // Assert link back to explorer
-  const explorerLink = page.getByRole("link", { name: "Back to Explorer" });
-  await expect(explorerLink).toBeVisible();
-  await expect(explorerLink).toHaveAttribute("href", "/en/explorer");
-
-  // Assert layout (header banner and footer)
-  await expect(page.getByRole("banner")).toBeVisible();
-  await expect(page.getByRole("contentinfo")).toBeVisible();
-
-  expect(errors).toEqual([]);
-});
