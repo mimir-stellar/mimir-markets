@@ -1,4 +1,10 @@
 {
+  "liveDeadline": {
+    "phaseOpen": "OPEN",
+    "phaseLocked": "LOCKED",
+    "phaseVerifying": "VERIFYING",
+    "phaseSettled": "SETTLED"
+  },
   "metadata": {
     "title": "Mimir Markets",
     "description": "1v1 prediction challenges settled by AI. No referees. No arguments. Mimir decides."

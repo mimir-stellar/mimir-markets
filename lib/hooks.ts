@@ -3,10 +3,11 @@
 import { useState, useEffect } from "react";
 import { getTimeRemaining } from "@/lib/constants";
 import { useLocale } from "next-intl";
+import { resolveCountdownLocale } from "@i18n/locale";
 
 export function useCountdown(deadline: number) {
   const locale = useLocale();
-  const countdownLocale = locale === "en" ? "en" : "es";
+  const countdownLocale = resolveCountdownLocale(locale);
   const [state, setState] = useState(() => getTimeRemaining(deadline, countdownLocale));
 
   useEffect(() => {
