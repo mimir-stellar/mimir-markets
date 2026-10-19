@@ -35,24 +35,26 @@ for (const component of [
   });
 }
 
-test("CountdownTimer exposes the absolute deadline even after it has expired", () => {
+test("CountdownTimer keeps the expired absolute deadline in readable time text", () => {
   const markup = renderCountdown(1_700_000_000);
 
-  assert.match(markup, /aria-label="[^"]*Nov 14, 2023[^"]*(?:UTC|GMT)[^"]*"/);
-  assert.match(markup, />00:00:00<\/span>/);
+  assert.match(markup, /<time\b[^>]*class="sr-only"[^>]*>[^<]*Nov 14, 2023[^<]*(?:UTC|GMT)[^<]*<\/time>/);
+  assert.match(markup, /dateTime="2023-11-14T22:13:20\.000Z"/i);
+  assert.match(markup, />00:00:00<time\b/);
 });
 
 test("CountdownTimer uses the page locale for its accessible deadline", () => {
   const markup = renderCountdown(1_700_000_000, "es");
 
-  assert.match(markup, /aria-label="[^"]*14 de nov[^"]*2023[^"]*(?:UTC|GMT)[^"]*"/);
+  assert.match(markup, /<time\b[^>]*>[^<]*14 de nov[^<]*2023[^<]*(?:UTC|GMT)[^<]*<\/time>/);
 });
 
-test("CountdownTimer omits an absolute label when the deadline is invalid", () => {
+test("CountdownTimer omits absolute time text when the deadline is invalid", () => {
   for (const deadline of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_VALUE]) {
     const markup = renderCountdown(deadline);
 
     assert.doesNotMatch(markup, /aria-label=/);
+    assert.doesNotMatch(markup, /<time\b/);
     assert.doesNotMatch(markup, /Invalid Date/);
   }
 });

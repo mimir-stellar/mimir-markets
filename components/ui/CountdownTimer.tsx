@@ -26,9 +26,14 @@ export default function CountdownTimer({
         expired ? "text-pv-gold" : "text-pv-text"
       } ${className}`}
       role="timer"
-      aria-label={absoluteDeadline || undefined}
     >
       {text}
+      {/* Browse mode may skip a timer's label, so keep the deadline as real text. */}
+      {absoluteDeadline ? (
+        <time dateTime={new Date(deadline * 1000).toISOString()} className="sr-only">
+          {absoluteDeadline}
+        </time>
+      ) : null}
     </span>
   );
 }
