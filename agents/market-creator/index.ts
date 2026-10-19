@@ -40,6 +40,10 @@ import { requireEnv, requireAnyLLMKey, applyWorkerGeminiKey } from "../../lib/ag
 import { callLLM, activeLLMProvider, activeLLMModel, activeLLMKeyFingerprint, pickGeminiModel, extractJson } from "../../lib/llm";
 import { INJECTION_GUARD, fenceUntrusted } from "../../lib/prompt-safety";
 import { fetchLaunchEvents, fetchWeatherEvents, type LaunchEvent, type WeatherEvent } from "./sources";
+import { fetchCryptoEvents, fetchSportsEvents, fetchStockEvents, type CryptoEvent, type SportEvent, type StockEvent } from "./sources";
+import { extractUsdThresholds, cryptoThresholdReason, formatUsd } from "./thresholds";
+import { filterDuplicateCandidates, buildCandidateSignature, normalizeComparableText, normalizeResolutionUrl, type ExistingClaimSignature } from "./dedupe";
+import { draftClaimCandidates } from "./drafting";
 import {
   cancelClaim,
   createClaim as createClaimOnChain,
@@ -172,49 +176,6 @@ const CREATOR_ADDR   = CREATOR.address;
 const CREATOR_PAYER  = payingWalletFor(CREATOR);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface ClaimCandidate {
-  question:         string;
-  creatorPosition:  string;
-  counterPosition:  string;
-  resolutionUrl:    string;
-  category:         string;
-  marketType:       string;
-  settlementRule:   string;
-  deadlineHours:    number;
-  qualityScore:     number;
-  sourceType:       string;
-}
-
-interface ExistingClaimSignature {
-  id:               number;
-  category:         string;
-  questionKey:      string;
-  resolutionUrlKey: string;
-}
-
-interface SportEvent {
-  id:            string;
-  name:          string;
-  startDate:     string;  // ISO 8601
-  startMs:       number;  // epoch ms (NaN if unparseable)
-  resolutionUrl: string;
-  status:        string;
-}
-
-interface CryptoEvent {
-  id:            string;  // coingecko slug (e.g. "bitcoin")
-  name:          string;
-  symbol:        string;
-  resolutionUrl: string;
-  priceUsd:      number;
-}
-
-interface StockEvent {
-  symbol:        string;  // ticker (e.g. "AAPL")
-  name:          string;
-  resolutionUrl: string;  // stockanalysis.com page (oracle scrapes price/day change)
-}
-
 function formatUsd(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "unknown";
   if (value >= 1000) return value.toLocaleString("en-US", { maximumFractionDigits: 0 });
@@ -222,136 +183,7 @@ function formatUsd(value: number): string {
   return value.toLocaleString("en-US", { maximumFractionDigits: 4 });
 }
 
-function extractUsdThresholds(text: string): number[] {
-  const thresholds: number[] = [];
-  const seen = new Set<string>();
-  const patterns = [
-    /\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s*([kKmMbBtT]))?/g,
-    /\b([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:USD|US dollars?|dollars?)\b/gi,
-  ];
-
-  for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) {
-      const raw = match[1]?.replace(/,/g, "");
-      const parsed = Number(raw);
-      if (!Number.isFinite(parsed) || parsed <= 0) continue;
-      const suffix = match[2]?.toLowerCase();
-      const multiplier = suffix === "k" ? 1_000
-        : suffix === "m" ? 1_000_000
-        : suffix === "b" ? 1_000_000_000
-        : suffix === "t" ? 1_000_000_000_000
-        : 1;
-      const value = parsed * multiplier;
-      const key = value.toString();
-      if (!seen.has(key)) {
-        seen.add(key);
-        thresholds.push(value);
-      }
-    }
-  }
-
-  return thresholds;
-}
-
-function cryptoThresholdReason(candidate: ClaimCandidate, event: CryptoEvent): string | null {
-  if (!Number.isFinite(event.priceUsd) || event.priceUsd <= 0) {
-    return `missing live CoinGecko price for ${event.symbol}`;
-  }
-
-  const text = [
-    candidate.question,
-    candidate.settlementRule,
-  ].join("\n");
-  const thresholds = extractUsdThresholds(text);
-  if (thresholds.length === 0) return "no explicit USD price threshold found";
-
-  const low = event.priceUsd * CRYPTO_MIN_THRESHOLD_RATIO;
-  const high = event.priceUsd * CRYPTO_MAX_THRESHOLD_RATIO;
-  const realistic = thresholds.some((threshold) => threshold >= low && threshold <= high);
-  if (!realistic) {
-    const rendered = thresholds.map((threshold) => `$${formatUsd(threshold)}`).join(", ");
-    return `${rendered} outside live ${event.symbol} guard ($${formatUsd(low)}-$${formatUsd(high)}, current=$${formatUsd(event.priceUsd)})`;
-  }
-
-  return null;
-}
-
 // ── Source fetchers ───────────────────────────────────────────────────────────
-
-function normalizeComparableText(value: string): string {
-  return value
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\b(will|does|do|did|the|their|a|an|in|on|at|by|before|after|during)\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeResolutionUrl(value: string): string {
-  try {
-    const url = new URL(value.trim());
-    url.hash = "";
-    url.search = "";
-    return url.toString().replace(/\/$/, "").toLowerCase();
-  } catch {
-    return value.trim().replace(/\/$/, "").toLowerCase();
-  }
-}
-
-function buildCandidateSignature(candidate: ClaimCandidate): ExistingClaimSignature {
-  return {
-    id:               0,
-    category:         String(candidate.category ?? "").toLowerCase().trim(),
-    questionKey:      normalizeComparableText(String(candidate.question ?? "")),
-    resolutionUrlKey: normalizeResolutionUrl(String(candidate.resolutionUrl ?? "")),
-  };
-}
-
-function filterDuplicateCandidates(
-  candidates: ClaimCandidate[],
-  existingClaims: ExistingClaimSignature[],
-): ClaimCandidate[] {
-  const existingQuestionKeys = new Map<string, number>();
-  const existingSourceKeys = new Map<string, number>();
-
-  for (const claim of existingClaims ?? []) {
-    if (claim.questionKey) existingQuestionKeys.set(`${claim.category}:${claim.questionKey}`, claim.id);
-    if (claim.resolutionUrlKey) existingSourceKeys.set(`${claim.category}:${claim.resolutionUrlKey}`, claim.id);
-  }
-
-  const seenQuestionKeys = new Set<string>();
-  const seenSourceKeys = new Set<string>();
-
-  return candidates.filter((candidate) => {
-    const sig = buildCandidateSignature(candidate ?? {} as ClaimCandidate);
-    const questionKey = `${sig.category}:${sig.questionKey}`;
-    const sourceKey = `${sig.category}:${sig.resolutionUrlKey}`;
-
-    const existingSourceId = sig.resolutionUrlKey ? existingSourceKeys.get(sourceKey) : undefined;
-    if (existingSourceId !== undefined) {
-      console.warn(`[market-creator] Drop duplicate candidate - same source as active claim #${existingSourceId}: ${candidate.question.slice(0, 90)}`);
-      return false;
-    }
-
-    const existingQuestionId = sig.questionKey ? existingQuestionKeys.get(questionKey) : undefined;
-    if (existingQuestionId !== undefined) {
-      console.warn(`[market-creator] Drop duplicate candidate - same question as active claim #${existingQuestionId}: ${candidate.question.slice(0, 90)}`);
-      return false;
-    }
-
-    if ((sig.resolutionUrlKey && seenSourceKeys.has(sourceKey)) || (sig.questionKey && seenQuestionKeys.has(questionKey))) {
-      console.warn(`[market-creator] Drop duplicate candidate within run: ${candidate.question.slice(0, 90)}`);
-      return false;
-    }
-
-    if (sig.resolutionUrlKey) seenSourceKeys.add(sourceKey);
-    if (sig.questionKey) seenQuestionKeys.add(questionKey);
-    return true;
-  });
-}
 
 async function applyCouncilPreflight(candidates: ClaimCandidate[]): Promise<ClaimCandidate[]> {
   if (!PREFLIGHT_ENABLED || candidates.length === 0) {
@@ -473,7 +305,6 @@ async function fetchCryptoEvents(): Promise<{ text: string; events: CryptoEvent[
 // sport/league. Live games make deadline math uncertain and finished games
 // resolve immediately — both are dead inventory, so we keep only `pre` state.
 const SPORTS_POST_GAME_BUFFER_MS = 4 * 3600 * 1000;
-const MAX_DEADLINE_HOURS = 72;
 
 async function fetchEspnScoreboard(
   url: string,
