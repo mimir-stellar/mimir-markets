@@ -42,3 +42,5 @@ mod test_cancellation;
 mod test_oracle;
 #[cfg(test)]
 mod test_preview_parity;
+#[cfg(test)]
+mod test_resolution_timeout;

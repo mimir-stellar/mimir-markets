@@ -58,6 +58,14 @@ impl MimirSquad {
         pool::transition_deadline(&env, market_id)
     }
 
+    /// Permissionlessly refund an unresolved market after `deadline` plus
+    /// [`crate::types::RESOLUTION_GRACE_SECONDS`]. The market is cancelled and
+    /// every depositor can recover their full principal through `claim`, with
+    /// no fees. Oracle resolution remains available until this grace period ends.
+    pub fn expire_unresolved(env: Env, market_id: u64) -> Result<(), Error> {
+        pool::expire_unresolved(&env, market_id)
+    }
+
     pub fn resolve(env: Env, market_id: u64, result: u32) -> Result<(), Error> {
         pool::resolve(&env, market_id, result)
     }

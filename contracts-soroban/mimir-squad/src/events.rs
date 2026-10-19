@@ -133,6 +133,18 @@ pub struct MarketCancelled {
     pub pool_b: i128,
 }
 
+/// An unresolved market expired after its oracle resolution grace period.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketResolutionExpired {
+    #[topic]
+    pub market_id: u64,
+    pub deadline: u64,
+    pub expired_at: u64,
+    pub pool_a: i128,
+    pub pool_b: i128,
+}
+
 /// A payout could not be delivered (frozen or deauthorized trustline) and was
 /// parked for a later `claim_parked_payout`.
 #[contractevent]

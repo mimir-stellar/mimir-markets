@@ -21,6 +21,8 @@ pub const MAX_PARTICIPANTS_PER_SIDE: u32 = 200;
 pub const MAX_SQUAD_MEMBERS: u32 = 400;
 pub const MIN_DURATION: u64 = 600; // 10 minutes
 pub const MAX_DURATION: u64 = 31_536_000; // 365 days
+/// After this long past the deadline, an unresolved market can be permissionlessly refunded.
+pub const RESOLUTION_GRACE_SECONDS: u64 = 2_592_000; // 30 days
 
 /// Maximum number of market ids accepted by `get_markets_batch` in a single call.
 pub const MAX_BATCH_SIZE: u32 = 50;
@@ -133,4 +135,6 @@ pub enum Error {
     Timelocked = 32,
     /// `get_markets_batch` was called with more than `MAX_BATCH_SIZE` ids. Refused before reading storage.
     BatchTooLarge = 33,
+    /// `expire_unresolved` was called before the oracle resolution grace period elapsed.
+    GracePeriodNotElapsed = 34,
 }

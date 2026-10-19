@@ -8,7 +8,7 @@ use crate::storage;
 use crate::types::{
     ClaimResult, Error, Market, PendingOracle, BPS_DIVISOR, MAX_DURATION, MAX_FEE_BPS,
     MAX_PARTICIPANTS_PER_SIDE, MAX_QUESTION_BYTES, MAX_SQUAD_MEMBERS, MIN_DURATION,
-    ORACLE_TIMELOCK_SECONDS, RESULT_CANCELLED, SIDE_A, SIDE_B,
+    ORACLE_TIMELOCK_SECONDS, RESOLUTION_GRACE_SECONDS, RESULT_CANCELLED, SIDE_A, SIDE_B,
 };
 
 /// The fee on one winning claim: `floor(profit * fee_bps / BPS_DIVISOR)`.
@@ -383,10 +383,52 @@ pub fn transition_deadline(env: &Env, market_id: u64) -> Result<(), Error> {
     Ok(())
 }
 
+pub fn expire_unresolved(env: &Env, market_id: u64) -> Result<(), Error> {
+    let mut market = storage::get_market(env, market_id)?;
+    if market.resolved {
+        return Err(Error::AlreadyResolved);
+    }
+
+    let expires_at = market
+        .deadline
+        .checked_add(RESOLUTION_GRACE_SECONDS)
+        .ok_or(Error::Overflow)?;
+    let now = env.ledger().timestamp();
+    if now < expires_at {
+        return Err(Error::GracePeriodNotElapsed);
+    }
+
+    market.resolved = true;
+    market.result = RESULT_CANCELLED;
+    market.remaining_escrow = market
+        .pool_a
+        .checked_add(market.pool_b)
+        .ok_or(Error::Overflow)?;
+    assert_market_conservation(&market)?;
+    storage::set_market(env, market_id, &market);
+
+    events::MarketResolutionExpired {
+        market_id,
+        deadline: market.deadline,
+        expired_at: now,
+        pool_a: market.pool_a,
+        pool_b: market.pool_b,
+    }
+    .publish(env);
+    Ok(())
+}
+
 pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
     storage::oracle(env)?.require_auth();
 
     let mut market = storage::get_market(env, market_id)?;
+    let resolution_expires_at = market
+        .deadline
+        .checked_add(RESOLUTION_GRACE_SECONDS)
+        .ok_or(Error::Overflow)?;
+    if env.ledger().timestamp() >= resolution_expires_at {
+        return Err(Error::NotResolvable);
+    }
     if market.resolved {
         if market.result == result {
             return Ok(());
