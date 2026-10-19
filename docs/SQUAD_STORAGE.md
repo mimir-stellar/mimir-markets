@@ -8,7 +8,7 @@ This document describes where squad pool state lives in the Soroban ledger for `
 
 ## Storage Architecture and Classes
 
-Coroban provides two relevant storage classes used by `mimir-squad`:
+Soroban provides two relevant storage classes used by `mimir-squad`:
 
 1. **Instance Storage (`env.storage().instance()`)**:
    - Tied directly to the contract instance.
@@ -209,4 +209,35 @@ Each creator adds one persistent `CreatorClaimCount` entry and one `CreatorClaim
   1. The `Payout` key is archived.
   2. Queries via `parked_payout` view (`contract.rs:128`) call `storage::payout_of`, which does not extend TTL.
   3. Once archived, `storage::payout_of` returns `0` (`storage.rs:174`).
-  4. Subsequent calls to `claim_parked_payout` (`pool.rs:254`) read `amount = 0`, emit no transfer, and return `0`, effectively leaving the parked USDC stuck 
+  4. Subsequent calls to `claim_parked_payout` (`pool.rs:254`) read `amount = 0`, emit no transfer, and return `0`, effectively leaving the parked USDC stuck in the squad contract until a ledger restoration is performed.
+
+### Risk 3: Claimed Marker Eviction and Re-Entrancy Exposure (Medium)
+
+- **Location**: `contracts-soroban/mimir-squad/src/storage.rs:152-156` (`has_claimed`).
+- **Description**:
+  `mark_claimed` bumps TTL on write (`storage.rs:163`). However, once set, if an archived market has its deposit restored years later, but its `Claimed` key expired without being extended, `has_claimed` would return `false`. While the market-level `winner_claims` counter prevents infinite total claims across the pool, per-user idempotent tracking could be desynchronized if keys are archived and restored unevenly.
+
+---
+
+## Operator Recommendations
+
+1. **Keeper / Indexer Bumping Routine**:
+   Operators running backend sync agents (such as `agents/sync`) should monitor persistent entries for squad markets with unresolved or unclaimed balances approaching `BUMP_THRESHOLD` (120,960 ledgers) and trigger state bump transactions before archival occurs.
+
+2. **State Restoration Runbook**:
+   If a user reports `Error::NotWinner` despite having an on-chain deposit event, operators must verify if `DataKey::Deposit(market_id, side, participant)` was archived on Soroban and submit an RPC `restoreFootprint` transaction before instructing the user to retry claiming.
+
+3. **Future Code Mitigation (Recommended for V1 Upgrade)**:
+   Update `storage::deposit_of` and `storage::payout_of` to mirror `storage::get_market`:
+   ```rust
+   pub fn deposit_of(env: &Env, id: u64, side: u32, who: &Address) -> i128 {
+       let key = DataKey::Deposit(id, side, who.clone());
+       match env.storage().persistent().get::<_, i128>(&key) {
+           Some(val) => {
+               env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
+               val
+           }
+           None => 0,
+       }
+   }
+   ```
