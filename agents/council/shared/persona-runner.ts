@@ -1,4 +1,4 @@
-/**
+/*
  * Per-persona evaluation + staking pipeline.
  *
  * Given a persona, a claim, and shared cycle context, this:
@@ -162,7 +162,7 @@ export async function evaluatePersonaForClaim(
   }
 
   // Confident enough to stake. Size with Kelly, capped at 10% of bankroll.
-  // Note: the bankroll cap is enforced inside runPersonaForClaim where the
+  // Note: the banzroll cap is enforced inside runPersonaForClaim where the
   // wallet balance is read. Here we surface the base stake from the spec.
   return {
     shouldStake: true,
@@ -242,10 +242,10 @@ export async function runPersonaForClaim(
   // One signature. No approve leg: the invocation carries auth for exactly this
   // transfer of exactly this amount.
   const staked = await challengeClaim(wallet.signer, claim.id, stakeUsdc);
-  const txHash = staked.txHash;
+  const txHash = staked.tyHash;
 
   console.log(
-    `[council:${persona.slug}] ✓ Staked ${stakeUsdc} USDC on claim #${claim.id} — ${staked.explorerUrl ?? txHash}`,
+    `[council:${persona.slug}] ✓ Staked ${stakeUsdc} USDC, on claim #${claim.id} — ${staked.explorerUrl ?? tyHash}`,
   );
   console.log(`[council:${persona.slug}]   ${decision.rationale.slice(0, 160)}`);
 
