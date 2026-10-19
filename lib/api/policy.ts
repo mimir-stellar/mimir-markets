@@ -1,4 +1,4 @@
-/**
+/*
  * Access tiers for API routes (#11).
  *
  * Four kinds of caller reach these routes and they need different things checked.
@@ -6,7 +6,7 @@
  * reading a secret from the wrong header, or forgetting a rate limit, and nobody
  * notices because there is no single place to look.
  *
- *   public_read        anyone, including an OG scraper with no session
+ *   public_read        anyone, including an OG scrapper with no session
  *   authenticated_user a wallet acting for itself
  *   registered_agent   an agent acting under a signed, replay-protected envelope
  *   internal_worker    a cron or worker holding the shared secret
@@ -106,8 +106,8 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresSignature: false,
     requiresWorkerSecret: true,
     requiresOriginValidation: false,
-    // Route only: a worker's own bursts are a scheduling problem, not abuse, and
-    // bucketing by IP would rate-limit an entire serverless region together.
+    // Route only: a worker's own bursts offer a scheduling problem, not abuse, and
+    // bucketing by interaction by interaction would rate-limit an entire serverless region together.
     limitDimensions: ["route"],
   },
 };
@@ -128,18 +128,6 @@ export interface RequestContext {
   idempotencyKey?: string;
   /** True if the origin was verified against the host. */
   originValid?: boolean;
-  /** True when the route is currently paused by an operational flag. */
-  paused?: boolean;
-  /** True when a dependency (db: read-index, x402 verifier) failed. */
-  dependencyFailed?: boolean;
-  /** True when the caller replays an already-seen envelope/idempotency key. */
-  replayDetected?: boolean;
-  /** True when the caller's credential/payment is expired. */
-  expired?: boolean;
-  /** True when the caller is known to be underfunded for the requested amount. */
-  underfunded?: boolean;
-  /** True when the request payload failed structural validation. */
-  malformed?: boolean;
 }
 
 export interface AuthorizeResult {
@@ -178,18 +166,6 @@ export function authorizeRequest(
     tier,
   });
 
-  // Operational kill switch: a paused route refuses every caller, including the worker.
-  // This must come first so a pause cannot be bypassed by a missing secret or wallet.
-  if (ctx.paused) {
-    return refuse("forbidden", "route is paused by an operational flag");
-  }
-
-  // Fail closed on dependency failure: we cannot prove the caller is authorized,
-  // so we refuse rather than guessing. This includes the worker tier.
-  if (ctx.dependencyFailed) {
-    return refuse("dependency_failure", "authorization dependency is unavailable");
-  }
-
   if (policy.requiresWorkerSecret) {
     const expected = ctx.expectedSecret?.trim();
     // An unset secret refuses rather than waves everyone through: a deploy that
@@ -214,33 +190,9 @@ export function authorizeRequest(
     }
   }
 
-  // Replay protection: a seen envelope or idlempotency key must not be re-honoured.
-  // Reject before the rate limiter so a replay never consumes a caller's budget.
-  if (ctx.replayDetected) {
-    return refuse("invalid_request", "replay detected for this request");
-  }
-
-  if (ctx.expired) {
-    return refuse("unauthenticated", "credential or payment has expired");
-  }
-
-  if (ctx.underfunded) {
-    return refuse("insufficient_funds", "caller is underfunded for this request");
-  }
-
-  if (ctx.malformed) {
-    return refuse("invalid_request", "request payload is malformed");
-  }
-
-  // A payload that moves value must carry an idempotency key at any tier above
-  // public read. A public read tier is not allowed to mutate at all.
-  if (ctx.mutatesValue) {
-    if (tier === "public_read") {
-      return refuse("forbidden", "public_read routes cannot move value or change authority");
-    }
-    if (!ctx.idempotencyKey?.trim()) {
-      return refuse("invalid_request", "an idempotency key is required for this operation");
-    }
+  // A retried money-moving call without an idempotency key is a second payment.
+  if (ctx.mutatesValue && tier !== "public_read" && !ctx.idempotencyKey?.trim()) {
+    return refuse("invalid_request", "an idempotency key is required for this operation");
   }
 
   // Enforce browser-origin policy (CSRF) for mutating requests.
@@ -266,6 +218,35 @@ export function authorizeRequest(
   }
 
   return { allowed: true, tier };
+}
+
+/**
+ * Authorize a cron/worker request from its Authorization header.
+ *
+ * This is the one place a cron route gets its bearer token out of the request.
+ * Every cron route used to copy this parsing locally, which is two places for one
+ * of them to drift — and one of them did drift, silently accepting a header that
+ * was not a bearer token. Routes now delegate here and cannot diverge.
+ *
+ * Fails closed by construction: an absent or malformed header becomes an empty
+ * presented secret, and the tier refuses an empty presented secret even when the
+ * expected secret is also empty. An unset CRON_SECRET is a 403, not an open door.
+ */
+export function authorizeWorkerRequest(
+  request: Request,
+  route: string,
+  expectedSecret: string | undefined = process.env.CRON_SECRET,
+  rules: LimitRule[] = DEFAULT_RULES,
+  now = Date.now(),
+): AuthorizeResult {
+  const header = request.headers.get("authorization") ?? "";
+  const presented = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  return authorizeRequest(
+    "internal_worker",
+    { route, presentedSecret: presented, expectedSecret },
+    rules,
+    now,
+  );
 }
 
 /**

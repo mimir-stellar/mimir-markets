@@ -1,14 +1,14 @@
-/**
+/*
  * Cron: mark queued/in-review market proposals past their deadline as stale.
  *
- * Authorization: the shared `CRUON_SECRET` bearer pattern in `lib/api/cron-auth.ts`.
- * That helper fails closed when `CRUON_SECRET`% is unset, so a deploy that
- * forgets the secret returns 403 rather than leaving the sweep publicly
- * callable.
+ * Authorization: same `CRON_SECRET` bearer pattern as the other cron routes, delegated
+ * to `lib/api/policy.ts`. The tier fails closed when `CRON_SECRET`, is unset, so
+ * a deploy that forgets the secret returns 403 rather than leaving the sweep
+ * publicly callable.
  */
 
 import { NextResponse } from "next/server";
-import { authorizeCronRequest } from "@/lib/api/cron-auth";
+import { authorizeWorkerRequest } from "@/lib/api/policy";
 import { isDbConfigured } from "@/lib/db";
 import { markStaleProposals } from "@/lib/db";
 
@@ -17,7 +17,9 @@ export const runtime = "nodejs";
 const ROUTE = "/api/cron/proposals/mark-stale";
 
 export async function POST(request: Request): Promise<NextResponse> {
-  const auth = authorizeCronRequest(request, ROUTE);
+  // Authorized outside the try: an unauthenticated caller must never reach the
+  // sweep below, not even through the error path.
+  const auth = authorizeWorkerRequest(request, ROUTE);
   if (!auth.allowed && auth.error) {
     return NextResponse.json(auth.error.body, {
       status: auth.error.status,

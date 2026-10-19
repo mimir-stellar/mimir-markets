@@ -8,11 +8,6 @@
  * and withdraw, and if a pricing bug is found you want to stop new stakes without
  * freezing payouts.
  *
- * Cron entrypoints are a special case: an unauthorized cron call must fail
- * closed. There is no per-capability pause switch for "cron" because the safe
- * default is always "deny" — a missing or malformed `CRON_SECRET` must never
- * be interpreted as "no auth required". See `isCronAuthorized` below.
- *
  * Two rules:
  *
  *  1. **Withdrawal is never pausable.** Users must always be able to pull a parked
@@ -23,6 +18,8 @@
  *
  * Env-driven so a switch can be flipped without a deploy.
  */
+
+import { timingSafeEqual } from "node:crypto";
 
 /** Capabilities that can be paused independently during an incident. */
 export const PAUSABLE = [
@@ -38,6 +35,11 @@ export const PAUSABLE = [
   // Outbound source fetches through `lib/research/gateway.ts`. Listed here rather
   // than read ad hoc so `MIMIR_PAUSE_ALL` reaches it like every other switch.
   "research",
+  // Cron-triggered workers. These are the paths an unauthenticated caller could
+  // otherwise drive, so they are pausable like every other write capability.
+  "cron_settlement",
+  "cron_worker",
+  "cron_reconcile",
 ] as const;
 export type Pausable = (typeof PAUSABLE)[number];
 
@@ -60,6 +62,12 @@ export function isNeverPausable(value: string): value is NeverPausable {
 export function pauseEnvKey(capability: Pausable): string {
   return `MIMIR_PAUSE_${capability.toUpperCase()}`;
 }
+
+/** MIMIR_CRON_SECRET is the shared secret every cron route must present. */
+export const CRON_SECRET_ENV = "MIMIR_CRON_SECRET";
+
+/** Header a cron caller presents the secret in. */
+export const CRON_SECRET_HEADER = "x-mimir-cron-secret";
 
 export interface PauseState {
   paused: boolean;
@@ -267,9 +275,109 @@ export function disabledCategories(
   return categoryIds.filter((id) => !isCategoryEnabled(id, env));
 }
 
+// ── Cron authorization ────────────────────────────────────────────────────────
+
+/**
+ * Why a cron call was rejected. Structured so an operator (and a test) can tell
+ * "you did not configure a secret" apart from "you sent the wrong one" — the
+ * first is a deploy bug, the second is an attacker.
+ */
+export type CronAuthFailure =
+  | "secret_not_configured"
+  | "secret_missing"
+  | "secret_mismatch";
+
+export interface CronAuthResult {
+  authorized: boolean;
+  failure?: CronAuthFailure;
+  /** Human-readable, safe to log; never contains the secret itself. */
+  detail?: string;
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  // timingSafeEqual throws on length mismatch, so compare lengths first. Length
+  // is not secret here — the secret's length is a property of the deployment.
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+/**
+ * Authorize a cron call. **Fails closed**: if `MIMIR_CRON_SECRET` is unset, every
+ * cron call is rejected rather than allowed. A missing secret is a misconfigured
+ * deploy, and the safe reading of a misconfigured deploy is "nobody is allowed",
+ * not "everybody is allowed".
+ *
+ * The comparison is constant-time so a caller cannot learn the secret byte by
+ * byte from response timing.
+ */
+export function authorizeCronCall(
+  presented: string | null | undefined,
+  env: Record<string, string | undefined> = process.env,
+): CronAuthResult {
+  const expected = env[CRON_SECRET_ENV];
+  if (expected === undefined || expected.trim().length === 0) {
+    return {
+      authorized: false,
+      failure: "secret_not_configured",
+      detail: `${CRON_SECRET_ENV} is not configured; cron calls are rejected`,
+    };
+  }
+  if (presented === null || presented === undefined || presented.length === 0) {
+    return {
+      authorized: false,
+      failure: "secret_missing",
+      detail: `missing ${CRON_SECRET_HEADER} header`,
+    };
+  }
+  if (!constantTimeEqual(presented, expected)) {
+    return {
+      authorized: false,
+      failure: "secret_mismatch",
+      detail: `invalid ${CRON_SECRET_HEADER} header`,
+    };
+  }
+  return { authorized: true };
+}
+
+/**
+ * The single gate a cron route calls: authorized AND its capability is not
+ * paused. Authorization is checked first so an unauthenticated caller cannot
+ * probe pause state.
+ */
+export function checkCronAllowed(
+  args: { presented: string | null | undefined; capability: Pausable },
+  env: Record<string, string | undefined> = process.env,
+): WriteGateResult {
+  const auth = authorizeCronCall(args.presented, env);
+  if (!auth.authorized) {
+    return {
+      allowed: false,
+      reason: "unauthorized",
+      detail: auth.detail,
+    };
+  }
+  const pause = pauseState(args.capability, env);
+  if (pause.paused) {
+    const pauseDetail = buildPauseDetail(args.capability, pause, env);
+    return {
+      allowed: false,
+      reason: "paused",
+      detail: pauseDetail.reason,
+      pauseDetail,
+    };
+  }
+  return { allowed: true };
+}
+
 // ── The single gate a write path calls ────────────────────────────────────────
 
-export type WriteBlockReason = "feature_disabled" | "category_disabled" | "paused";
+export type WriteBlockReason =
+  | "feature_disabled"
+  | "category_disabled"
+  | "paused"
+  | "unauthorized";
 
 export interface WriteGateResult {
   allowed: boolean;
@@ -318,95 +426,4 @@ export function checkWriteAllowed(
     };
   }
   return { allowed: true };
-}
-
-// ── Cron authorization (fail closed) ──────────────────────────────────────────
-
-/**
- * Result of a cron authorization check.
- *
- * Structured so a route handler can branch on `reason` without parsing prose,
- * and so the negative cases are enumerable in tests. `unauthorized` is the only
- * value that should ever reach a 401/403 response body — the others are
- * operator-facing diagnostics.
- */
-export type CronAuthReason =
-  | "authorized"
-  | "missing_secret" // server has no CRON_SECRET configured
-  | "missing_header" // caller sent no Authorization header
-  | "malformed_header" // header present but not `Bearer <token>`
-  | "invalid_token"; // token present but does not match
-
-export interface CronAuthResult {
-  authorized: boolean;
-  reason: CronAuthReason;
-}
-
-/**
- * Constant-time string comparison for secrets.
- *
- * Uses `crypto.timingSafeEqual` when available (Node runtime) and falls back to
- * a length-aware XOR loop in edge runtimes. Never short-circuits on the first
- * mismatched byte, so an attacker cannot recover the secret one byte at a time.
- */
-function timingSafeEqualStr(a: string, b: string): boolean {
-  // Length mismatch is not secret-dependent in a way that leaks the secret
-  // itself; still compare against a fixed-length buffer to avoid early exit.
-  const len = Math.max(a.length, b.length);
-  let diff = a.length ^ b.length;
-  for (let i = 0; i < len; i++) {
-    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
-  return diff === 0;
-}
-
-/**
- * Authorize a cron invocation. **Fails closed**: any missing, malformed, or
- * mismatched input returns `authorized: false`.
- *
- * Rules:
- *  - If `CRON_SECRET` is unset or empty, every call is rejected. A deploy that
- *    forgot to set the secret must not silently expose the cron endpoint.
- *  - The caller must send `Authorization: Bearer <CRON_SECRET>` (Vercel Cron
- *    convention). Bare tokens, Basic auth, and query-string secrets are rejected.
- *  - Comparison is constant-time to avoid leaking the secret via timing.
- *
- * This is intentionally independent of `PAUSABLE` / `FEATURES`: pausing a
- * capability must not disable its authorization check, and enabling a feature
- * must not bypass it.
- */
-export function isCronAuthorized(
-  authorizationHeader: string | null | undefined,
-  env: Record<string, string | undefined> = process.env,
-): CronAuthResult {
-  const secret = env.CRON_SECRET;
-  if (secret === undefined || secret.length === 0) {
-    return { authorized: false, reason: "missing_secret" };
-  }
-  if (authorizationHeader === undefined || authorizationHeader === null || authorizationHeader.length === 0) {
-    return { authorized: false, reason: "missing_header" };
-  }
-  const prefix = "Bearer ";
-  if (!authorizationHeader.startsWith(prefix)) {
-    return { authorized: false, reason: "malformed_header" };
-  }
-  const token = authorizationHeader.slice(prefix.length);
-  if (token.length === 0) {
-    return { authorized: false, reason: "malformed_header" };
-  }
-  if (!timingSafeEqualStr(token, secret)) {
-    return { authorized: false, reason: "invalid_token" };
-  }
-  return { authorized: true, reason: "authorized" };
-}
-
-/**
- * Convenience boolean wrapper for route handlers that only need a yes/no.
- * Prefer `isCronAuthorized` when the route wants to log the failure reason.
- */
-export function cronAuthorized(
-  authorizationHeader: string | null | undefined,
-  env: Record<string, string | undefined> = process.env,
-): boolean {
-  return isCronAuthorized(authorizationHeader, env).authorized;
 }

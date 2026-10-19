@@ -1,17 +1,20 @@
+import { authorizeWorkerRequest } from "@/lib/api/policy";
 import { NextResponse } from "next/server";
 
 import { apiError } from "@/lib/api/errors";
-import { authorizeCronRequest } from "@/lib/api/cron-auth";
 import { refreshChallengeOpportunitiesIndex } from "@/lib/server/challenge-opportunities";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+const ROUTE = "/api/cron/challenge-opportunities";
+
 export async function GET(request: Request) {
-  // Authorize outside the try: an unauthenticated caller must never reach the
-  // refresh below, not even through the error path. The tier fails closed when
-  // CRON_SECRET is unset, and the helper is the only place that reads it.
-  const auth = authorizeCronRequest(request, "/api/cron/challenge-opportunities");
+  // Authorized outside the try: an unauthenticated caller must never reach the
+  // index refresh below, not even through the error path. The tier fails closed when
+  // CRON_SECRET is unset, so a deploy that forgets the secret returns 403 rather
+  // than leaving the refresh publicly callable.
+  const auth = authorizeWorkerRequest(request, ROUTE);
   if (!auth.allowed && auth.error) {
     // The tier's error already carries a machine-readable code, a retryable flag
     // and a Retry-After when waiting can help.
@@ -21,12 +24,12 @@ export async function GET(request: Request) {
     });
   }
 
-  if (process.env.NEXT_PUBLIC_FEATURE_SOURCE_DRAFTS !== "1") {
-    const err = apiError("not_found", "Challenge opportunities are not enabled");
-    return NextResponse.json(err.body, { status: err.status, headers: err.headers });
-  }
-
   try {
+    if (process.env.NEXT_PUBLIC_FEATURE_SOURCE_DRAFTS !== "1") {
+      const err = apiError("not_found", "Challenge opportunities are not enabled");
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+
     const summary = await refreshChallengeOpportunitiesIndex();
 
     return NextResponse.json(
