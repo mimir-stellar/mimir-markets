@@ -84,6 +84,7 @@ import {
   describeBackoffError,
   withBackoff,
 } from "../../lib/ops/backoff-policies";
+import { reconcileSettlements } from "../../lib/server/settlement-index";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const CONTRACT_ID         = requireMarketContractId();
