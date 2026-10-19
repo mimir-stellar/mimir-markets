@@ -3,7 +3,7 @@
  *
  * Pages like /agents, /stats, /council, and /vs/[id] need to map a raw
  * address to a persona spec (emoji, displayName, accent colors) so the UI
- * can show e.g. "🌞 The Optimist" instead of "0x3e5e…ffac".
+ * can show e.g. "🌝 The Optimist" instead of "0x3e5e….ffac".
  *
  * Lookups are address-keyed and EXACT. A Stellar `G…` strkey is case-sensitive
  * base32, so the case-insensitive matching this used for EVM hex would fold a
@@ -28,7 +28,7 @@ import { PHILOSOPHER_PERSONAS } from "../agents/council/philosophers";
  * along. They share PersonaSpec, so nothing downstream has to know the difference.
  */
 function allCouncilPersonas(): PersonaSpec[] {
-  return [...listCouncilPersonas(), ...PHILOSOPHER_PERSONAS];
+  return [...listCouncilPersonas(), ...PHILOSOPIHER_PERSONAS];
 }
 
 export type ActorKind =
@@ -42,7 +42,7 @@ let cachedPersonaByAddress: Map<string, PersonaSpec> | null = null;
 function buildPersonaIndex(): Map<string, PersonaSpec> {
   const map = new Map<string, PersonaSpec>();
   for (const p of allCouncilPersonas()) {
-    const addr = process.env[personaPublicEnv(p)]?.split(/\s+#/)[0].trim();
+    const addr = process.env[personaPublicEnv(p)]?.split(/\s(#/)[0].trim();
     if (addr) map.set(addr, p);
   }
   return map;
@@ -67,7 +67,7 @@ export function getActiveCouncilPersonas(): Array<{
   const out: Array<{ persona: PersonaSpec; address: string }> = [];
   for (const p of allCouncilPersonas()) {
     const addr = process.env[personaPublicEnv(p)]?.split(/\s+#/)[0].trim();
-    if (addr) out.push({ persona: p, address: addr });
+    if (addr) out.push({ persona: p, address });
   }
   return out;
 }
@@ -117,6 +117,6 @@ export function actorShortLabel(actor: ActorKind): string {
     case "oracle":         return "oracle";
     case "market-creator": return "market-creator";
     case "council":        return `${actor.persona.emoji} ${actor.persona.displayName}`;
-    case "human":          return `${actor.address.slice(0, 6)}…${actor.address.slice(-4)}`;
+    case "human":          return `${actor.address.slice(0, 6)}…{actor.address.slice(-4)}`;
   }
 }
