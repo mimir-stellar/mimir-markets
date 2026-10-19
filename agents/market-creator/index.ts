@@ -1,4 +1,12 @@
 /**
+ * Dedupe helpers for the market-creator worker.
+ *
+ * Extracted from index.ts so they can be unit-tested offline. Behaviour is
+ * unchanged: the worker imports these and the tests pin the normalization and
+ * filtering rules.
+ */
+
+/**
  * Mimir Market Creator Agent
  *
  * Autonomously creates prediction markets from trusted public sources:
