@@ -40,11 +40,23 @@
 applyWorkerGeminiKey("COUNCIL_GEMINI_API_KEY");
 
 import { requireAnyLLMKey, applyWorkerGeminiKey } from "../../lib/agent-bootstrap";
-import { getClaimCount, readClaimRaw } from "../../lib/contract";
+import { getClaimCount, readClaimRaw, readClaimsBatch } from "../../lib/contract";
 import { readAgentBalances } from "../../lib/agent-wallets";
 import { STELLAR_NETWORK, requireMarketContractId } from "../../lib/stellar";
 import { unitsToUsdc } from "../../lib/usdc";
-import { reportingPoll } from "../../lib/ops/heartbeat";
+import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
+import {
+  BackoffError,
+  DependencyFailureError,
+  MalformedInputError,
+  StaleStateError,
+  DuplicateActionError,
+  CancelledByOperatorError,
+  PausedWorkerError,
+  COUNCIL_BACKOFF,
+  describeBackoffError,
+  withBackoff,
+} from "../../lib/ops/backoff-policies";
 import { activeLLMProvider, activeLLMModel, activeLLMKeyFingerprint } from "../../lib/llm";
 import {
   listCouncilPersonas,
@@ -160,6 +172,19 @@ async function fetchClaim(claimId: number): Promise<ClaimOnChain | null> {
   return claim ? toClaimOnChain(claim) : null;
 }
 
+/**
+ * Pure helper: pick claims that are still joinable at `now`.
+ *
+ * Extracted so the selection rule can be unit-tested without touching the
+ * chain. A claim is joinable when its state is `open` or `active` and its
+ * deadline has not yet passed.
+ */
+export function selectJoinableClaims(claims: ClaimOnChain[], now: number): ClaimOnChain[] {
+  return claims.filter(
+    (claim) => (claim.state === "open" || claim.state === "active") && claim.deadline > now,
+  );
+}
+
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 async function poll(): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
@@ -168,8 +193,15 @@ async function poll(): Promise<void> {
   try {
     total = await getClaimCount();
   } catch (err) {
-    console.warn("[council] Failed to read the claim count:", err);
-    return;
+    const depErr = new DependencyFailureError(
+      `Failed to read the claim count: ${err instanceof Error ? err.message : String(err)}`,
+      "rpc",
+      true,
+      0,
+      err,
+    );
+    console.warn(`[council] ${describeBackoffError(depErr)}`);
+    throw depErr;
   }
 
   console.log(
@@ -187,13 +219,17 @@ async function poll(): Promise<void> {
   };
 
   // Pre-load joinable claims so we don't refetch in the inner loop.
-  const allClaims: ClaimOnChain[] = [];
-  for (let id = 1; id <= total; id++) {
-    const claim = await fetchClaim(id);
-    if (!claim) continue;
-    const joinable = (claim.state === "open" || claim.state === "active") && claim.deadline > now;
-    if (joinable) allClaims.push(claim);
+  // Batched read: one RPC simulation per BATCH_SIZE ids instead of one per id,
+  // so the per-poll cost drops from `total` to `ceil(total / BATCH_SIZE)`.
+  const fetched: ClaimOnChain[] = [];
+  if (total > 0) {
+    const rawClaims = await readClaimsBatch(1, total);
+    for (const raw of rawClaims) {
+      if (!raw) continue;
+      fetched.push(toClaimOnChain(raw));
+    }
   }
+  const allClaims = selectJoinableClaims(fetched, now);
   if (allClaims.length === 0) {
     console.log("[council] No joinable claims this round.");
     return;
@@ -239,13 +275,19 @@ async function poll(): Promise<void> {
             );
           }
         }
-        const receipt = await runPersonaForClaim(persona, claim, ctx);
+        const receipt = await withBackoff("council", () => runPersonaForClaim(persona, claim, ctx), {
+          policy: COUNCIL_BACKOFF,
+        });
         if (receipt) stakesThisCycle += 1;
       } catch (err) {
-        console.error(
-          `[council:${persona.slug}] error on claim #${claim.id}:`,
-          err instanceof Error ? err.message : err,
-        );
+        if (err instanceof BackoffError) {
+          console.warn(`[council:${persona.slug}] ${describeBackoffError(err)} on claim #${claim.id}`);
+        } else {
+          console.error(
+            `[council:${persona.slug}] error on claim #${claim.id}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
       }
       if (DECISION_DELAY_MS > 0) {
         await new Promise((resolve) => setTimeout(resolve, DECISION_DELAY_MS));
@@ -296,10 +338,10 @@ async function main(): Promise<void> {
   }
   console.log("═══════════════════════════════════════════════\n");
 
-  const safePoll = () => reportingPoll("council", "council", POLL_INTERVAL_MS / 1000, poll);
+  const safePoll = () =>
+    reportingPoll("council", "council", POLL_INTERVAL_MS / 1000, poll, { pause: "council_worker" });
 
-  await safePoll();
-  setInterval(safePoll, POLL_INTERVAL_MS);
+  await runWorkerLoop({ worker: "council", intervalMs: POLL_INTERVAL_MS, cycle: safePoll });
 }
 
 main().catch((err) => {

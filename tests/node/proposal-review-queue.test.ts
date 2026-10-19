@@ -323,7 +323,7 @@ test("privacy: no source text or private keys in proposal queue", async () => {
   assert.ok(!allStrings.includes("ANTHROPIC_API_KEY"));
 });
 
-test("operational boundary: review_status index exists for queue queries", () => {
+test("operational boundary: review_status index exists for queue queries", async () => {
   // This is a schema test - the index is created in the table definition
   // We verify the CREATE INDEX statement would be valid
   const indexSql = "CREATE INDEX IF NOT EXISTS idx_market_proposals_review_status ON market_proposals(review_status)";
@@ -331,7 +331,7 @@ test("operational boundary: review_status index exists for queue queries", () =>
   assert.match(indexSql, /review_status/);
 });
 
-test("operational boundary: partial index for queued proposals", () => {
+test("operational boundary: partial index for queued proposals", async () => {
   const indexSql = "CREATE INDEX IF NOT EXISTS idx_market_proposals_queued ON market_proposals(queued_at) WHERE review_status = 'queued'";
   assert.match(indexSql, /idx_market_proposals_queued/);
   assert.match(indexSql, /queued_at/);

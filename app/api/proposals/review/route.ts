@@ -10,7 +10,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api/policy";
-import { isDbConfigured } from "@/lib/db";
+import { apiError } from "@/lib/api/errors";
+import { getDb, isDbConfigured } from "@/lib/db";
 import {
   claimProposalForReview,
   completeProposalReview,
@@ -33,6 +34,19 @@ function json(data: unknown, status = 200): NextResponse {
 
 function errorResponse(message: string, status = 400): NextResponse {
   return json({ error: { message } }, status);
+}
+
+/**
+ * Return a machine-readable `apiError` envelope with the given status.
+ *
+ * Used for 5xx failures so the client never sees a raw exception message
+ * (hostnames, SQL fragments, stack-adjacent detail). The detail is logged
+ * server-side instead. The `status` argument is honoured even when it differs
+ * from the code's default, so the route's contract is unchanged.
+ */
+function internalErrorResponse(status = 500): NextResponse {
+  const result = apiError("internal_error", "Internal server error");
+  return NextResponse.json(result.body, { status, headers: result.headers });
 }
 
 function requireAuth(request: NextRequest): NextResponse | null {
@@ -89,7 +103,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     });
   } catch (err) {
     console.error("[proposals/review] GET error:", err);
-    return errorResponse(err instanceof Error ? err.message : "Internal error", 500);
+    return internalErrorResponse(500);
   }
 }
 
@@ -177,7 +191,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
   } catch (err) {
     console.error("[proposals/review] Error:", err);
-    return errorResponse(err instanceof Error ? err.message : "Internal error", 500);
+    return internalErrorResponse(500);
   }
 }
 
@@ -219,6 +233,6 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
     return json({ success: true, proposalId, status });
   } catch (err) {
     console.error("[proposals/review] PATCH Error:", err);
-    return errorResponse(err instanceof Error ? err.message : "Internal error", 500);
+    return internalErrorResponse(500);
   }
 }
