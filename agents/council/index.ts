@@ -40,7 +40,7 @@
 applyWorkerGeminiKey("COUNCIL_GEMINI_API_KEY");
 
 import { requireAnyLLMKey, applyWorkerGeminiKey } from "../../lib/agent-bootstrap";
-import { getClaimCount, readClaimRaw } from "../../lib/contract";
+import { getClaimCount, readClaimRaw, readClaimsBatch } from "../../lib/contract";
 import { readAgentBalances } from "../../lib/agent-wallets";
 import { STELLAR_NETWORK, requireMarketContractId } from "../../lib/stellar";
 import { unitsToUsdc } from "../../lib/usdc";
@@ -172,6 +172,19 @@ async function fetchClaim(claimId: number): Promise<ClaimOnChain | null> {
   return claim ? toClaimOnChain(claim) : null;
 }
 
+/**
+ * Pure helper: pick claims that are still joinable at `now`.
+ *
+ * Extracted so the selection rule can be unit-tested without touching the
+ * chain. A claim is joinable when its state is `open` or `active` and its
+ * deadline has not yet passed.
+ */
+export function selectJoinableClaims(claims: ClaimOnChain[], now: number): ClaimOnChain[] {
+  return claims.filter(
+    (claim) => (claim.state === "open" || claim.state === "active") && claim.deadline > now,
+  );
+}
+
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 async function poll(): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
@@ -206,13 +219,17 @@ async function poll(): Promise<void> {
   };
 
   // Pre-load joinable claims so we don't refetch in the inner loop.
-  const allClaims: ClaimOnChain[] = [];
-  for (let id = 1; id <= total; id++) {
-    const claim = await fetchClaim(id);
-    if (!claim) continue;
-    const joinable = (claim.state === "open" || claim.state === "active") && claim.deadline > now;
-    if (joinable) allClaims.push(claim);
+  // Batched read: one RPC simulation per BATCH_SIZE ids instead of one per id,
+  // so the per-poll cost drops from `total` to `ceil(total / BATCH_SIZE)`.
+  const fetched: ClaimOnChain[] = [];
+  if (total > 0) {
+    const rawClaims = await readClaimsBatch(1, total);
+    for (const raw of rawClaims) {
+      if (!raw) continue;
+      fetched.push(toClaimOnChain(raw));
+    }
   }
+  const allClaims = selectJoinableClaims(fetched, now);
   if (allClaims.length === 0) {
     console.log("[council] No joinable claims this round.");
     return;
