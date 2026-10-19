@@ -1,8 +1,8 @@
-/**
+/*
  * Multi-dimensional rate limiting.
  *
  * IP alone is the wrong key for this app. An agent fleet behind one NAT shares an
- * IP, and a single agent can rotate IPs freely — so limiting by IP either punishes
+ * IP, and a single agent can rotate IPs freely — so limiting by ip either punishes
  * honest co-tenants or stops nobody. Every request is therefore counted against
  * several buckets at once:
  *
@@ -82,6 +82,19 @@ export const DEFAULT_RULES: LimitRule[] = [
   { dimension: "wallet", limit: 120, windowMs: 60_000 },
   { dimension: "agent", limit: 120, windowMs: 60_000 },
   { dimension: "route", limit: 600, windowMs: 60_000 },
+];
+
+/**
+ * Stricter rules for LLM-backed public routes (claim moderation and claim
+ * draft). These endpoints are anonymously reachable once their feature flags
+ * are enabled, and each call costs an LLM round trip (and, for drafts, an
+ * outbound fetch of an arbitrary source URL), so the generic 300/min IP cap
+ * is far too generous. The per-IP cap is the meaningful key here; the route cap
+ * keeps one of the two routes from consuming the other's budget.
+ */
+export const LLM_PUBLIC_RULES: LimitRule[] = [
+  { dimension: "ip", limit: 10, windowMs: 60_000 },
+  { dimension: "route", limit: 10, windowMs: 60_000 },
 ];
 
 function keyFor(rule: LimitRule, keys: RateLimitKeys): string | null {
