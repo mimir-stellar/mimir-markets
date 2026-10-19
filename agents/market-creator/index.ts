@@ -55,7 +55,7 @@ import {
   requireMarketContractId,
 } from "../../lib/stellar";
 import { payingWalletFor } from "../../lib/x402/buyer";
-import { reportingPoll } from "../../lib/ops/heartbeat";
+import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
 import { isCategoryEnabled } from "../../lib/ops/flags";
 import { unitsToUsdc } from "../../lib/usdc";
 import { gatherCouncilPreflight } from "./council-preflight";
@@ -1297,8 +1297,11 @@ async function main(): Promise<void> {
       pause: "market_creator_worker",
     });
 
-  await safeRun();
-  setInterval(safeRun, RUN_INTERVAL_HOURS * 3600 * 1000);
+  await runWorkerLoop({
+    worker: "market-creator",
+    intervalMs: RUN_INTERVAL_HOURS * 3600 * 1000,
+    cycle: safeRun,
+  });
 }
 
 main().catch((err) => {

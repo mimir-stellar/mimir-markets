@@ -37,7 +37,7 @@ import { STELLAR_NETWORK, requireMarketContractId } from "../../lib/stellar";
 import { callLLM, activeLLMModel, activeLLMProvider, extractJson } from "../../lib/llm";
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
 import { PRICES, priceToUsdcUnits } from "../../lib/x402/config";
-import { reportingPoll } from "../../lib/ops/heartbeat";
+import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
 import {
   BackoffError,
   DependencyFailureError,
@@ -343,8 +343,7 @@ async function main(): Promise<void> {
 
   void randomUUID; // reserved for per-cycle correlation ids
   const safePoll = () => reportingPoll("traders", "traders", POLL_INTERVAL_MS / 1000, poll);
-  await safePoll();
-  setInterval(safePoll, POLL_INTERVAL_MS);
+  await runWorkerLoop({ worker: "traders", intervalMs: POLL_INTERVAL_MS, cycle: safePoll });
 }
 
 main().catch((err) => {

@@ -44,7 +44,7 @@ import { getClaimCount, readClaimRaw } from "../../lib/contract";
 import { readAgentBalances } from "../../lib/agent-wallets";
 import { STELLAR_NETWORK, requireMarketContractId } from "../../lib/stellar";
 import { unitsToUsdc } from "../../lib/usdc";
-import { reportingPoll } from "../../lib/ops/heartbeat";
+import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
 import {
   BackoffError,
   DependencyFailureError,
@@ -324,8 +324,7 @@ async function main(): Promise<void> {
   const safePoll = () =>
     reportingPoll("council", "council", POLL_INTERVAL_MS / 1000, poll, { pause: "council_worker" });
 
-  await safePoll();
-  setInterval(safePoll, POLL_INTERVAL_MS);
+  await runWorkerLoop({ worker: "council", intervalMs: POLL_INTERVAL_MS, cycle: safePoll });
 }
 
 main().catch((err) => {

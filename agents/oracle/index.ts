@@ -87,7 +87,7 @@ import {
   requireMarketContractId,
 } from "../../lib/stellar";
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
-import { reportingPoll } from "../../lib/ops/heartbeat";
+import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
 import { isPaused, pauseState } from "../../lib/ops/flags";
 import {
   DependencyFailureError,
@@ -949,8 +949,7 @@ async function main(): Promise<void> {
   // failing on /api/health rather than merely stale.
   const safePoll = () => reportingPoll("oracle", "oracle", POLL_INTERVAL_MS / 1000, poll);
 
-  await safePoll();
-  setInterval(safePoll, POLL_INTERVAL_MS);
+  await runWorkerLoop({ worker: "oracle", intervalMs: POLL_INTERVAL_MS, cycle: safePoll });
 }
 
 main().catch((err) => {
