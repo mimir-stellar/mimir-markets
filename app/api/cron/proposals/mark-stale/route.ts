@@ -1,25 +1,29 @@
-/*
+/**
  * Cron: mark queued/in-review market proposals past their deadline as stale.
  *
- * Authorization: same `CRON_SECRET` bearer pattern as the other cron routes, delegated
- * to `lib/api/policy.ts`. The tier fails closed when `CRON_SECRET`, is unset, so
- * a deploy that forgets the secret returns 403 rather than leaving the sweep
- * publicly callable.
+ * Authorization: same `CRON_SECRET` bearer pattern as the other cron routes. The
+ * route fails closed when `CRON_SECRET` is unset, so a deploy that forgets the
+ * secret returns 403 rather than leaving the sweep publicly callable.
  */
 
 import { NextResponse } from "next/server";
-import { authorizeWorkerRequest } from "@/lib/api/policy";
-import { isDbConfigured } from "@/lib/db";
-import { markStaleProposals } from "@/lib/db";
+import { authorizeRequest } from "@/lib/api/policy";
+import { isDbConfigured, markStaleProposals } from "@/lib/db";
 
 export const runtime = "nodejs";
 
 const ROUTE = "/api/cron/proposals/mark-stale";
 
 export async function POST(request: Request): Promise<NextResponse> {
-  // Authorized outside the try: an unauthenticated caller must never reach the
-  // sweep below, not even through the error path.
-  const auth = authorizeWorkerRequest(request, ROUTE);
+  // Fail closed before any work: an unauthorized caller must not be able to
+  // trigger a sweep or reach the error path below.
+  const header = request.headers.get("authorization") ?? "";
+  const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
+  const auth = authorizeRequest("internal_worker", {
+    route: ROUTE,
+    presentedSecret: presented,
+    expectedSecret: process.env.CRON_SECRET,
+  });
   if (!auth.allowed && auth.error) {
     return NextResponse.json(auth.error.body, {
       status: auth.error.status,

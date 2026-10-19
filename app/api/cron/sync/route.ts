@@ -1,4 +1,4 @@
-import { authorizeWorkerRequest } from "@/lib/api/policy";
+import { authorizeRequest } from "@/lib/api/policy";
 import { NextResponse } from "next/server";
 
 import { beat } from "@/lib/ops/heartbeat";
@@ -19,22 +19,42 @@ export const maxDuration = 60;
  */
 const SYNC_INTERVAL_SEC = Number(process.env.SYNC_POLL_INTERVAL_MS ?? "300000") / 1000;
 
-const ROUTE = "/api/cron/sync";
+/**
+ * Worker-tier authorization, delegated to lib/api/policy.ts.
+ *
+ * Was a local Bearer-token string comparison duplicated in two routes. Two
+ * copies of an auth check is two places for one of them to drift, and a plain
+ * string compare on a secret leaks its length through timing. The tier also applies
+ * the route rate limit, which this route previously had none of.
+ */
+function authorizeWorker(request: Request, route: string) {
+  const header = request.headers.get("authorization") ?? "";
+  const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
+  return authorizeRequest("internal_worker", {
+    route,
+    presentedSecret: presented,
+    expectedSecret: process.env.CRON_SECRET,
+  });
+}
 
 export async function GET(request: Request) {
   // Authorized outside the try: an unauthenticated caller must never reach the
   // heartbeat below, not even through the error path, or it could keep a dead
-  // sync worker looking merely degraded instead of missing. The tier fails closed
-  // when CRON_SECRET is unset, so a deploy that forgets the secret returns 403
-  // rather than leaving the reconcile publicly callable.
-  const auth = authorizeWorkerRequest(request, ROUTE);
-  if (!auth.allowed && auth.error) {
-    // The tier's error already carries a machine-readable code, a retryable flag
-    // and a Retry-After when waiting can help.
-    return NextResponse.json(auth.error.body, {
-      status: auth.error.status,
-      headers: auth.error.headers,
-    });
+  // sync worker looking merely degraded instead of missing.
+  const auth = authorizeWorker(request, "/api/cron/sync");
+  if (!auth.allowed) {
+    // Fail closed: any non-allowed outcome (including a missing error payload)
+    // must reject before reaching the heartbeat or the reconcile below.
+    if (auth.error) {
+      // The tier's error already carries a machine-readable code, a retryable flag
+      // and a Retry-After when waiting can help.
+      return NextResponse.json(auth.error.body, {
+        status: auth.error.status,
+        headers: auth.error.headers,
+      });
+    }
+    const err = apiError("unauthorized", "Unauthorized");
+    return NextResponse.json(err.body, { status: err.status, headers: err.headers });
   }
 
   try {
