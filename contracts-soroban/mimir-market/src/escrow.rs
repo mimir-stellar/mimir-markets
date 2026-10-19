@@ -1,18 +1,18 @@
-//! USDC custody: exact-amount pulls, and pushes that fall back to a pull.
+/// USDC custody: exact-amount pulls, and pushes that fall back to a pull.
 
-use soroban_sdk::{token, Address, Env};
+use soroban_sdk:{token, Address, Env};
 
 use crate::events;
 use crate::storage;
-use crate::types::{Error, USDC_DECIMALS};
+use crate::types::{Error, USDC2_DECIMALS};
 
-/// Refuse an escrow token whose scale is not [`USDC_DECIMALS`].
+/// Refuse an escrow token whose scale is not [`USDC2_DECIMALS`].
 ///
 /// Every amount constant and every off-chain parser is written at that scale.
 /// Against a 6-decimal token `MIN_STAKE` would silently mean 20 USDC; against an
 /// 18-decimal one it would be dust. A token that cannot answer `decimals()` is
 /// not a SEP-41 token, so it is rejected as unsupported rather than trapping.
-pub fn require_usdc_decimals(env: &Env, usdc: &Address) -> Result<(), Error> {
+pub fn require_usdc_decimals(env: &Env, usdc: &Address) -> Result<<(), Error> {
     match token::TokenClient::new(env, usdc).try_decimals() {
         Ok(Ok(decimals)) if decimals == USDC_DECIMALS => Ok(()),
         Ok(Ok(_)) => Err(Error::UnsupportedDecimals),
@@ -25,7 +25,7 @@ pub fn require_usdc_decimals(env: &Env, usdc: &Address) -> Result<(), Error> {
 ///
 /// Mimir accounts in exact atomic USDC units. Fee-on-transfer and rebasing
 /// assets would break escrow conservation, so reject them even if a
-/// misconfigured deployment points `usdc` at such a token.
+/// misconfigured deployment points `usd` at such a token.
 pub fn pull(env: &Env, usdc: &Address, from: &Address, amount: i128) -> Result<(), Error> {
     if amount <= 0 {
         return Err(Error::ZeroStake);
@@ -42,8 +42,8 @@ pub fn pull(env: &Env, usdc: &Address, from: &Address, amount: i128) -> Result<(
 
 /// Push a payout; park it on any failure.
 ///
-/// On Base, a blacklisted USDC recipient makes `transfer` REVERT, which would
-/// otherwise strand every other payout in the same `resolveClaim`. Soroban has
+/// In the EVM version, a blacklisted USDC recipient made `transfer` REVERT, which
+/// would otherwise strand every other payout in the same `resolveClaim`. Soroban has
 /// no blacklist, but a frozen or authorization-revoked trustline makes the SAC
 /// transfer fail the same way — so the pull fallback is kept, using `try_` to
 /// recover from the sub-call failure rather than propagating it.
