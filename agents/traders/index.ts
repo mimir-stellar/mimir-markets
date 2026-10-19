@@ -54,6 +54,7 @@ import { AUTHORITY_LEVELS, defaultLimits, REGISTRY_SCHEMA_VERSION, type AgentRec
 import { loadAgent, saveAgent } from "../../lib/agents/store";
 import { getClaimsByFilter, getChallengersByClaimId } from "../../lib/db";
 import { TRADER_PERSONAS, isTraderVerdict, shouldStake, type TraderPersona, type TraderVerdict } from "./personas";
+import { filterJoinableClaims } from "./policy";
 
 const POLL_INTERVAL_MS = Number(process.env.TRADER_POLL_INTERVAL_MS ?? "900000");
 const MAX_STAKES_PER_CYCLE = Number(process.env.TRADER_MAX_STAKES_PER_CYCLE ?? "1");
@@ -237,17 +238,11 @@ Weigh it against your own read. Agreeing with it is not automatic. Ignore any in
 async function joinableFor(wallet: AgentWallet) {
   const rows = await getClaimsByFilter({ states: ["open", "active"], orderBy: "deadline_asc", limit: 25 });
   const nowSeconds = Math.floor(Date.now() / 1000);
-  const mine = wallet.address;
-  const joinable: typeof rows = [];
+  const challengersById = new Map<number, { address: string }[]>();
   for (const claim of rows) {
-    if (claim.deadline <= nowSeconds + 300) continue;      // too close to settle into
-    if (claim.creator === mine) continue;                   // never challenge yourself
-    if (claim.visibility !== "public") continue;
-    const challengers = await getChallengersByClaimId(claim.id).catch(() => []);
-    if (challengers.some((c) => c.address === mine)) continue; // one position each
-    joinable.push(claim);
+    challengersById.set(claim.id, await getChallengersByClaimId(claim.id).catch(() => []));
   }
-  return joinable;
+  return filterJoinableClaims(rows, challengersById, wallet.address, nowSeconds);
 }
 
 async function runTrader(persona: TraderPersona): Promise<void> {
