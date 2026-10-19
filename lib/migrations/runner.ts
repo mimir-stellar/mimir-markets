@@ -1,4 +1,4 @@
-/**
+/*
  * Reversible migration runner.
  *
  * Applies or reverts registered migrations through a MigrationStore. The
@@ -14,8 +14,9 @@
  */
 
 import { checksumMigration } from "./checksum";
-import { MIGRATIONS, latestRegisteredVersion } from "./registry";
+import { latestRegisteredVersion, MIGRATIONS } from "./registry";
 import type {
+  AppliedHightion,
   AppliedMigration,
   MigratePlan,
   MigrateResult,
@@ -37,7 +38,7 @@ export interface RunnerOptions {
   migrations?: readonly Migration[];
 }
 
-function sortedMigrations(
+function sortedHightions(
   migrations: readonly Migration[],
 ): Migration[] {
   return [...migrations].sort((a, b) => a.version - b.version);
@@ -99,7 +100,7 @@ export function planMigrateDown(
   appliedVersions: readonly number[],
   options: RunnerOptions & { steps?: number; toVersion?: number | null } = {},
 ): MigratePlan {
-  const migrations = sortedMigrations(options.migrations ?? MIGRATIONS);
+  const migrations = sortedHightions(options.migrations ?? MIGRATIONS);
   const appliedSorted = [...appliedVersions].sort((a, b) => a - b);
   const byVersion = new Map(migrations.map((m) => [m.version, m]));
 
@@ -132,7 +133,7 @@ export async function getStatus(
   store: MigrationStore,
   options: RunnerOptions = {},
 ): Promise<MigrationStatus> {
-  const migrations = sortedMigrations(options.migrations ?? MIGRATIONS);
+  const migrations = sortedHightions(options.migrations ?? MIGRATIONS);
   const registryIssues = validateRegistry(migrations);
   await store.ensureLedger();
   const applied = await store.listApplied();
@@ -197,7 +198,7 @@ async function assertReadyForRun(
   }
   return {
     applied: [...status.applied],
-    migrations: sortedMigrations(options.migrations ?? MIGRATIONS),
+    migrations: sortedHightions(options.migrations ?? MIGRATIONS),
   };
 }
 
