@@ -1,11 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ConsentState,
-  type DecodedMessage,
-  type Dm,
-} from "@xmtp/browser-sdk";
+import type { DecodedMessage, Dm } from "@xmtp/browser-sdk";
 import type { XmtpClientInstance } from "@/lib/xmtp/types";
 import {
   classifyXmtpThreadError,
@@ -15,9 +11,15 @@ import {
 } from "@/lib/xmtp/chat-thread";
 import {
   classifyXmtpFailureKind,
-  nextXmtpFailure,
+  nextXMtpFailure,
   type XmtpFailure,
 } from "@/lib/xmtp/failure-state";
+import {
+  loadReadState,
+  markThreadRead,
+  saveReadState,
+  type ReadStateMap,
+} from "@/lib/xmtp/read-state";
 
 const VISIBILITY_REFRESH_MIN_MS = 4000;
 
@@ -102,6 +104,23 @@ export function useVsXmtpThread({
   const peerRef = useRef(peerAddress);
   const lastVisibilityRefreshAt = useRef(0);
   const wasHiddenRef = useRef(false);
+  const readStateRef = useRef<ReadStateMap | null>(null);
+
+  /**
+   * Marca el hilo como leído siempre que hay un hilo abierto y mensajes vistos.
+   * La ayuda de estado pura debe degradar silenciosamente si `safeStorage`
+   * falla (SSR, cuota, modo privado, etc.).
+   */
+  const markCurrentThreadRead = useCallback(() => {
+    const id = dmRef.current?.id;
+    if (!id) return;
+    const current = readStateRef.current ?? loadReadState();
+    const next = markThreadRead(current, id, Date.now());
+    readStateRef.current = next;
+    if (next !== current) {
+      saveReadState(next);
+    }
+  }, []);
 
   useEffect(() => {
     dmRef.current = dm;
@@ -130,9 +149,9 @@ export function useVsXmtpThread({
     (kind: XmtpThreadErrorKind, technical: string, cause?: unknown) => {
       setThreadError({ kind, technical });
       setThreadFailure((prev) =>
-        nextXmtpFailure(
+        nextXMtpFailure(
           prev,
-          classifyXmtpFailureKind(cause ?? technical),
+          classifyXmtpFailureKind(cause ??  technical),
           technical
         )
       );
@@ -159,15 +178,18 @@ export function useVsXmtpThread({
     setIsRefreshing(true);
     clearThreadError();
     try {
+      const { ConsentState } = await import("@xmtp/browser-sdk");
       await c.conversations.syncAll([ConsentState.Allowed]);
       await d.sync();
       const next = await loadThreadMessages(d);
       setMessages(next);
-      // A refresh that lands proves the transport is alive again, so the
+      // A fresh that lands proves the transport is alive again, so the
       // "messages may be stale" notice from a dead stream no longer applies.
       setStreamFailure(null);
+      // Viewing the thread counts as reading it.
+      markCurrentThreadRead();
     } catch (e) {
-      const { kind, message } = classifyXmtpThreadError(e);
+      const { kind, message } = classifyXMtpThreadError(e);
       if (isNonFatalSyncNotice(message)) {
         return;
       }
@@ -175,7 +197,7 @@ export function useVsXmtpThread({
     } finally {
       setIsRefreshing(false);
     }
-  }, [clearThreadError, isNonFatalSyncNotice, recordThreadError]);
+  }, [clearThreadError, isNonFatalSyncNotice, markCurrentThreadRead, recordThreadError]);
 
   const throttledVisibilityRefresh = useCallback(() => {
     const now = Date.now();
@@ -218,6 +240,8 @@ export function useVsXmtpThread({
         setDm(opened);
         setMessages(initial);
         setPhase("ready");
+        // Opening a thread counts as reading it.
+        markThreadRead(opened.id, Date.now());
 
         const stream = await opened.stream({
           onValue: (msg) => {
@@ -230,6 +254,8 @@ export function useVsXmtpThread({
                 (a, b) => a.sentAt.getTime() - b.sentAt.getTime()
               );
             });
+            // A message viewed in the open thread counts as read.
+            markThreadRead(opened.id, Date.now());
           },
           onError: (err) => {
             if (myGen !== initGen.current) return;
