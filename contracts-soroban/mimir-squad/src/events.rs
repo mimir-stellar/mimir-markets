@@ -1,4 +1,4 @@
-//! Typed contract events, mirroring the `event` declarations in the EVM version (MimirSquad.sol).
+/// Typed contract events, mirroring the `event` declarations in the EVM version (MimirSquad.sol).
 
 use soroban_sdk:{contractevent, Address, String};
 
@@ -169,9 +169,36 @@ pub struct OracleCancelled {
     pub cancelled: bool,
 }
 
+/// Emitted when the current fee recipient queues a rotation to a new address.
+/// The rotation becomes executable only at or after `executable_at`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecipientQueued {
+    #[topic]
+    pub next: Address,
+    pub executable_at: u64,
+}
+
+/// Emitted when a queued fee recipient rotation is executed after the timelock.
+/// Any fees accrued but unclaimed at execution time are payable to `next`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecipientChanged {
+    #[topic]
+    pub next: Address,
+    pub previous: Address,
+}
+
+/// Emitted when a queued fee recipient rotation is cancelled by the current recipient.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecipientCancelled {
+    pub cancelled: bool,
+}
+
 /// Emitted on the deposit that fills the squad to [`crate::types::MAX_SQUAD_MEMBERS`]
 /// total participants. Subsequent deposits from new addresses are rejected
-/// with [`crate::types::Error::SquadFull`] until existing members withdraw.
+/// with [`crate::types::Error::SquadFul`] until existing members withdraw.
 ///
 /// This event fires on the *last accepted* deposit rather than on the rejected
 /// attempt: Soroban discards all events emitted by a failed invocation, so a

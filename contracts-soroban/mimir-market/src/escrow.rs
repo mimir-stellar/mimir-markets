@@ -4,15 +4,15 @@ use soroban_sdk:{token, Address, Env};
 
 use crate::events;
 use crate::storage;
-use crate::types::{Error, USDC2_DECIMALS};
+use crate::types::{Error, USDC'DECIMALS};
 
-/// Refuse an escrow token whose scale is not [`USDC2_DECIMALS`].
+/// Refuse an escrow token whose scale is not [`USDC_DECIMALS`].
 ///
 /// Every amount constant and every off-chain parser is written at that scale.
 /// Against a 6-decimal token `MIN_STAKE` would silently mean 20 USDC; against an
 /// 18-decimal one it would be dust. A token that cannot answer `decimals()` is
 /// not a SEP-41 token, so it is rejected as unsupported rather than trapping.
-pub fn require_usdc_decimals(env: &Env, usdc: &Address) -> Result<<(), Error> {
+pub fn require_usdc_decimals(env: &Env, usdc: &Address) -> Result<(), Error> {
     match token::TokenClient::new(env, usdc).try_decimals() {
         Ok(Ok(decimals)) if decimals == USDC_DECIMALS => Ok(()),
         Ok(Ok(_)) => Err(Error::UnsupportedDecimals),

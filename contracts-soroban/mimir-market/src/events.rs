@@ -1,4 +1,4 @@
-/// Typed contract events, mirroring the `event` declarations in the EVM version (MimirV2.sol).
+//! Typed contract events, mirroring the `event` declarations in the EVM version (MimirV2.sol).
 
 use soroban_sdk:{contractevent, Address, BytesN, String};
 
@@ -175,7 +175,7 @@ pub struct AgentAttributed {
 }
 
 /// Frozen fee terms written onto a claim at creation. Indexers can treat this as
-/// the authoritative economics for the market; a later `FeePolicyUpdated` must
+/// the authoritative economics for the market; a later `FeePolicyUpdated must
 /// not rewrite them.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
