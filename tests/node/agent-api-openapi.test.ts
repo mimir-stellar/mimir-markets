@@ -541,7 +541,7 @@ test("the stale schema is caught by the audit, action by action", () => {
   const published = (stale.properties as Record<string, Record<string, unknown>>).action!.enum as string[];
   const missing = AGENT_API_ACTIONS.filter((action) => !published.includes(action));
   assert.deepEqual(missing, [
-    "issueKey", "listKeys", "revokeKey", "rotateKey", "grantSpend", "revokeSpend", "spendStatus",
+    "issueKey", "listKeys", "revokeKey", "rotateKey", "grantSpend", "revokeSpend", "spendStatus", "registerWebhook",
   ]);
   const found = codes(audit);
   for (const action of missing) {

@@ -33,6 +33,7 @@ import {
   evaluateRegistrationReplay, revokeAgent, type AgentRecord, type AgentCapability,
 } from "@/lib/agents/registry";
 import { auditAgentRequest, loadAgent, loadIdempotentResponse, saveAgent, saveIdempotentResponse } from "@/lib/agents/store";
+import { registerAgentWebhook, WEBHOOK_SIGNATURE_HEADER } from "@/lib/agents/webhooks";
 import { rejectReplayedSignedEnvelope } from "@/lib/agents/envelope-replay";
 import { buildAgentDryRun } from "@/lib/agents/dry-run";
 import { isFeatureEnabled, checkWriteAllowed, type Pausable } from "@/lib/ops/flags";
@@ -509,6 +510,49 @@ async function handleAgentApiPost(
         limits: agent.limits,
       };
     }
+  } else if (action === "registerWebhook") {
+    const url = typeof body.url === "string" ? body.url.trim() : "";
+    if (!url) {
+      return json({ error: { code: "invalid_request", message: "url is required", retryable: false } }, 400);
+    }
+    let events: string[] | undefined;
+    if (body.events !== undefined) {
+      if (!Array.isArray(body.events) || body.events.length === 0) {
+        return json({ error: { code: "invalid_request", message: "events must be a non-empty array when provided", retryable: false } }, 400);
+      }
+      events = body.events.map(String);
+    }
+    const registered = await registerAgentWebhook({
+      agentId: agent.agentId,
+      url,
+      events: events as any,
+      secret: typeof body.secret === "string" ? body.secret : undefined,
+      now: Date.now(),
+    });
+    if (!registered.ok) {
+      await audit(request, "rejected", `webhook_${registered.reason}`);
+      return json({
+        error: {
+          code: "invalid_request",
+          message: registered.detail,
+          reason: registered.reason,
+          retryable: false,
+        },
+      }, 400);
+    }
+    result = {
+      webhookId: registered.webhook.webhookId,
+      agentId: registered.webhook.agentId,
+      url: registered.webhook.url,
+      events: registered.webhook.events,
+      active: registered.webhook.active,
+      secret: registered.secret,
+      secretPrefix: registered.webhook.secretPrefix,
+      signatureHeader: WEBHOOK_SIGNATURE_HEADER,
+      createdAt: registered.webhook.createdAt,
+      updatedAt: registered.webhook.updatedAt,
+      note: "Store this secret now — verify deliveries with HMAC-SHA256 over `${timestamp}.${rawBody}`.",
+    };
   } else if (action === "heartbeat") result = { agentId: agent.agentId, status: agent.status, at: Date.now() };
   else if (action === "listPositions") result = { positions: await getUserVSDirect(agent.operatorWallet) };
   else if (action === "listEarnings") {

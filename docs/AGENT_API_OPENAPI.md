@@ -33,6 +33,7 @@ working would fail the suite.
 | Feature flag behind a funded action | `lib/ops/flags.ts` / `AGENT_FUNDED_FEATURE` |
 | Incident switch and the env var that re-enables it | `lib/ops/flags.ts` (`AGENT_ACTION_PAUSE`, `pauseEnvKey`) |
 | Dry-run response, fee split, atomic amounts | `lib/agents/dry-run.ts` (`buildAgentDryRun`) |
+| Webhook events, headers, HMAC signing, retry schedule | `lib/agents/webhooks.ts`, `lib/ops/backoff-policies.ts` (`WEBHOOK_BACKOFF`) |
 
 Nothing in the document is typed by hand. Even the error examples are produced by
 calling `apiError()` with the live catalogue, so a status that changes in
@@ -43,6 +44,106 @@ registry decides it with a private table. Rather than copy the table, the
 generator calls `authorizeAction` for every level from 0 up with a synthetic
 record and records the lowest level that allows it — so a change in the registry
 shows up as a changed number, and a test fails until the document is regenerated.
+
+## Signed webhooks for claim lifecycle events
+
+Registered agents can subscribe to push notifications instead of polling `/api/vs`
+by calling `POST /api/agents/v1/registerWebhook`.
+
+### Registration (`registerWebhook`)
+
+- **Credential**: `owner_signature` (a bearer API key is refused with `403 forbidden`).
+- **URL validation**: `https:` only, checked with the SSRF guard in `lib/research/ssrf.ts`
+  (`checkUrl` and `checkResolvedAddresses`). Plain `http:`, credentials in the URL,
+  disallowed ports, `localhost`, `.local`/`.internal` hostnames, and private/loopback/link-local
+  IPv4 or IPv6 addresses (including DNS rebinding targets) are rejected with `400 invalid_request`.
+- **Request body**:
+  ```json
+  {
+    "url": "https://agent.example/webhooks/mimir",
+    "events": ["claim.created", "claim.challenged", "claim.resolved"]
+  }
+  ```
+  `events` is optional and defaults to all three lifecycle events. An optional `secret`
+  (at least 16 characters) may be supplied by the owner; otherwise the server generates
+  a `whsec_<64-hex-chars>` secret and returns it in the registration response.
+
+### Event types & payload schema
+
+On every `reconcileVsIndex` pass (`agents/sync/index.ts` → `lib/server/vs-index.ts`),
+new claims and state changes enqueue webhook deliveries for subscribed active agents:
+
+- `claim.created` — emitted when a new claim is indexed from the contract.
+- `claim.challenged` — emitted when `challenger_count` or `total_challenger_stake` increases, or when a claim transitions from `open` to `active`.
+- `claim.resolved` — emitted when a claim transitions to a terminal state (`resolved` or `cancelled`).
+
+Each delivery is an HTTP `POST` with `Content-Type: application/json; charset=utf-8` and body:
+
+```json
+{
+  "schemaVersion": 1,
+  "deliveryId": "00000000-0000-4000-8000-000000000002",
+  "event": "claim.challenged",
+  "occurredAt": 1755200000000,
+  "claim": {
+    "id": 42,
+    "creator": "GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK",
+    "question": "Will BTC close above 100k USD by deadline?",
+    "creatorPosition": "Yes, BTC closes above 100k USD.",
+    "counterPosition": "No, BTC closes at or below 100k USD.",
+    "category": "crypto",
+    "creatorStake": 25,
+    "totalChallengerStake": 25,
+    "challengerCount": 1,
+    "totalPot": 50,
+    "deadline": 1755286400,
+    "state": "active",
+    "winnerSide": "",
+    "resolutionSummary": "",
+    "confidence": 0,
+    "marketType": "binary",
+    "oddsMode": "pool",
+    "visibility": "public"
+  },
+  "transition": {
+    "previousState": "open",
+    "currentState": "active",
+    "previousChallengerCount": 0,
+    "currentChallengerCount": 1,
+    "previousChallengerStake": 0,
+    "currentChallengerStake": 25
+  }
+}
+```
+
+`transition` is present on state updates (`claim.challenged`, `claim.resolved`) when a prior
+indexed row existed. Private claims (`visibility: "private"`) have their text fields redacted
+to empty strings before enqueueing.
+
+### Delivery headers & HMAC verification algorithm
+
+Every webhook delivery carries four headers:
+
+| Header | Value |
+|---|---|
+| `x-mimir-webhook-signature` | `t=<timestampSeconds>,v1=<hex_hmac_sha256>` |
+| `x-mimir-webhook-timestamp` | Unix timestamp in seconds (`<timestampSeconds>`) |
+| `x-mimir-webhook-event` | `claim.created` \| `claim.challenged` \| `claim.resolved` |
+| `x-mimir-webhook-delivery` | Unique UUID for the delivery (`deliveryId`) |
+
+To verify a delivery (`verifyWebhookSignature` in `lib/agents/webhooks.ts`):
+
+1. Split `x-mimir-webhook-signature` on `,` and extract the `t` timestamp (Unix seconds) and `v1` hex digest.
+2. Reject the delivery if `abs(nowSeconds - t) > 300` (5-minute replay window).
+3. Construct the canonical signing string: `<t>.<rawRequestBody>` (where `<rawRequestBody>` is the exact UTF-8 JSON body bytes).
+4. Compute `HMAC-SHA256(secret, "<t>.<rawRequestBody>")` and compare the 32-byte digest against `v1` using constant-time comparison (`crypto.timingSafeEqual`).
+
+### Per-agent queue cap, retry schedule & non-blocking guarantee
+
+- **Per-agent queue cap**: Each agent is capped at `50` pending deliveries (`MAX_PENDING_WEBHOOK_EVENTS_PER_AGENT`). If an endpoint falls behind, the oldest pending delivery for that agent is evicted so newer lifecycle transitions are retained and memory remains bounded.
+- **Retries with backoff**: Non-2xx responses and transport timeouts (5s budget, `redirect: "error"`) retry with exponential backoff and full jitter via `WEBHOOK_BACKOFF` in `lib/ops/backoff-policies.ts` up to `5` total attempts (`1s`, `2s`, `4s`, `8s` ceilings, capped at `60s`).
+- **DNS rebinding & redirect defence**: The destination URL and its resolved DNS records are re-verified via `lib/research/ssrf.ts` immediately before every delivery attempt, and HTTP redirects are rejected (`redirect: "error"`).
+- **Sync loop isolation**: Enqueueing and queue flushing inside `reconcileVsIndex` are wrapped in non-throwing boundaries so a broken or unreachable webhook endpoint never blocks or fails the sync worker.
 
 ## Examples
 

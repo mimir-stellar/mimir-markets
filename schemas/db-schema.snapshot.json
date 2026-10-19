@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "hashAlgorithm": "sha256",
   "source": "lib/db.ts",
-  "fingerprint": "3683d24074c7825d81fa31a1c62ec16a432cf1eadc8151d5ccacaf684d131000",
-  "statementCount": 88,
+  "fingerprint": "c5cced6cd2d395a82005901a3fab89d3a3caddcfc415b7c054b99440184ec34c",
+  "statementCount": 90,
   "tables": [
     "schema_migrations",
     "claims",
@@ -39,7 +39,8 @@
     "basket_definitions",
     "basket_positions",
     "basket_nav_snapshots",
-    "basket_ownership_transfers"
+    "basket_ownership_transfers",
+    "agent_webhooks"
   ],
   "indexes": [
     "idx_claims_state",
@@ -79,7 +80,8 @@
     "idx_market_proposals_queued",
     "idx_basket_transfers_basket",
     "idx_basket_transfers_from",
-    "idx_basket_transfers_to"
+    "idx_basket_transfers_to",
+    "idx_agent_webhooks_active"
   ],
   "migrations": [
     {

@@ -174,6 +174,8 @@ export function schemaVersionHeaders(): Record<string, string> {
 
 // ── Agent API Drift Check ─────────────────────────────────────────────────────
 
+import { AGENT_API_ACTIONS } from "@/lib/agents/api";
+
 /**
  * Define the expected shape of the Agent API request body for drift checking.
  *
@@ -184,7 +186,7 @@ export function schemaVersionHeaders(): Record<string, string> {
 export const AGENT_API_REQUEST_SPEC: ShapeSpec = {
   version: { type: "string", required: true, oneOf: ["v1"] },
   agentId: { type: "string", required: true, min: 3, max: 64 },
-  action: { type: "string", required: true, oneOf: ["register", "heartbeat", "proposeMarket", "createMarket", "publishReasoning", "vote", "stake", "listPositions", "listEarnings", "revoke", "dryRun"] },
+  action: { type: "string", required: true, oneOf: AGENT_API_ACTIONS },
   idempotencyKey: { type: "string", required: true, min: 1, max: 128 },
   nonce: { type: "string", required: true, min: 1, max: 128 },
   signedAt: { type: "integer", required: true },

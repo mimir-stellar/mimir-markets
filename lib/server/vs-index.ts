@@ -38,6 +38,11 @@ import {
   makeContractFreshness,
   type VSCacheFreshness,
 } from "@/lib/vs-freshness";
+import {
+  detectClaimLifecycleEvents,
+  enqueueClaimLifecycleEvent,
+  flushWebhookQueue,
+} from "@/lib/agents/webhooks";
 
 const LIST_FRESHNESS_MS = 60_000;
 const DETAIL_FRESHNESS_MS = 15_000;
@@ -596,6 +601,20 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
       await persistIndexedClaims(pageClaims);
       synced += pageClaims.length;
       newClaims += pageClaims.length;
+
+      for (const claim of pageClaims) {
+        try {
+          const events = detectClaimLifecycleEvents({ previous: null, current: claim });
+          for (const event of events) {
+            await enqueueClaimLifecycleEvent({ event, claim, previous: null, now });
+          }
+        } catch (webhookErr) {
+          console.warn(
+            `[vs-index] Failed to enqueue webhook for new claim ${claim.id}:`,
+            webhookErr instanceof Error ? webhookErr.message : webhookErr,
+          );
+        }
+      }
     }
 
     if (pageClaims.length < expected) {
@@ -643,6 +662,18 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
         inconsistencies += discrepancies.filter(d => d.severity === "critical").length;
         corrected += 1; // This correction came from chain state
       }
+
+      try {
+        const events = detectClaimLifecycleEvents({ previous: row, current: fresh });
+        for (const event of events) {
+          await enqueueClaimLifecycleEvent({ event, claim: fresh, previous: row, now });
+        }
+      } catch (webhookErr) {
+        console.warn(
+          `[vs-index] Failed to enqueue webhook for updated claim ${fresh.id}:`,
+          webhookErr instanceof Error ? webhookErr.message : webhookErr,
+        );
+      }
     }
   }
 
@@ -667,6 +698,16 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
 
   // Advance sync timestamp only on successful completion
   await advanceCursor("last_sync_at", now);
+
+  // Deliver pending webhook events without ever blocking or failing the sync loop.
+  try {
+    await flushWebhookQueue({ now });
+  } catch (webhookErr) {
+    console.warn(
+      "[vs-index] Webhook queue flush failed (non-blocking):",
+      webhookErr instanceof Error ? webhookErr.message : webhookErr,
+    );
+  }
 
   return {
     synced,

@@ -7,6 +7,7 @@ import type { AgentApiKeyRecord } from "@/lib/agents/api-keys";
 import type { AgentTradeRow } from "@/lib/agents/performance";
 import type { AgentRecord } from "@/lib/agents/registry";
 import type { SpendPermissionRecord } from "@/lib/agents/spend-permissions";
+import type { AgentWebhookRecord, WebhookEventType } from "@/lib/agents/webhooks";
 import type { CopyAuditRecord, CopyPermission } from "@/lib/copy-trading";
 
 /**
@@ -698,6 +699,19 @@ const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_basket_transfers_basket ON basket_ownership_transfers(basket_id, transferred_at DESC)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_basket_transfers_from ON basket_ownership_transfers(from_wallet)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_basket_transfers_to ON basket_ownership_transfers(to_wallet)" },
+  { sql: `CREATE TABLE IF NOT EXISTS agent_webhooks (
+    webhook_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    secret_prefix TEXT NOT NULL,
+    events_json TEXT NOT NULL DEFAULT '[]',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    revoked_at BIGINT
+  )` },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_agent_webhooks_active ON agent_webhooks(active)" },
   {
     sql: "INSERT INTO schema_migrations(migration_id, schema_version, checksum, applied_at) VALUES($1, $2, $3, $4) ON CONFLICT(schema_version) DO NOTHING",
     args: ["base-platform-schema-v2", 2, "market-series-profile-conviction-baskets-v2", 0],
@@ -2810,3 +2824,78 @@ export async function getBasketTransferHistory(basketId: string): Promise<Basket
     };
   });
 }
+
+// ── Agent Webhooks ────────────────────────────────────────────────────────────
+
+function toAgentWebhookRecord(row: Record<string, unknown>): AgentWebhookRecord {
+  let events: WebhookEventType[] = ["claim.created", "claim.challenged", "claim.resolved"];
+  try {
+    const parsed = JSON.parse(getString(row.events_json) || "[]");
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      events = parsed.map(String) as WebhookEventType[];
+    }
+  } catch {
+    // Keep default events on malformed JSON.
+  }
+  return {
+    webhookId: getString(row.webhook_id),
+    agentId: getString(row.agent_id),
+    url: getString(row.url),
+    secret: getString(row.secret),
+    secretPrefix: getString(row.secret_prefix),
+    events,
+    active: getNumber(row.active) === 1 && row.revoked_at == null,
+    createdAt: getNumber(row.created_at),
+    updatedAt: getNumber(row.updated_at),
+    revokedAt: row.revoked_at == null ? undefined : getNumber(row.revoked_at),
+  };
+}
+
+export async function upsertAgentWebhook(record: AgentWebhookRecord): Promise<void> {
+  const pool = await getDb();
+  await execute(pool, {
+    sql: `INSERT INTO agent_webhooks (
+      webhook_id, agent_id, url, secret, secret_prefix, events_json, active, created_at, updated_at, revoked_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(agent_id) DO UPDATE SET
+      webhook_id = excluded.webhook_id,
+      url = excluded.url,
+      secret = excluded.secret,
+      secret_prefix = excluded.secret_prefix,
+      events_json = excluded.events_json,
+      active = excluded.active,
+      updated_at = excluded.updated_at,
+      revoked_at = excluded.revoked_at`,
+    args: [
+      record.webhookId,
+      record.agentId,
+      record.url,
+      record.secret,
+      record.secretPrefix,
+      JSON.stringify(record.events),
+      record.active ? 1 : 0,
+      record.createdAt,
+      record.updatedAt,
+      record.revokedAt ?? null,
+    ],
+  });
+}
+
+export async function getAgentWebhookByAgentId(agentId: string): Promise<AgentWebhookRecord | null> {
+  const pool = await getDb();
+  const result = await execute(pool, {
+    sql: "SELECT * FROM agent_webhooks WHERE agent_id = ? LIMIT 1",
+    args: [agentId],
+  });
+  const row = result.rows[0];
+  return row ? toAgentWebhookRecord(row as Record<string, unknown>) : null;
+}
+
+export async function listActiveAgentWebhooks(): Promise<AgentWebhookRecord[]> {
+  const pool = await getDb();
+  const result = await execute(pool, {
+    sql: "SELECT * FROM agent_webhooks WHERE active = 1 AND revoked_at IS NULL ORDER BY created_at ASC",
+  });
+  return result.rows.map((row) => toAgentWebhookRecord(row as Record<string, unknown>));
+}
+
