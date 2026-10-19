@@ -187,13 +187,54 @@ Emitted on the deposit that fills the squad to `MAX_SQUAD_MEMBERS`.
 #### OracleQueued / OracleCancelled / OracleChanged
 Oracle rotation timelock: `queue_oracle` (topic `next`, `executable_at`), `cancel_oracle` (`cancelled`), `execute_oracle` (topic `next`, `previous`).
 
+### Fee Recipient Rotation Events
+
+The squad `fee_recipient` can be rotated without redeploying, using the same timelock pattern as oracle rotation. Only the current fee recipient may queue or cancel a rotation, and the change cannot execute before the timelock elapses.
+
+##### FeeRecipientQueued
+Emitted when the current fee recipient queues a rotation to a new recipient.
+
+**Fields:**
+- `next` (topic): The proposed new fee recipient
+- `executable_at`: Ledger timestamp before which the rotation cannot execute
+
+**Emitted by:**
+- `queue_fee_recipient`: authorised only by the current fee recipient
+
+**Usage:** Indexers and operators use this event to surface pending rotations and to schedule execution after the timelock.
+
+##### FeeRecipientCancelled
+Emitted when the current fee recipient cancels a pending rotation.
+
+**Fields:**
+- `cancelled`: The previously queued recipient address that was cancelled
+
+**Emitted by:**
+- `cancel_fee_recipient`: authorised only by the current fee recipient
+
+**Usage:** Confirms that no rotation is pending after cancellation.
+
+##### FeeRecipientChanged
+Emitted when a queued rotation is executed after the timelock.
+
+**Fields:**
+- `next` (topic): The new fee recipient
+- `previous`: The previous fee recipient
+
+**Emitted by:**
+- `execute_fee_recipient`: authorised only by the current fee recipient, and only after the timelock has elapsed
+
+**Accounting note:** Accrued but unclaimed fees at execution time go to the new recipient. The rotation changes the destination of `fee_recipient_accrued` at execution; future `claim_fees` calls pay the new recipient.
+
+**Usage:** Indexers use this event to update the active fee recipient and to reconcile fee claims against the correct recipient.
+
 ### Existing Events Enhanced
 
 The following existing events work with lifecycle events:
 
 - **MarketCreated**: Initial market setup
 - **Deposited**: Now paired with `LiquidityAdded`
-- **Withdrawn**: Now paired with `LiquidityRemoved`
+- `**Withdrawn**: Now paired with `LiquidityRemoved`
 - **Resolved**: Now paired with `MarketStateTransitioned` and `MarketDeadlineReached`
 
 ## Squad Market Lifecycle State Machine
@@ -208,6 +249,7 @@ For the full state diagram, the caller/authority matrix, and the refund rules fo
 2. **Conservation Checks**: Sum `EscrowSeeded` amounts and verify against payouts and remaining escrow
 3. **Deadline Monitoring**: Listen to `DeadlineReached` and `MarketDeadlineReached` to identify claims needing oracle attention
 4. **Pool Analytics**: Track `LiquidityAdded` and `LiquidityRemoved` for TVL, liquidity depth charts, and participation patterns
+5. **Fee Recipient Rotation**: Track `FeeRecipientQueued`, `FeeRecipientCancelled`, and `FeeRecipientChanged` to know which address is entitled to accrued fees
 
 ### For Oracle Workers
 
@@ -220,12 +262,14 @@ For the full state diagram, the caller/authority matrix, and the refund rules fo
 1. **Real-time Updates**: Subscribe to lifecycle events to update UI state without refetching entire claim data
 2. **Liquidity Display**: Use `LiquidityAdded` / `LiquidityRemoved` for live pool depth indicators
 3. **Status Badges**: Map `ClaimStateTransitioned` to user-facing status labels
+4. **Fee Recipient Rotation**: Surface the pending recipient and `executable_at` from `FeeRecipientQueued`, and confirm the active recipient from `FeeRecipientChanged`
 
 ### For Analytics
 
 1. **Market Health**: Track state transition timing to measure average time-to-challenge, time-to-settlement
 2. **Liquidity Patterns**: Analyze `LiquidityAdded` / `LiquidityRemoved` timing relative to deadlines
 3. **Escrow Flows**: Build cash flow statements from `EscrowSeeded`, `Claimed`, `Withdrawn`, and `ChallengerPaid` events
+4. **Fee Recipient History**: Use `FeeRecipientChanged` to attribute fee claims to the correct recipient over time
 
 ## Event Ordering Guarantees
 
@@ -240,6 +284,7 @@ Within a single transaction:
 7. **Pool Resolve**: `MarketDeadlineReached` → `MarketStateTransitioned` → `Resolved`
 8. **Pool Cancel**: `MarketCancelled` (captain-initiated cancellation before deadline)
 9. **Pool Deadline Transition**: `MarketDeadlineReached` → `MarketStateTransitioned` (one-sided pools after deadline)
+8. **Fee Recipient Rotation**: `FeeRecipientQueued` → `FeeRecipientCancelled` → `FeeRecipientChanged`
 
 ## Migration Notes
 
@@ -284,8 +329,8 @@ Sum(EscrowSeeded.amount) =
 
 ### Defensive Events
 
-- **CancellationRefused**: Emitted when `cancel_claim` detects counterparty exposure or insolvency; nothing is changed on-chain, event is the audit trail
-- **Conservation assertions**: Lifecycle events follow accounting conservation checks; if emitted, conservation holds
+- ``**CancellationRefused**: Emitted when `cancel_claim` detects counterparty exposure or insolvency; nothing is changed on-chain, event is the audit trail
+- ``**Conservation assertions**: Lifecycle events follow accounting conservation checks; if emitted, conservation holds
 
 ## Testing
 
@@ -294,6 +339,7 @@ See contract test files:
 - `mimir-market/src/test_settlement.rs`: Resolution and payout event verification
 - `mimir-squad/src/test_lifecycle.rs`: Pool market lifecycle
 - `mimir-squad/src/test_payouts.rs`: Pool payout event ordering
+- `mimir-squad/src/test_fee_recipient_rotation.rs`: Fee recipient rotation queue/cancel/execute/unauthorised paths and `claim_fees` after rotation
 
 Event assertions confirm:
 - Correct state transition sequences
