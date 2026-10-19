@@ -1,4 +1,4 @@
-/*
+/**
  * Contract-backed copy-trading execution permission bounds and feedback.
  *
  * The chain (Soroban USDC Stellar Asset Contract) is the source of truth for
@@ -81,7 +81,7 @@ export interface CopyPermissionFeedbackView {
   ownerWallet: string | null;
   executionAgentId: string | null;
   signalAgentId: string | null;
-  /** Money bounds in atomic USDC (\7 decimals) */
+  /** Money bounds in atomic USDC (7 decimals) */
   maxPerPositionAtomic: string | null;
   dailyCapAtomic: string | null;
   weeklyCapAtomic: string | null;
@@ -379,4 +379,34 @@ export function buildCopyPermissionFeedback(
     expiresAt: p.expiresAt ?? null,
     createdAt: p.createdAt ?? null,
   };
+}
+
+/**
+ * Reads live SAC allowance and balance on chain, then builds contract-backed feedback.
+ */
+export async function evaluateCopyPermissionOnchain(
+  permission: CopyPermission,
+  options: {
+    connectedWallet?: string | null;
+    spentInPeriodAtomic?: bigint;
+    freshness?: { timestamp: number; ttlMs?: number; isStale?: boolean } | null;
+    globalPaused?: boolean;
+    now?: number;
+  } = {},
+): Promise<CopyPermissionFeedbackView> {
+  const [onchainAllowanceAtomic, onchainBalanceAtomic] = await Promise.all([
+    getUsdcAllowanceUnits(permission.ownerWallet, permission.spendPermission.spender).catch(() => null),
+    getUsdcBalanceUnits(permission.ownerWallet).catch(() => null),
+  ]);
+
+  return buildCopyPermissionFeedback({
+    permission,
+    connectedWallet: options.connectedWallet,
+    onchainAllowanceAtomic,
+    onchainBalanceAtomic,
+    spentInPeriodAtomic: options.spentInPeriodAtomic,
+    freshness: options.freshness,
+    globalPaused: options.globalPaused,
+    now: options.now,
+  });
 }
