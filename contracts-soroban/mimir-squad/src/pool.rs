@@ -18,7 +18,7 @@ use crate::types::{
 /// remainder stays with the participant: `net = gross - fee`, so fee rounding
 /// never leaves anything behind in escrow. `claim` and `preview_claim` both use
 /// this one function, so a preview cannot round differently from the payout.
-pubcrate fn profit_fee(principal: i128, gross: i128, fee_bps: u32) -> Result<i128, Error> {
+pub(crate) fn profit_fee(principal: i128, gross: i128, fee_bps: u32) -> Result<i128, Error> {
     let profit = if gross > principal {
         gross - principal
     } else {
@@ -34,7 +34,7 @@ fn require_side(side: u32) -> Result<(), Error> {
     if side != SIDE_A && side != SIDE_B {
         return Err(Error::BadSide);
     }
-    Ok(()
+    Ok(())
 }
 
 /// Invariant: escrow accounting must conserve funds.
@@ -60,7 +60,7 @@ fn assert_market_conservation(market: &Market) -> Result<(), Error> {
             return Err(Error::ConservationViolation);
         }
     }
-    Ok(()
+    Ok(())
 }
 
 /// The gross payout for one winning claim, before fees.
@@ -109,7 +109,7 @@ pub fn initialize(
     escrow::require_usdc_decimals(env, &usdc)?;
     storage::mark_initialized(env);
     storage::set_config(env, &usdc, &oracle, &fee_recipient);
-    Ok(()
+    Ok(())
 }
 
 pub fn create_market(
@@ -201,7 +201,7 @@ pub fn deposit(
             return Err(Error::SquadFull);
         }
 
-        // ── Per-side cap ───────────────────────────────────────────────────────────────────
+        // ── Per-side cap ──────────────────────────────────────────────────
         let count = if side == SIDE_A {
             market.participants_a
         } else {
@@ -331,7 +331,7 @@ pub fn withdraw_before_deadline(
         amount,
     }
     .publish(env);
-    Ok(()
+    Ok(())
 }
 
 
@@ -380,7 +380,7 @@ pub fn transition_deadline(env: &Env, market_id: u64) -> Result<(), Error> {
         pool_b: market.pool_b,
     }
     .publish(env);
-    Ok(()
+    Ok(())
 }
 
 pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
@@ -427,5 +427,313 @@ pub fn resolve(env: &Env, market_id: u64, result: u32) -> Result<(), Error> {
         .ok_or(Error::Overflow)?;
     assert_market_conservation(&market)?;
     
-    events::Ma
+    events::MarketStateTransitioned {
+        market_id,
+        from_state: 0, // Active
+        to_state: 2,   // Resolved
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+    
+    storage::set_market(env, market_id, &market);
+
+    events::Resolved {
+        market_id,
+        result,
+        pool_a: market.pool_a,
+        pool_b: market.pool_b,
+    }
+    .publish(env);
+    Ok(())
+}
+
+pub fn cancel_market(env: &Env, market_id: u64) -> Result<(), Error> {
+    let mut market = storage::get_market(env, market_id)?;
+    market.captain.require_auth();
+
+    if market.resolved {
+        return Err(Error::AlreadyResolved);
+    }
+    // Cancellation is a pre-deadline escape hatch only. Once the deadline has
+    // passed the outcome may be known, and a captain who is also a depositor
+    // must not be able to void a market they are about to lose; settlement then
+    // belongs to `resolve` / `transition_deadline`.
+    if env.ledger().timestamp() >= market.deadline {
+        return Err(Error::MarketClosed);
+    }
+
+    // Every deposit is refunded in full through `claim`, so the escrow owed to
+    // depositors is exactly both pools. Without this, refunds would draw down
+    // a zero balance and trip the conservation check, locking every deposit.
+    market.resolved = true;
+    market.result = RESULT_CANCELLED;
+    market.remaining_escrow = market
+        .pool_a
+        .checked_add(market.pool_b)
+        .ok_or(Error::Overflow)?;
+    assert_market_conservation(&market)?;
+    storage::set_market(env, market_id, &market);
+
+    events::MarketCancelled {
+        market_id,
+        captain: market.captain.clone(),
+        pool_a: market.pool_a,
+        pool_b: market.pool_b,
+    }
+    .publish(env);
+    Ok(())
+}
+
+pub fn claim(
+    env: &Env,
+    participant: Address,
+    market_id: u64,
+    side: u32,
+) -> Result<i128, Error> {
+    participant.require_auth();
+    require_side(side)?;
+
+    let mut market = storage::get_market(env, market_id)?;
+    if !market.resolved {
+        return Err(Error::NotClaimable);
+    }
+    if storage::has_claimed(env, market_id, side, &participant) {
+        return Ok(0);
+    }
+
+    let principal = storage::deposit_of(env, market_id, side, &participant);
+    if principal <= 0 {
+        return Err(Error::NotWinner);
+    }
+    if market.result != RESULT_CANCELLED && side != market.result {
+        return Err(Error::NotWinner);
+    }
+
+    storage::mark_claimed(env, market_id, side, &participant);
+
+    let mut gross = principal;
+    let mut fee = 0i128;
+
+    if market.result != RESULT_CANCELLED {
+        // The last winner to claim absorbs whatever is left, so truncation dust
+        // cannot be stranded in escrow. Computed before the counter moves so the
+        // same `winner_gross` a preview used a moment earlier applies here.
+        gross = winner_gross(&market, principal)?;
+        market.winner_claims += 1;
+        fee = profit_fee(principal, gross, market.fee_bps)?;
+    }
+
+    market.remaining_escrow = market
+        .remaining_escrow
+        .checked_sub(gross)
+        .ok_or(Error::ConservationViolation)?;
+    assert_market_conservation(&market)?;
+    storage::set_market(env, market_id, &market);
+
+    let net = gross.checked_sub(fee).ok_or(Error::ConservationViolation)?;
+    if net < 0 {
+        return Err(Error::ConservationViolation);
+    }
+    storage::set_accrued_fees(env, storage::accrued_fees(env) + fee);
+
+    let usdc = storage::usdc(env)?;
+    if !escrow::try_push(env, &usdc, &participant, net) {
+        // The winner's trustline is frozen: the token traps, and under a plain
+        // `push` that reverts the whole claim, so the position could not be
+        // settled while the trustline stays frozen. Everything above is already
+        // applied and is exactly what a later retry needs — the claim stays
+        // marked (no double claim) and the escrow keeps the funds — so only the
+        // interaction is deferred: the amount is parked against the winner and
+        // `claim_parked_payout` moves it once the trustline can receive.
+        storage::set_payout(
+            env,
+            market_id,
+            side,
+            &participant,
+            storage::payout_of(env, market_id, side, &participant) + net,
+        );
+        events::PayoutParked {
+            market_id,
+            side,
+            participant: participant.clone(),
+            amount: net,
+        }
+        .publish(env);
+        return Ok(net);
+    }
+
+    events::Claimed {
+        market_id,
+        participant,
+        gross,
+        fee,
+        net,
+    }
+    .publish(env);
+    Ok(net)
+}
+
+/// Retry a payout that [`claim`] parked, once the winner's trustline can
+/// receive again.
+///
+/// The parked amount is cleared before the transfer so a re-entrant call cannot
+/// double-pay, and restored if the token traps again: a frozen trustline leaves
+/// the balance parked rather than dropped, and the caller is told with
+/// [`Error::PayoutParked`]. Returns `0` when nothing is parked, so a retry loop
+/// is idempotent.
+pub fn claim_parked_payout(
+    env: &Env,
+    participant: Address,
+    market_id: u64,
+    side: u32,
+) -> Result<i128, Error> {
+    participant.require_auth();
+    require_side(side)?;
+
+    let amount = storage::payout_of(env, market_id, side, &participant);
+    if amount <= 0 {
+        return Ok(0);
+    }
+    storage::set_payout(env, market_id, side, &participant, 0); // effects before interaction
+
+    let usdc = storage::usdc(env)?;
+    if !escrow::try_push(env, &usdc, &participant, amount) {
+        storage::set_payout(env, market_id, side, &participant, amount);
+        return Err(Error::PayoutParked);
+    }
+    Ok(amount)
+}
+
+pub fn claim_fees(env: &Env) -> Result<i128, Error> {
+    let recipient = storage::fee_recipient(env)?;
+    recipient.require_auth();
+
+    let amount = storage::accrued_fees(env);
+    if amount <= 0 {
+        return Ok(0);
+    }
+
+    storage::set_accrued_fees(env, 0); // effects before interaction
+
+    let usdc = storage::usdc(env)?;
+    if !escrow::try_push(env, &usdc, &recipient, amount) {
+        // A deauthorized fee recipient cannot be credited. The effect is put
+        // back and the call is rejected, so the fees stay in escrow and stay
+        // claimable: a frozen recipient cannot lose them by trying to claim
+        // them, and nothing else in the pool is held up because fees are only
+        // ever pulled here. The recipient retries once the balance is
+        // authorized again.
+        storage::set_accrued_fees(env, amount);
+        return Err(Error::PayoutParked);
+    }
+
+    events::FeesClaimed {
+        recipient,
+        amount,
+    }
+    .publish(env);
+    Ok(amount)
+}
+
+/// Split of a claim, without performing it. Useful for UI previews.
+pub fn preview_claim(
+    env: &Env,
+    market_id: u64,
+    side: u32,
+    participant: &Address,
+) -> Result<ClaimResult, Error> {
+    let market = storage::get_market(env, market_id)?;
+    let principal = storage::deposit_of(env, market_id, side, participant);
+    if !market.resolved || principal <= 0 {
+        return Ok(ClaimResult {
+            gross: 0,
+            fee: 0,
+            net: 0,
+        });
+    }
+    if market.result != RESULT_CANCELLED && side != market.result {
+        return Ok(ClaimResult {
+            gross: 0,
+            fee: 0,
+            net: 0,
+        });
+    }
+    if market.result == RESULT_CANCELLED {
+        return Ok(ClaimResult {
+            gross: principal,
+            fee: 0,
+            net: principal,
+        });
+    }
+
+    // A settled position previews as nothing: `claim` is a no-op after the pull,
+    // so the preview must agree instead of promising a second payout.
+    if storage::has_claimed(env, market_id, side, participant) {
+        return Ok(ClaimResult {
+            gross: 0,
+            fee: 0,
+            net: 0,
+        });
+    }
+
+    let gross = winner_gross(&market, principal)?;
+    let fee = profit_fee(principal, gross, market.fee_bps)?;
+    Ok(ClaimResult {
+        gross,
+        fee,
+        net: gross - fee,
+    })
+}
+
+/// Queue an oracle rotation. The current oracle must authorize — there is no
+/// separate owner role on the squad pool. The change is delayed so depositors
+/// have notice before settlement authority moves.
+pub fn queue_oracle(env: &Env, new_oracle: Address) -> Result<(), Error> {
+    storage::oracle(env)?.require_auth();
+    let executable_at = env
+        .ledger()
+        .timestamp()
+        .checked_add(ORACLE_TIMELOCK_SECONDS)
+        .ok_or(Error::Overflow)?;
+
+    storage::set_pending_oracle(
+        env,
+        &PendingOracle {
+            next: new_oracle.clone(),
+            executable_at,
+        },
+    );
+    events::OracleQueued {
+        next: new_oracle,
+        executable_at,
+    }
+    .publish(env);
+    Ok(())
+}
+
+pub fn cancel_oracle(env: &Env) -> Result<(), Error> {
+    storage::oracle(env)?.require_auth();
+    if storage::pending_oracle(env).is_none() {
+        return Err(Error::NothingQueued);
+    }
+    storage::clear_pending_oracle(env);
+    events::OracleCancelled { cancelled: true }.publish(env);
+    Ok(())
+}
+
+/// Permissionless once the timelock has elapsed.
+pub fn execute_oracle(env: &Env) -> Result<(), Error> {
+    let queued = storage::pending_oracle(env).ok_or(Error::NothingQueued)?;
+    if env.ledger().timestamp() < queued.executable_at {
+        return Err(Error::Timelocked);
+    }
+    let previous = storage::oracle(env)?;
+    storage::set_oracle(env, &queued.next);
+    storage::clear_pending_oracle(env);
+    events::OracleChanged {
+        next: queued.next,
+        previous,
+    }
+    .publish(env);
+    Ok(())
 }

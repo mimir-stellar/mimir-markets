@@ -175,7 +175,7 @@ pub struct AgentAttributed {
 }
 
 /// Frozen fee terms written onto a claim at creation. Indexers can treat this as
-/// the authoritative economics for the market; a later `FeePolicyUpdated must
+/// the authoritative economics for the market; a later `FeePolicyUpdated` must
 /// not rewrite them.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

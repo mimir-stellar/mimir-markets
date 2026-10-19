@@ -1,10 +1,10 @@
 /// USDC custody: exact-amount pulls, and pushes that fall back to a pull.
 
-use soroban_sdk:{token, Address, Env};
+use soroban_sdk::{token, Address, Env};
 
 use crate::events;
 use crate::storage;
-use crate::types::{Error, USDC'DECIMALS};
+use crate::types::{Error, USDC_DECIMALS};
 
 /// Refuse an escrow token whose scale is not [`USDC_DECIMALS`].
 ///

@@ -198,7 +198,7 @@ pub struct FeeRecipientCancelled {
 
 /// Emitted on the deposit that fills the squad to [`crate::types::MAX_SQUAD_MEMBERS`]
 /// total participants. Subsequent deposits from new addresses are rejected
-/// with [`crate::types::Error::SquadFul`] until existing members withdraw.
+/// with [`crate::types::Error::SquadFull`] until existing members withdraw.
 ///
 /// This event fires on the *last accepted* deposit rather than on the rejected
 /// attempt: Soroban discards all events emitted by a failed invocation, so a
