@@ -125,6 +125,7 @@ import {
 import { normalizeQuorum } from "../../lib/council/quorum";
 // Confidence tiers + fetcher-trust cap: pure and fixture-calibrated (#97).
 import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tiers";
+import { evaluateClaim as evaluateClaimPure, type EvaluateClaimDeps } from "./evaluate";
 import { RiskManager } from "../../lib/oracle-risk";
 
 // ── Config ────────────────────────────────────────────────────────────────────
