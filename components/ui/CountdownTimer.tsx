@@ -1,6 +1,8 @@
 "use client";
 
 import { useCountdown } from "@/lib/hooks";
+import { formatDeadline } from "@/lib/constants";
+import { useLocale } from "next-intl";
 
 interface CountdownTimerProps {
   deadline: number;
@@ -12,6 +14,11 @@ export default function CountdownTimer({
   className = "",
 }: CountdownTimerProps) {
   const { text, expired } = useCountdown(deadline);
+  const locale = useLocale();
+  // UTC keeps the accessible deadline stable between server and client renders.
+  const absoluteDeadline = Number.isFinite(new Date(deadline * 1000).getTime())
+    ? formatDeadline(deadline, locale, "UTC")
+    : "";
 
   return (
     <span
@@ -19,7 +26,7 @@ export default function CountdownTimer({
         expired ? "text-pv-gold" : "text-pv-text"
       } ${className}`}
       role="timer"
-      aria-live="polite"
+      aria-label={absoluteDeadline || undefined}
     >
       {text}
     </span>
