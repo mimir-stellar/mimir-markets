@@ -9,6 +9,7 @@ import { shortenAddress } from "@/lib/constants";
 import { getExplorerAddressUrl } from "@/lib/stellar";
 import { Copy, ExternalLink, LogOut, Menu, X } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { LocaleSwitcher } from "@/components/LocaleSwitcher";
 import { isXmtpFeatureEnabled } from "@/lib/xmtp/config";
 
 function WalletAccountMenu({
@@ -258,6 +259,7 @@ export default function Header() {
             >
               {t("launchApp")}
             </Link>
+            <LocaleSwitcher className="focus-ring" />
             <ThemeToggle className="focus-ring" />
           </div>
         ) : (
@@ -283,6 +285,7 @@ export default function Header() {
                 );
               })}
 
+              <LocaleSwitcher className="focus-ring" />
               <ThemeToggle className="focus-ring" />
 
               {isConnected && address ? (
@@ -310,6 +313,7 @@ export default function Header() {
 
             {/* Mobile */}
             <div className="flex items-center gap-2 md:hidden">
+              <LocaleSwitcher className="focus-ring" />
               <ThemeToggle className="focus-ring" />
               {isConnected && address ? (
                 <WalletAccountMenu

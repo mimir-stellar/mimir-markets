@@ -37,6 +37,18 @@ test.describe("boot", () => {
     expect(errors).toEqual([]);
   });
 
+  test("visiting /es resolves to the es locale shell with Spanish copy", async ({ page }) => {
+    const errors: string[] = [];
+    trackPageErrors(page, errors);
+
+    await page.goto("/es", { waitUntil: "domcontentloaded" });
+    expect(page.url()).toContain("/es");
+
+    await expectMainLandmark(page);
+    await expect(page.getByRole("link", { name: "Saltar al contenido", exact: true })).toBeAttached();
+    expect(errors).toEqual([]);
+  });
+
   test("every HTML response carries the promised security headers", async ({
     page,
   }) => {
