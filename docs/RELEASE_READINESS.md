@@ -5,6 +5,9 @@ funded release; lib/ops/release-readiness.ts is the same checklist as data,
 and scripts/verify-release-readiness.ts enforces it. The doc and the registry
 cannot drift: the CLI fails when a gate id or command stops appearing here.
 
+CI path filters are documented separately in
+[docs/CI_PATH_SCOPES.md](./CI_PATH_SCOPES.md).
+
 How to run it
 Bash
 
@@ -19,6 +22,10 @@ npm run verify:release-readiness -- --json       # machine-readable report
 # deployment, then runs the checklist in release mode:
 npm run verify:release-readiness -- --evidence evidence.json --mode=release
 npm run verify:release-readiness -- --out release-record.json
+Production installs from the committed lockfile. `vercel.json` sets
+`installCommand` to `npm ci` - the same install CI runs - so a deploy cannot
+resolve a different dependency tree or rewrite `package-lock.json`. Refreshing
+dependencies is a deliberate lockfile commit, not a side effect of deploying.
 Two modes, and the difference is the whole point:
 
 Mode	Meaning
@@ -26,6 +33,9 @@ develop (default)	The CLI verifies what it can run itself: checklist coherence, 
 release	Every gate must have recorded evidence and pass. A gate with no evidence is an error, so a release cannot be declared ready by omitting the gates that need a deployment.
 CI runs the develop mode on every pull request (the verify job in
 .github/workflows/ci.yml), so a release never discovers these checks late.
+
+If a new top-level folder or file needs its own CI tier, follow the checklist
+in [docs/CI_PATH_SCOPES.md](./CI_PATH_SCOPES.md) before opening the pull request.
 
 The checklist
 22 gates: 12 reproducible from a clean
@@ -201,6 +211,10 @@ ids, non-pass/fail statuses, waiver keys and empty records are refused),
 failure (a failed gate and a secret-shaped detail both fail closed) and
 regression (the fingerprint, the documented gate list, the npm scripts, the
 declared paths and the CI wiring).
+
+The CI tier matrix that decides which of these gates run for a given change is
+documented in [docs/CI_PATH_SCOPES.md](./CI_PATH_SCOPES.md), including the
+checklist for adding a new path to the scope tables.
 
 Gate ids
 typecheck, forbidden-terms, contract-tests, contract-build, node-tests, app-build, browser-smoke, artifact-provenance, release-sbom, cache-backup-verify, ledger-fixture-replay, release-readiness-checklist, deployment-verification, onchain-smoke, x402-payment-smoke, analytics-gates, contract-audit, legal-eligibility-review, redundant-providers, funded-feature-flags, rollback-rehearsal, load-baseline

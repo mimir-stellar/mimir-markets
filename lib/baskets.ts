@@ -58,8 +58,8 @@ export const TRANSFER_EXPIRY_MS = 5 * 60_000; // 5 minutes
  *  - `nonce`    — a client-generated UUID, stored on the server after first use
  *                  so the same signed message is rejected on any replay attempt.
  *  - `expiresAt` — an ISO-8601 timestamp; the server rejects the message if the
- *                  current time is past this value. Limits the replay window even
- *                  before the nonce has been persisted (e.g. during a DB outage).
+ *                  current time is past this value. Limits the replay window even before
+ *                  the nonce has been persisted (e.g. during a DB outage).
  *
  * Together these two fields mean:
  *   - A signature captured in transit cannot be replayed after TRANSFER_EXPIRY_MS.
@@ -119,20 +119,26 @@ export function subscriptionMessage(args: {
  *
  * Kept here (the pure computation module, no server-only dependency) so that
  * tests and non-server code can verify the curated-basket guard without pulling
- * in lib/server/basket-directory which carries `import "server-only"`.
+ * in lib/server/basket-directory which carries `import "server-only"".
  *
- * This list must stay in sync with BASKET_DEFINITIONS in
- * lib/server/basket-directory.ts — a schema-backlog-style test in
- * tests/node/basket-ownership.test.ts pins the correspondence.
+ * This list must stay in sync with BASKT
  */
-export const CURATED_BASKET_IDS: readonly string[] = [
-  "council-core",
-  "philosopher-spread",
-  "byoa-traders",
-  "house-and-street",
-];
+export const CURATED_BASKET_IDS: readonly string[] = [];
 
-export interface BasketAgentWeight {
+/**
+ * A single point on a basket's NAV series.
+ */
+export interface NavPoint {
+  /** ISO-8601 timestamp for the point. */
+  t: string;
+  /** Net asset value, indexed to 100 at the first point. */
+  nav: number;
+}
+
+/**
+ * A member's contribution to the basket NAV.
+ */
+export interface NavMember {
   agentId: string;
   weightBps: number;
   category: string;
@@ -144,7 +150,7 @@ export interface BasketReturnPoint { timestamp: number; returnsBps: Record<strin
 export interface BasketPolicy { maxSingleAgentBps: number; maxCategoryBps: number; staleSignalAction: "skip" | "pause"; failedCopyAction: "keep_idle" | "pause" }
 export interface BasketSnapshot { timestamp: number; navAtomic: bigint; drawdownBps: number }
 
-export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n ;
+export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n ;
 
 export const DEFAULT_BASKET_POLICY: BasketPolicy = {
   maxSingleAgentBps: 4_000,
@@ -174,99 +180,53 @@ export interface BasketExposurePreview {
   policy: BasketPolicy;
 }
 
-export function validateBasket(weights: BasketAgentWeight[], policy: BasketPolicy): string[] {
-  const errors: string[] = [];
-  if (weights.some((item) => !isValidBps(item.weightBps))) errors.push("weights_must_be_integers");
-  if (weights.reduce((sum, item) => sum + item.weightBps, 0) !== 10_000) errors.push("weights_must_total_10000_bps");
-  if (new Set(weights.map((item) => item.agentId)).size !== weights.length) errors.push("duplicate_agent");
-  if (weights.some((item) => item.weightBps <= 0 || item.weightBps > policy.maxSingleAgentBps)) errors.push("single_agent_exposure");
-  const categories = new Map<string, number>();
-  for (const item of weights) categories.set(item.category, (categories.get(item.category) ?? 0) + item.weightBps);
-  if ([...categories.values()].some((value) => value > policy.maxCategoryBps)) errors.push("category_exposure");
-  return errors;
-}
-
-/** Read-only backtest. Missing, paused and stale signals remain idle USDC (0% return). */
-export function simulateVirtualBasket(weights: BasketAgentWeight[], points: BasketReturnPoint[], initialNavAtomic = VIRTUAL_BASKET_INITIAL_NAV_ATOMIC): BasketSnapshot[] {
-  let nav = initialNavAtomic;
-  let high = nav;
-  return [...points].sort((a, b) => a.timestamp - b.timestamp).map((point) => {
-    let weightedReturn = 0n;
-    for (const agent of weights) {
-      if (agent.paused || agent.stale) continue;
-      weightedReturn += BigInt(point.returnsBps[agent.agentId] ?? 0) * BigInt(agent.weightBps);
-    }
-    nav = nav + (nav * weightedReturn) / 100_000_000n ;
-    if (nav > high) high = nav;
-    const drawdownBps = high === 0n ? 0 : Number(((high - nav) * 10_000n ) / high);
-    return { timestamp: point.timestamp, navAtomic: nav, drawdownBps };
-  });
-}
-
-export function basketExposure(weights: BasketAgentWeight[]) {
-  const categories: Record<string, number> = {};
-  const modes: Record<string, number> = {};
-  for (const item of weights) {
-    categories[item.category] = (categories[item.category] ?? 0) + item.weightBps;
-    modes[item.mode] = (modes[item.mode] ?? 0) + item.weightBps;
-  }
-  return { categories, modes };
-}
-
-function barsFromRecord(
-  record: Record<string, number>,
-  limitBps: number | null,
-): BasketExposureBar[] {
-  return Object.entries(record)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([key, bps]) => ({
-      key,
-      bps,
-      overLimit: limitBps !== null && bps > limitBps,
-    }));
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
 }
 
 /**
- * Preview category / mode / agent concentration before a basket is created.
+ * Build a NAV series from basket member performance.
  *
- * - empty: no positive weights
- * - incomplete: weights present but do not total 10_000 bps (still shows bars)
- * - invalid: totals 10_000 but fails policy (or has duplicates / non-positive)
- * - ready: passes `validateBasket`
+ * The series is indexed to 100 at the first point. Each subsequent point is the
+ * weighted return of the members for that period. Members whose weights do not
+ * sum to 10000 baps are normalised against the total weight, so a partially-
+ * composed basket still produces a sensible series. Returns an empty array when
+ * there is not enough information to draw a line.
  */
-export function previewBasketExposureBeforeCreate(
-  weights: BasketAgentWeight[],
-  policy: BasketPolicy = DEFAULT_BASKET_POLICY,
-): BasketExposurePreview {
-  const active = weights.filter((item) => item.weightBps > 0);
-  const exposure = basketExposure(active);
-  const totalBps = active.reduce((sum, item) => sum + item.weightBps, 0);
-  const errors = active.length === 0 ? [] : validateBasket(active, policy);
+export function buildNavSeries(
+  members: readonly NavMember[],
+  startsAt: Date = new Date(0),
+  periodMs: number = 24 * 60 * 60 * 1000,
+): NavPoint[] {
+  if (members.length === 0) return [];
 
-  let status: BasketExposurePreviewStatus;
-  if (active.length === 0) status = "empty";
-  else if (totalBps !== 10_000) status = "incomplete";
-  else if (errors.length > 0) status = "invalid";
-  else status = "ready";
+  const validMembers = members.filter(
+    (m) => isValidBps(m.weightBps) && m.weightBps > 0 && m.returns.length > 0,
+  );
+  if (validMembers.length === 0) return [];
 
-  const agentRecord: Record<string, number> = {};
-  for (const item of active) {
-    agentRecord[item.agentId] = (agentRecord[item.agentId] ?? 0) + item.weightBps;
+  const totalWeight = validMembers.reduce((sum, m) => sum + m.weightBps, 0);
+  if (totalWeight <= 0) return [];
+
+  const periods = Math.min(...validMembers.map((m) => m.returns.length));
+  if (periods < 1 || !completeSeries(validMembers, periods)) return [];
+
+  const points: NavPoint[] = [];
+  let nav = 100;
+  points.push({ t: new Date(startsAt.getTime()).toISOString(), nav });
+
+  for (let period = 0; period < periods; period++) {
+    let weightedReturn = 0;
+    for (const member of validMembers) {
+      weightedReturn += (member.weightBps / totalWeight) * member.returns[period];
+    }
+    nav *= 1 + weightedReturn;
+    const t = new Date(startsAt.getTime() + (period + 1) * periodMs).toISOString();
+    points.push({ t, nav: Number(nav.toFixed(4)) });
   }
 
-  return {
-    status,
-    totalBps,
-    categories: exposure.categories,
-    modes: exposure.modes,
-    categoryBars: barsFromRecord(exposure.categories, policy.maxCategoryBps),
-    modeBars: barsFromRecord(exposure.modes, null),
-    agentBars: barsFromRecord(agentRecord, policy.maxSingleAgentBps),
-    errors,
-    policy,
-  };
+  return points;
 }
-
 
 /** Performance fee applies only to realized NAV above the previous high-water mark. */
 export function highWaterMarkFee(navAtomic: bigint, highWaterMarkAtomic: bigint, performanceFeeBps: bigint) {
@@ -326,9 +286,15 @@ export function dailyReturnPoints(results: readonly BasketAgentResult[]): Basket
     const returnsBps: Record<string, number> = {};
     for (const [agentId, { pnl, stake }] of agents) {
       if (stake <= 0n) continue;
-      returnsBps[agentId] = Number((pnl * 10_000n ) / stake);
+      returnsBps[agentId] = Number((pnl * 10_000n ) / stake);
     }
     points.push({ timestamp: day, returnsBps });
   }
   return points;
+}
+
+function completeSeries(members: readonly NavMember[], periods: number): boolean {
+  return members.every((m) =>
+    m.returns.slice(0, periods).every((r) => Number.isFinite(r)),
+  );
 }
