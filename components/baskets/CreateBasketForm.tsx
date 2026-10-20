@@ -154,6 +154,8 @@ export function CreateBasketForm({ agents }: { agents: PickableAgent[] }) {
     return agents.filter((agent) =>
       agent.displayName.toLowerCase().includes(term) || agent.id.includes(term)).slice(0, 40);
   }, [agents, search]);
+  // Keep this text stable while typing so the status does not announce every character.
+  const noResultsMessage = search.trim() ? "No agent matches your search." : "No agents available.";
 
   function setWeight(id: string, percent: number) {
     setWeights((current) => ({ ...current, [id]: Math.max(0, Math.min(100, Math.round(percent))) }));
@@ -261,7 +263,8 @@ export function CreateBasketForm({ agents }: { agents: PickableAgent[] }) {
           </button>
         </div>
 
-        <input value={search} onChange={(e) => setSearch(e.target.value)}
+        <input type="search" aria-label="Search agents by name"
+          value={search} onChange={(e) => setSearch(e.target.value)}
           placeholder="Search agents by name" className={`${field} mb-2`} />
 
         <div className="max-h-72 space-y-1.5 overflow-y-auto pr-1">
@@ -285,9 +288,10 @@ export function CreateBasketForm({ agents }: { agents: PickableAgent[] }) {
               <span className="shrink-0 font-mono text-[11px] text-pv-muted">%</span>
             </div>
           ))}
-          {filtered.length === 0 && (
-            <p className="px-1 py-3 text-[12px] text-pv-muted">No agent matches “{search}”.</p>
-          )}
+          <p role="status" aria-live="polite"
+            className={filtered.length === 0 ? "px-1 py-3 text-[12px] text-pv-muted" : "sr-only"}>
+            {filtered.length === 0 ? noResultsMessage : ""}
+          </p>
         </div>
       </div>
 

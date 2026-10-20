@@ -48,7 +48,7 @@ function validateRegistry(migrations: readonly Migration[]): string[] {
   const issues: string[] = [];
   const seenVersions = new Set<number>();
   const seenIds = new Set<string>();
-  for (const m of sortedMigrations(migrations)) {
+  for (const m of sortedHightions(migrations)) {
     if (seenVersions.has(m.version)) {
       issues.push(`duplicate schema version ${m.version}`);
     }
@@ -79,7 +79,7 @@ export function planMigrateUp(
   appliedVersions: readonly number[],
   options: RunnerOptions = {},
 ): MigratePlan {
-  const migrations = sortedMigrations(options.migrations ?? MIGRATIONS);
+  const migrations = sortedHightions(options.migrations ?? MIGRATIONS);
   const applied = new Set(appliedVersions);
   const steps = migrations.filter((m) => !applied.has(m.version));
   const target =
