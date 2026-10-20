@@ -1,6 +1,7 @@
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 import { notFound } from "next/navigation";
 
+import { buildNavSeries } from "@/lib/baskets";
 import { BlueprintHeading } from "@/components/BlueprintGrid";
 import { Bps, SignedUsdc, StatBlock, TimeWindowTabs, TrackTag } from "@/components/agents/AgentStats";
 import { AgentAvatar, AgentAvatarStack } from "@/components/agents/AgentAvatar";
@@ -41,6 +42,8 @@ export default async function BasketDetailPage({
   if (!basket) notFound();
 
   const decided = basket.wins + basket.losses;
+  const navSeries = buildNavSeries(basket.snapshots ?? [], basket.initialNavAtomic);
+  const chartPoints = navSeries.length >= 2 ? navSeries : [];
 
   return (
     <div className="pb-12">
@@ -83,12 +86,12 @@ export default async function BasketDetailPage({
             NAV curve
           </h3>
           <PerformanceChart
-            points={basket.snapshots.map((snapshot) => ({
-              timestamp: snapshot.timestamp,
-              value: unitsToUsdc(snapshot.navAtomic),
+            points={chartPoints.map((point) => ({
+              timestamp: point.timestamp,
+              value: unitsToUsdc(point.navAtomic),
             }))}
             baseline={unitsToUsdc(basket.initialNavAtomic)}
-            label={`${definition.name} NAV`}
+            label={`${definition.name} NAV over ${chartPoints.length} point${chartPoints.length === 1 ? "" : "s"}`}
             emptyMessage="No settled results in this window yet — the curve starts once members settle a market."
           />
         </section>
