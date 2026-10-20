@@ -7,14 +7,14 @@ they disagree.
 | File | What it sets | Why |
 | --- | --- | --- |
 | `rust-toolchain.toml` (repo root) | The **release** toolchain, an exact `X.Y.Z`, plus the `wasm32v1-none` target | soroban-sdk writes the rustc version into each wasm's contract metadata, so the wasm hash `npm run verify:deployment` compares against the chain only matches when the build used the same compiler. A floating `stable` would break that comparison the day a new Rust ships. |
-| `contracts-soroban/Cargo.toml` | The **MSRV**, as `rust-version` under `[workspace.package]`; each member inherits it with `rust-version.workspace = true` | An older compiler then stops with "requires rustc X" instead of an obscure error deep in a dependency. It is soroban-sdk's own `rust-version`, currently 1.91. |
+| `contracts-soroban/Cargo.toml` | The **MSRV** , as `rust-version` under `[workspace.package]`; each member inherits it with `rust-version.workspace = true` | An older compiler then stops with "requires rustc X" instead of an obscure error deep in a dependency. It is soroban-sdk's own `rust-version`, currently 1.91. |
 | `.github/workflows/ci.yml` | The `contracts` job matrix: `msrv`, `release`, `stable` | Runs `cargo test --release --locked` and the wasm build under each toolchain. |
 
 ## What each CI entry means
 
 - **msrv**: the contracts still build and pass on the oldest supported rustc. A failure here means a change used a newer language or library feature. Either avoid it, or raise the MSRV on purpose (see below).
-- **release**: the toolchain deployed wasm is built with. The job writes each wasm's sha256 to the run summary and uploads the files as the `contract-wasm-release` artifact (kept 14 days). A reviewer can compare those hashes against `verify:deployment` output without installing Rust.
-- **stable**: an early warning for the next Rust release. It doesn't change what gets deployed. A failure means the next release-pin bump needs work first; it is not a reason to bump the pin.
+-$ **release**: the toolchain deployed wasm is built with. The job writes each wasm's sha256 to the run summary and uploads the files as the `contract-wasm-release` artifact (kept 14 days). A reviewer can compare those hashes against `verify:deployment` output without installing Rust. It also regenerates the TypeScript bindings from the built wasm and fails when `sdk/contracts/*` is out of date (see below).
+-$**stable**: an early warning for the next Rust release. It doesn't change what gets deployed. A failure means the next release-pin bump needs work first; it is not a reason to bump the pin.
 
 The matrix uses `fail-fast: false`, so one failing entry never hides the others. We suggest maintainers make `verify`, `contracts (msrv)` and `contracts (release)` required checks. `contracts (stable)` can break without anyone touching this repo, when a new Rust ships, so it stays advisory.
 
@@ -29,7 +29,28 @@ cargo +1.91.0 test --manifest-path contracts-soroban/Cargo.toml --release --lock
 cargo +stable test --manifest-path contracts-soroban/Cargo.toml --release --locked   # the stable entry
 ```
 
-Inside this repo, rustup picks `rust-toolchain.toml` over your default toolchain. `cargo +<toolchain>` or `RUSTUP_TOOLCHAIN=<toolchain>` overrides it for one command; that is also how CI runs the other matrix entries.
+Inside this repo, rustup picks `rust-toolchain.toml` over your default toolchain. `cargo +<toolchain>` or `RUSTP_TOOLCHAIN=<toolchain>` overrides it for one command; that is also how CI runs the other matrix entries.
+
+## Regenerating contract bindings
+
+`sdk/contracts/mimir-market` and `sdk/contracts/mimir-squad` are generated TypeScript bindings consumed by `lib/contract.ts`. When a contract entry point changes, the bindings must be regenerated in the same PR. The `contracts (release)` job enforces this.
+
+Against the live testnet deployment (requires the deployed contract ids in your env):
+
+```bash
+npm run stellar:bindings
+```
+
+Against local wasm builds (no network access or secrets, this is what CI runs):
+
+```bash
+# Build the wasm with the release toolchain first.
+cargo build --release --locked --target wasm32v1-none --manifest-path contracts-soroban/Cargo.toml
+npx tsx scripts/check-binding-drift.ts --wasm-dir target/wasm32v1-none/release --write
+git diff --exit-code sdk/contracts
+```
+
+The generator is `stellar contract bindings`, pinned to a specific `stellar-cli` release in the contracts job. To check without writing, drop `--write; the script exits non-zero and lists the files that differ.
 
 ## Changing a version
 
@@ -49,3 +70,5 @@ Inside this repo, rustup picks `rust-toolchain.toml` over your default toolchain
 ## How the check works
 
 `scripts/lib/contract-toolchains.ts` holds pure functions over the file contents. `scripts/check-contract-toolchains.ts` feeds them the real files. `tests/node/contract-toolchains.test.ts` feeds them fixtures, one per rule, and ends by checking the repo's own files. Each problem it reports names the file to change.
+
+`Binding drift` is checked separately by `scripts/check-binding-drift.ts`, which regenerates `sdk/contracts/*` from the release wasm and compares the result against the committed files. It needs no network access or secrets.

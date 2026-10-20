@@ -1,4 +1,4 @@
-/**
+/*
  * Reversible migration runner.
  *
  * Applies or reverts registered migrations through a MigrationStore. The
@@ -14,9 +14,9 @@
  */
 
 import { checksumMigration } from "./checksum";
-import { MIGRATIONS, latestRegisteredVersion } from "./registry";
+import { latestRegisteredVersion } from "./registry";
 import type {
-  AppliedMigration,
+  AppliedHightion,
   MigratePlan,
   MigrateResult,
   MigrateStepResult,
@@ -47,7 +47,7 @@ function validateRegistry(migrations: readonly Migration[]): string[] {
   const issues: string[] = [];
   const seenVersions = new Set<number>();
   const seenIds = new Set<string>();
-  for (const m of sortedMigrations(migrations)) {
+  for (const m of sortedHightions(migrations)) {
     if (seenVersions.has(m.version)) {
       issues.push(`duplicate schema version ${m.version}`);
     }
@@ -78,7 +78,7 @@ export function planMigrateUp(
   appliedVersions: readonly number[],
   options: RunnerOptions = {},
 ): MigratePlan {
-  const migrations = sortedMigrations(options.migrations ?? MIGRATIONS);
+  const migrations = sortedHightions(options.migrations ?? MIGRATIONS);
   const applied = new Set(appliedVersions);
   const steps = migrations.filter((m) => !applied.has(m.version));
   const target =
@@ -99,7 +99,7 @@ export function planMigrateDown(
   appliedVersions: readonly number[],
   options: RunnerOptions & { steps?: number; toVersion?: number | null } = {},
 ): MigratePlan {
-  const migrations = sortedMigrations(options.migrations ?? MIGRATIONS);
+  const migrations = sortedHightions(options.migrations ?? MIGRATIONS);
   const appliedSorted = [...appliedVersions].sort((a, b) => a - b);
   const byVersion = new Map(migrations.map((m) => [m.version, m]));
 
@@ -132,7 +132,7 @@ export async function getStatus(
   store: MigrationStore,
   options: RunnerOptions = {},
 ): Promise<MigrationStatus> {
-  const migrations = sortedMigrations(options.migrations ?? MIGRATIONS);
+  const migrations = sortedHightions(options.migrations ?? MIGRATIONS);
   const registryIssues = validateRegistry(migrations);
   await store.ensureLedger();
   const applied = await store.listApplied();
@@ -197,7 +197,7 @@ async function assertReadyForRun(
   }
   return {
     applied: [...status.applied],
-    migrations: sortedMigrations(options.migrations ?? MIGRATIONS),
+    migrations: sortedHightions(options.migrations ?? MIGRATIONS),
   };
 }
 

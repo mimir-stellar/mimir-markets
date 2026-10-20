@@ -16,7 +16,8 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { getReasoningFeed } from "@/lib/db";
+import { getReasoningFeed, getClaimById } from "@/lib/db";
+import { apiError } from "@/lib/api/errors";
 import { isReasoningStage, type EvidenceRef } from "@/lib/reasoning/schema";
 import {
   decodeReasoningCursor,
@@ -73,6 +74,18 @@ function parseEvidence(json: string): EvidenceRef[] {
   }
 }
 
+/**
+ * Standard 404 envelope for an unknown claim. Keeps the contract identical to
+ * the rest of the vs API surface.
+ */
+function notFound(): NextResponse {
+  const error = apiError("not_found", "Claim not found");
+  return NextResponse.json(error.body, {
+    status: error.status,
+    headers: error.headers,
+  });
+}
+
 export async function GET(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
@@ -97,6 +110,13 @@ export async function GET(
   }
 
   try {
+    // Unknown claims answer 404 rather than an empty 200, so a client can
+    // distinguish "no such claim" from "claim with no reasoning yet".
+    const claim = await getClaimById(claimId);
+    if (!claim) {
+      return notFound();
+    }
+
     // Fetch one extra row to detect whether another page exists.
     const rows = await getReasoningFeed({
       claimId,
@@ -149,11 +169,17 @@ export async function GET(
         },
       },
     );
-  } catch (err) {
+  } catch {
     // No Neon configured (or it is down) means no feed — not a broken page.
-    const message = err instanceof Error ? err.message : "read failed";
+    // Do not echo the driver message: it can leak host / connection details.
     return NextResponse.json(
-      { claimId, count: 0, items: [], nextCursor: null, error: message },
+      {
+        claimId,
+        count: 0,
+        items: [],
+        nextCursor: null,
+        error: "feed unavailable",
+      },
       { status: 503 },
     );
   }

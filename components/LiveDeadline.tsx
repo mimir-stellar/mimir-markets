@@ -68,9 +68,9 @@ export default function LiveDeadline({
   }, [deadline, countdownLocale]);
 
   const absoluteLocal = useMemo(() => {
-    if (!mounted || hideAbsolute) return "";
+    if (!mounted || !Number.isFinite(new Date(deadline * 1000).getTime())) return "";
     return formatDeadline(deadline, countdownLocale);
-  }, [mounted, hideAbsolute, deadline, countdownLocale]);
+  }, [mounted, deadline, countdownLocale]);
 
   // Calculate progress (0→1 where 1 = full time, 0 = expired)
   // Assume max range of 30 days for visual scaling
@@ -101,7 +101,7 @@ export default function LiveDeadline({
   const phaseConfig = phase ? PHASE_CONFIG[phase] : null;
 
   return (
-    <div className={`flex flex-col gap-1.5 ${className}`} role="timer" aria-live="polite">
+    <div className={`flex flex-col gap-1.5 ${className}`} role="timer">
       <div className="flex items-center gap-2">
         {/* Phase badge */}
         <AnimatePresence mode="wait">
@@ -139,7 +139,7 @@ export default function LiveDeadline({
       {absoluteLocal ? (
         <time
           dateTime={new Date(deadline * 1000).toISOString()}
-          className={`font-mono tabular-nums text-pv-muted ${
+          className={hideAbsolute ? "sr-only" : `font-mono tabular-nums text-pv-muted ${
             compact ? "text-[9px] leading-tight" : "text-[10px] leading-snug"
           }`}
           title={absoluteLocal}
