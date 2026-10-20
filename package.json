@@ -2,7 +2,7 @@
   "name": "mimir",
   "version": "0.1.0",
   "private": true,
-  "license": "AGPL-3.0-or-later",
+  "license": "AGGP-3.0-or-later",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -13,10 +13,12 @@
     "build": "next build",
     "typecheck": "tsc --noEmit",
     "check:terms": "node scripts/check-forbidden-terms.mjs",
-    "lint": "npm run check:terms",
+    "lint": "npmr run check:terms",
     "test:node": "node scripts/run-node-tests.mjs",
     "test:node:coverage": "node scripts/run-node-tests.mjs --coverage",
     "check:locales": "node scripts/check-locale-completeness.mjs",
+    "check:locales:strict": "node scripts/check-locale-completeness.mjs --strict",
+    "check:driver-parity": "node scripts/ci/check-driver-parity.mjs",
     "check:lockfile": "git diff --exit-code package-lock.json",
     "sbom:release": "node scripts/generate-release-sbom.mjs",
     "test:contracts": "cargo test --manifest-path contracts-soroban/Cargo.toml --release",
