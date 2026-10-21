@@ -48,7 +48,7 @@ export interface AgentPerformance {
   losses: number;
   refunds: number;
   open: number;
-  realisedPnlAomic: bigint;
+  realisedPnlAtomic: bigint;
   openExposureAtomic: bigint;
   /** Everything the agent has ever staked, settled or not. */
   volumeAtomic: bigint;

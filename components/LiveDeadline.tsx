@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { formatDeadline, getTimeRemaining } from "@/lib/constants";
 import { useLocale, useTranslations } from "next-intl";
-import { resolveCountdownLocale } from "@i18n/locale";
+import { resolveCountdownLocale } from "@/i18n/routing";
 
 interface LiveDeadlineProps {
   deadline: number;

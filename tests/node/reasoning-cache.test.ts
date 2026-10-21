@@ -14,7 +14,7 @@ import {
 const entry = (reasoning: string) => ({
   question: "Will X happen?",
   sideA: "yes",
-  sidbB: "no",
+  sideB: "no",
   reasoning,
 });
 

@@ -1,5 +1,5 @@
 import { CHALLENGE_OPPORTUNITY_SOURCES } from "@/lib/challengeOpportunitySources";
-import { getSeedChallengeOpportunities } from "@/lib/challengeOpportunitySeeds";
+import { getChallengeOpportunitySeeds } from "@/lib/challengeOpportunitySeeds";
 import { computeClaimQuality } from "@/lib/claimQuality";
 import type {
   ChallengeOpportunitiesResponse,
@@ -134,7 +134,7 @@ function getOpportunityExpiresAt(candidate: SourceClaimDraftCandidate, generated
 }
 
 function buildSeedOpportunities(locale: "en" | "es", existingClaims: VSData[]) {
-  return getSeedChallengeOpportunities(locale).map((seed) => {
+  return getChallengeOpportunitySeeds(locale).map((seed) => {
     const quality = getCandidateScore(seed.candidate);
     const existingClaim = findExistingOpportunityClaim(seed.candidate, existingClaims);
 

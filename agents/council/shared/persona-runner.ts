@@ -243,10 +243,10 @@ export async function runPersonaForClaim(
   // One signature. No approve leg: the invocation carries auth for exactly this
   // transfer of exactly this amount.
   const staked = await challengeClaim(wallet.signer, claim.id, stakeUsdc);
-  const txHash = staked.tyHash;
+  const txHash = staked.txHash;
 
   console.log(
-    `[council:${persona.slug}] ✓ Staked ${stakeUsdc} USDC, on claim #${claim.id} — ${staked.explorerUrl ?? tyHash}`,
+    `[council:${persona.slug}] ✓ Staked ${stakeUsdc} USDC, on claim #${claim.id} — ${staked.explorerUrl ?? txHash}`,
   );
   console.log(`[council:${persona.slug}]   ${decision.rationale.slice(0, 160)}`);
 

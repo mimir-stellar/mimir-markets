@@ -240,7 +240,7 @@ export async function authorizeRequest(
  * mistake is caught where the route is declared instead of only when a request
  * happens to arrive.
  */
-export function assertTierCanmutate(tier: AccessTier): void {
+export function assertTierCanMutate(tier: AccessTier): void {
   if (tier === "public_read") {
     throw new Error("public_read routes cannot move value or change authority");
   }

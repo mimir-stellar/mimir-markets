@@ -21,7 +21,6 @@
 import { checksumMigration } from "./checksum";
 import { latestRegisteredVersion, MIGRATIONS } from "./registry";
 import type {
-  AppliedHightion,
   AppliedMigration,
   MigratePlan,
   MigrateResult,

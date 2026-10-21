@@ -32,12 +32,12 @@ test("cryptoThresholdReason accepts reasonable thresholds", () => {
 });
 
 test("cryptoThresholdReason rejects non-positive thresholds", () => {
-  assert.matches(cryptoThresholdReason(Number.NaN) ?? "", /finite/);
-  assert.matches(cryptoThresholdReason(0) ?? "", /positive/);
-  assert.matches(cryptoThresholdReason(-1) ?? "", /positive/);
+  assert.match(cryptoThresholdReason(Number.NaN) ?? "", /finite/);
+  assert.match(cryptoThresholdReason(0) ?? "", /positive/);
+  assert.match(cryptoThresholdReason(-1) ?? "", /positive/);
 });
 
 test("cryptoThresholdReason rejects thresholds outside the sane band", () => {
-  assert.matches(cryptoThresholdReason(0.5) ?? "", /below \$1+/);
-  assert.matches(cryptoThresholdReason(10_000_000_001) ?? "", /above \$10b/);
+  assert.match(cryptoThresholdReason(0.5) ?? "", /below \$1+/);
+  assert.match(cryptoThresholdReason(10_000_000_001) ?? "", /above \$10b/);
 });

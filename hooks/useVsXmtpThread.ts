@@ -11,7 +11,7 @@ import {
 } from "@/lib/xmtp/chat-thread";
 import {
   classifyXmtpFailureKind,
-  nextXMtpFailure,
+  nextXmtpFailure,
   type XmtpFailure,
 } from "@/lib/xmtp/failure-state";
 import {
@@ -149,7 +149,7 @@ export function useVsXmtpThread({
     (kind: XmtpThreadErrorKind, technical: string, cause?: unknown) => {
       setThreadError({ kind, technical });
       setThreadFailure((prev) =>
-        nextXMtpFailure(
+        nextXmtpFailure(
           prev,
           classifyXmtpFailureKind(cause ??  technical),
           technical

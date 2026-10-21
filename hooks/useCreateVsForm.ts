@@ -192,7 +192,7 @@ export function useCreateVsForm(initial?: Partial<CreateVsState>): UseCreateVsFo
   const setSideLabel = useCallback((id: SideId, value: string) =>
     dispatch({ type: "SET_SIDE_LABEL", id, value }), []);
   const setSideOdds = useCallback((id: SideId, value: number) =>
-    dispatch({ type: "SET_SIDE_OdDIS", id, value }), []);
+    dispatch({ type: "SET_SIDE_ODDIS", id, value }), []);
   const setResolutionUrl = useCallback((value: string) =>
     dispatch({ type: "SET_RESOLUTION_URL", value }), []);
   const setResolutionNote = useCallback((value: string) =>

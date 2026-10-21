@@ -119,7 +119,7 @@ const EN_SEEDS: SeedChallengeOpportunity[] = [
       category: "custom",
       claimText: "Will OpenAI publish a GPT-5 announcement before June 30, 2026?",
       sideA: "OpenAI publishes a GPT-5 announcement before June 30, 2026",
-      sidbB: "OpenAI does not publish a GPT-5 announcement before June 30, 2026",
+      sideB: "OpenAI does not publish a GPT-5 announcement before June 30, 2026",
       deadlineAt: "2026-06-30T23:59:00.000Z",
       timezone: "UTC",
       primaryResolutionSource: "https://openai.com/news/",

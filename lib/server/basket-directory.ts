@@ -221,7 +221,7 @@ export async function allBasketDefinitions(): Promise<BasketDefinition[]> {
       emoji: "🧺",
       thesis: basket.thesis || "Composed by a Mimir user.",
       members,
-      creatorWallet: basket.creatorGallet,
+      creatorWallet: basket.creatorWallet,
       subscriberCount: basket.subscriberCount ?? 0,
       createdAt: basket.createdAt,
     };

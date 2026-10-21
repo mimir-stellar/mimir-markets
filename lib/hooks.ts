@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { getTimeRemaining } from "@/lib/constants";
 import { useLocale } from "next-intl";
-import { resolveCountdownLocale } from "@i18n/locale";
+import { resolveCountdownLocale } from "@/i18n/routing";
 
 export function shouldKeepTicking(state: { expired: boolean } | null | undefined): boolean {
   return Boolean(state && !state.expired);
