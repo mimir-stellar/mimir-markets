@@ -20,7 +20,7 @@
 
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const driverPath = path.join(root, "scripts", "ci", "changed-paths.mjs");
@@ -56,8 +56,16 @@ const corpus = [
   ".github/workflows/ci.yml",
   ".env.example",
   ".nvmrc",
+  ".editorconfig",
   ".gitattributes",
   ".gitignore",
+  "rust-toolchain.toml",
+  ".c8rc",
+  "playwright.config.ts",
+  "vercel.json",
+  "railway.json",
+  "nixpacks.toml",
+  "EMERGING_NARRATIVES_PR.md",
   "README.md",
   "CHANGELOG.md",
   "LICENSE",
@@ -108,7 +116,7 @@ const tsVerdicts = JSON.parse(tsRaw);
 
 // ── Driver side: classify the corpus through its exported scope function ──────
 
-const driver = await import(driverPath);
+const driver = await import(pathToFileURL(driverPath).href);
 const driverVerdicts = {};
 for (const p of corpus) {
   const scope = driver.scopesForPath(p);

@@ -65,7 +65,7 @@ test("shared lib/ code fans out to the three Node tiers", () => {
 });
 
 test("shared files fan out to every tier", () => {
-  for (const shared of [".env.example", ".nvmrc", ".gitattributes", ".gitignore"]) {
+  for (const shared of [".env.example", ".nvmrc", ".editorconfig", ".gitattributes", ".gitignore"]) {
     assert.deepEqual(tiersOf(shared), ALL_TIERS_SORTED, `${shared} must enable all tiers`);
     // Even alongside doc-only changes, the shared file keeps everything on.
     assert.deepEqual(tiersOf(shared, "README.md", "docs/note.md"), ALL_TIERS_SORTED);
@@ -80,6 +80,19 @@ test("root manifests fan out to every tier that claims them", () => {
   }
   // tsconfig.json is claimed by app and agents only.
   assert.deepEqual(tiersOf("tsconfig.json"), ["agents", "app"]);
+});
+
+test("root toolchain, coverage and deployment configs are classified", () => {
+  // Each of these can change how a tier builds or runs, so leaving one
+  // unclassified would mean a change to it could ship unverified.
+  assert.deepEqual(tiersOf("rust-toolchain.toml"), ["contracts"]);
+  assert.deepEqual(tiersOf(".c8rc"), ["tests"]);
+  assert.deepEqual(tiersOf("vercel.json"), ["app"]);
+  assert.deepEqual(tiersOf("playwright.config.ts"), ["app", "tests"]);
+  assert.deepEqual(tiersOf("railway.json"), ["agents", "app"]);
+  assert.deepEqual(tiersOf("nixpacks.toml"), ["agents", "app"]);
+  // Root-level markdown documents and builds nothing, including PR write-ups.
+  assert.equal(scopeOf("EMERGING_NARRATIVES_PR.md").kind, "doc");
 });
 
 test("doc-only changes enable nothing but never fail the path job", () => {

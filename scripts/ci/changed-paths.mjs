@@ -69,6 +69,23 @@ const FILE_SCOPES = [
   ["tailwind.config.ts", "app"],
   ["postcss.config.js", "app"],
 
+  // Browser-suite and deployment configuration: the suite jobs and the
+  // deployed app/worker builds read these, so a change to any of them must not
+  // be able to slip through with nothing running.
+  ["playwright.config.ts", "app"],
+  ["playwright.config.ts", "tests"],
+  ["vercel.json", "app"],
+  ["railway.json", "app"],
+  ["railway.json", "agents"],
+  ["nixpacks.toml", "app"],
+  ["nixpacks.toml", "agents"],
+
+  // The Rust toolchain pin decides which compiler builds the wasm.
+  ["rust-toolchain.toml", "contracts"],
+
+  // Coverage config for the node suites.
+  [".c8rc", "tests"],
+
   ["package.json", "app"],
   ["package-lock.json", "app"],
   ["npm-shrinkwrap.json", "app"],
@@ -88,9 +105,13 @@ const FILE_SCOPES = [
 const SHARED_FILES = new Set([
   ".env.example",
   ".nvmrc",
+  ".editorconfig",
   ".gitattributes",
   ".gitignore",
 ]);
+
+// Any bare `.md` at the repo root documents and builds nothing.
+const DOC_ONLY_SUFFIXES = [".md"];
 
 const DOC_ONLY = new Set(["LICENSE", "README.md", "CHANGELOG.md"]);
 
@@ -99,14 +120,14 @@ const DOC_ONLY_PREFIXES = ["docs/"];
 const ALL_TIERS = ["app", "agents", "contracts", "tests"];
 
 // Test hook: parity and classification tests import these directly.
-export { PREFIX_SCOPES, FILE_SCOPES, SHARED_FILES, DOC_ONLY, DOC_ONLY_PREFIXES, ALL_TIERS, classify, scopesForPath };
+export { PREFIX_SCOPES, FILE_SCOPES, SHARED_FILES, DOC_ONLY, DOC_ONLY_SUFFIXES, DOC_ONLY_PREFIXES, ALL_TIERS, classify, scopesForPath };
 
 // ── Classification — mirrors scopeOf/scopesForPaths in path-scope.ts ─────────
 
 function scopesForPath(p) {
   if (SHARED_FILES.has(p)) return new Set(ALL_TIERS);
   const isRootLevel = !p.includes("/");
-  if (isRootLevel && DOC_ONLY.has(p)) return "doc";
+  if (isRootLevel && (DOC_ONLY.has(p) || DOC_ONLY_SUFFIXES.some((s) => p.endsWith(s)))) return "doc";
   for (const prefix of DOC_ONLY_PREFIXES) {
     if (p.startsWith(prefix)) return "doc";
   }

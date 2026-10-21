@@ -63,6 +63,23 @@ export const FILE_SCOPES: ReadonlyArray<readonly [string, Tier]> = [
   ["tailwind.config.ts", "app"],
   ["postcss.config.js", "app"],
 
+  // Browser-suite and deployment configuration: the suite jobs and the
+  // deployed app/worker builds read these, so a change to any of them must not
+  // be able to slip through with nothing running.
+  ["playwright.config.ts", "app"],
+  ["playwright.config.ts", "tests"],
+  ["vercel.json", "app"],
+  ["railway.json", "app"],
+  ["railway.json", "agents"],
+  ["nixpacks.toml", "app"],
+  ["nixpacks.toml", "agents"],
+
+  // The Rust toolchain pin decides which compiler builds the wasm.
+  ["rust-toolchain.toml", "contracts"],
+
+  // Coverage config for the node suites.
+  [".c8rc", "tests"],
+
   ["package.json", "app"],
   ["package-lock.json", "app"],
   ["npm-shrinkwrap.json", "app"],
@@ -87,16 +104,21 @@ export const FILE_SCOPES: ReadonlyArray<readonly [string, Tier]> = [
 export const SHARED_FILES: ReadonlySet<string> = new Set([
   ".env.example",
   ".nvmrc",
+  ".editorconfig",
   ".gitattributes",
   ".gitignore",
 ]);
 
 /**
- * Top-level entries that are documentation-only: touching these disables
- * nothing. Anything at the root that is NOT in this list or in a scope above
- * is UNKNOWN — the point is that adding a file here is an explicit,
- * reviewed decision, not a silent default.
+ * Files that sit outside any tier but are documentation-only by nature: any
+ * bare `.md` at the repo root (README, changelogs, PR write-ups) documents and
+ * builds nothing. Anything else at the root that is NOT in this list, in
+ * DOC_ONLY below, or in a scope above is UNKNOWN — the point is that adding a
+ * root file that *does* affect a build is an explicit, reviewed decision, not
+ * a silent default.
  */
+export const DOC_ONLY_SUFFIXES: ReadonlyArray<string> = [".md"];
+
 export const DOC_ONLY: ReadonlySet<string> = new Set([
   "LICENSE",
   "README.md",
@@ -124,7 +146,7 @@ function isRootLevel(path: string): boolean {
 
 function scopesFor(path: string): Set<Tier> | "doc" | undefined {
   if (SHARED_FILES.has(path)) return new Set(ALL_TIERS);
-  if (isRootLevel(path) && DOC_ONLY.has(path)) return "doc";
+  if (isRootLevel(path) && (DOC_ONLY.has(path) || DOC_ONLY_SUFFIXES.some((s) => path.endsWith(s)))) return "doc";
   for (const prefix of DOC_ONLY_PREFIXES) {
     if (path.startsWith(prefix)) return "doc";
   }
