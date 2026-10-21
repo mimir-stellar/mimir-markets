@@ -18,9 +18,26 @@ interface Particle {
 
 export default function Confetti({ active }: { active: boolean }) {
   const [particles, setParticles] = useState<Particle[]>([]);
+  // Wait for the client preference before creating animated particles.
+  const [reducedMotion, setReducedMotion] = useState<boolean | null>(null);
 
   useEffect(() => {
-    if (!active) {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      setReducedMotion(false);
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReducedMotion(mediaQuery.matches);
+
+    update();
+    mediaQuery.addEventListener("change", update);
+
+    return () => mediaQuery.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    if (!active || reducedMotion !== false) {
       setParticles([]);
       return;
     }
@@ -36,9 +53,9 @@ export default function Confetti({ active }: { active: boolean }) {
         delay: Math.random() * 0.5,
       }))
     );
-  }, [active]);
+  }, [active, reducedMotion]);
 
-  if (!active || particles.length === 0) return null;
+  if (!active || reducedMotion !== false || particles.length === 0) return null;
 
   return (
     <div

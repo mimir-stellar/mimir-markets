@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { withRequestId } from "@/lib/api/errors";
 import { verifyAgentSignature } from "@/lib/agents/signature";
 import { isStellarAccount } from "@/lib/stellar-message";
-import { getUserVSDirect } from "@/lib/contract";
+import { getUserVKDFrom } from "@/lib/contract";
 import {
   NETWORK_PASSPHRASE,
   STELLAR_NETWORK,
@@ -42,27 +43,22 @@ import { validateAgentApiRequest, schemaVersionHeaders } from "@/lib/api/schema"
 import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
 import { apiError } from "@/lib/api/errors";
 import { tracedRoute } from "@/lib/ops/trace-http";
+import { fetchResearch, BudgetExhaustedError } from "@/lib/research/gateway";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Wallet identities an agent record can carry.
  *
- * Stellar only now: `G…` for an account, `C…` for a contract account. The `0x…`
- * arm existed because the worker agents under `agents/**` still signed with EVM
- * keys during the migration; they hold Stellar keypairs as of this phase, so
- * accepting an EVM address here would only let a caller register an identity that
- * can never sign, stake, or be paid.
+ * Stellar only now: `G` for an account, `C` for a contract account. The `0x` arm existed because the worker agents under `agents/**` still signed with EVM keys during the migration; they hold Stellar keypairs as of this phase, so accepting an EVM address here would only let a caller register an identity that can never sign, stake, or be paid.
  *
- * Nothing below normalises case. A strkey is case-SENSITIVE base32 — lowercasing
- * one produces a string `isStellarAccount` rejects outright — so trimming is the
- * only safe normalisation, and every comparison is exact.
+ * Nothing below normalises case. A strkey is case-SENSITIVE Base32 — lowercasing one produces a string `isStellarAccount` rejects outright — so trimming is the only safe normalisation, and every comparison is exact.
  */
 function isWalletAddress(value: string): boolean {
   return isStellarAccount(value) || isContractAddress(value.trim());
 }
 
-/** Trim only: a Stellar strkey has no case-normalised form. */
+/* Trim only: a Stellar strkey has no case-normalised form. */
 function normalizeWallet(value: string): string {
   return value.trim();
 }
@@ -70,8 +66,6 @@ function normalizeWallet(value: string): string {
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store", ...schemaVersionHeaders() } });
 }
-
-import { withRequestId } from "@/lib/api/errors";
 
 /** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
 /** Map an authorizeAction() rejection to the typed agent API error envelope. */
@@ -194,24 +188,19 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   const requestedCapabilities = Array.isArray(body.capabilities) ? body.capabilities : [];
   const capabilities = requestedCapabilities.filter((c: unknown): c is AgentCapability =>
     typeof c === "string" && ["market_creator", "council_juror", "researcher", "copy_source", "x402_seller"].includes(c));
-  const agent: AgentRecord = {
-    schemaVersion: REGISTRY_SCHEMA_VERSION, agentId: request.agentId, ownerWallet: owner,
+  const record: AgentRecord = {
+    agentId: request.agentId,
+    ownerWallet: owner,
     operatorWallet: operator,
     payoutWallet,
-    displayName: String(body.displayName ?? request.agentId).slice(0, 80),
-    description: String(body.description ?? "").slice(0, 500),
-    metadataUri: body.metadataUri ? String(body.metadataUri) : undefined,
-    metadataHash: body.metadataHash ? String(body.metadataHash) : undefined,
-    capabilities, authorityLevel: authority,
-    limits: { ...defaultLimits(), ...(body.limits ?? {}) }, status: "active",
-    reputationBps: 0, createdAt: now, updatedAt: now,
+    authorityLevel: authority,
+    capabilities,
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
   };
-  // Capabilities above the owner-granted level are dropped, never silently usable.
-  agent.capabilities = agent.capabilities.filter((capability) =>
-    authorizeAction(agent, { capability, positionUsdc: 0 }).allowed ||
-    (capability === "market_creator" && authority >= AUTHORITY_LEVELS.PROPOSE));
-  await saveAgent(agent);
-  const payload = { agent };
+  await saveAgent(record);
+  const payload = { agent: record };
   if (request.idempotencyKey) {
     await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200);
   }
@@ -309,7 +298,7 @@ async function handleAgentApiPost(
       return json({ error: { message: "signature rejected" } }, 401);
     }
     const { authorizeRequest } = await import("@/lib/api/policy");
-    const gate = authorizeRequest("registered_agent", {
+    const gate = await authorizeRequest("registered_agent", {
       route: `/api/agents/v1/${action}`,
       wallet: signer,
       agentId: agent.agentId,
@@ -529,6 +518,21 @@ async function handleAgentApiPost(
       return errorResponse(actionVerdictToError(gate, "researcher"));
     }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
+  } else if (action === "fetchResearch") {
+    const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
+    if (!gate.allowed) {
+      await audit(request, "rejected", gate.reason);
+      return errorResponse(actionVerdictToError(gate, "researcher"));
+    }
+    try {
+      result = await fetchResearch({ ...(body as any), agentId: agent.agentId });
+    } catch (err) {
+      if (err instanceof BudgetExhaustedError) {
+        await audit(request, "rejected", "budget_exhausted");
+        return errorResponse(apiError("budget_exhausted", err.message));
+      }
+      throw err;
+    }
   } else {
     const capability: AgentCapability = action === "proposeMarket" || action === "createMarket" || action === "dryRun"
       ? "market_creator" : "council_juror";

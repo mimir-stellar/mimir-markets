@@ -1,10 +1,10 @@
-/**
+/*
  * The capture boundary's leak guard.
  *
  * Analytics is the easiest place to accidentally exfiltrate the things that must
  * never leave the app: private keys, wallet signatures, invite keys for private
  * markets, raw LLM prompts, and per-user evidence text. This module is applied
- * to EVERY event before it is sent, so a careless `properties` spread at a call
+ * to EVERY event before it is sent, so a careless `properties' spread at a call
  * site cannot leak — the guard is structural, not a code-review convention.
  *
  * It rejects by two independent means:
@@ -24,17 +24,96 @@ const FORBIDDEN_KEY_PATTERN =
 const HEX_32_BYTES = /^0x[0-9a-fA-F]{64}$/;
 /** A 65-byte hex string — an ECDSA signature. */
 const HEX_65_BYTES = /^0x[0-9a-fA-F]{130}$/;
+/**
+ * Hard cap on the raw analytics request body (UTF-8 bytes).
+ * Oversized payloads are dropped silently (204) before parsing or capture.
+ */
+export const MAX_EVENT_PAYLOAD_BYTES = 64 * 1024;
+export const MAX_PAYLOAD_BYTES = MAX_EVENT_PAYLOAD_BYTES;
+export const MAX_BODY_BYTES = MAX_EVENT_PAYLOAD_BYTES;
+
 /** Anything unreasonably long for a categorical property. */
-const MAX_STRING_LENGTH = 200;
+export const MAX_STRING_LENGTH = 200;
+export const MAX_PROPERTY_STRING_LENGTH = MAX_STRING_LENGTH;
 /** JWT / base64url token shape. */
-const TOKEN_LIKE = /^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/;
+const TOKEN_LIKE = /^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}$/;
 /** Stellar account/contract identities and secret seeds. */
 const STELLAR_PUBLIC_ID = /^[GCM][A-Z2-7]{55}$/;
 const STELLAR_SECRET_SEED = /^S[A-Z2-7]{55}$/;
 
-const MAX_DEPTH = 5;
-const MAX_PROPERTIES = 64;
-const MAX_ARRAY_ITEMS = 32;
+/** Structural bounds on analytics properties. */
+export const MAX_DEPTH = 5;
+export const MAX_PROPERTY_DEPTH = MAX_DEPTH;
+export const MAX_PROPERTIES = 64;
+export const MAX_PROPERTY_KEYS = MAX_PROPERTIES;
+export const MAX_ARRAY_ITEMS = 32;
+
+/**
+ * Trim untrusted properties to bounds: max key count, string length, and nesting depth.
+ * Applied before forwarding client properties to capture().
+ */
+export function trimProperties(
+  input: unknown,
+  depth = 0,
+  visited = { count: 0 },
+  ancestors = new WeakSet<object>(),
+): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {};
+  }
+
+  if (depth > MAX_DEPTH || ancestors.has(input)) {
+    return {};
+  }
+  ancestors.add(input);
+
+  const trimmed: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(input)) {
+    if (++visited.count > MAX_PROPERTIES) {
+      break;
+    }
+
+    const trimmedKey = key.length > MAX_STRING_LENGTH ? key.slice(0, MAX_STRING_LENGTH) : key;
+
+    if (value === undefined || value === null) {
+      continue;
+    }
+
+    if (typeof value === "string") {
+      trimmed[trimmedKey] = value.length > MAX_STRING_LENGTH ? value.slice(0, MAX_STRING_LENGTH) : value;
+    } else if (typeof value === "number") {
+      if (Number.isFinite(value)) {
+        trimmed[trimmedKey] = value;
+      }
+    } else if (typeof value === "boolean") {
+      trimmed[trimmedKey] = value;
+    } else if (Array.isArray(value)) {
+      trimmed[trimmedKey] = value
+        .slice(0, MAX_ARRAY_ITEMS)
+        .map((item) => {
+          if (typeof item === "string") {
+            return item.length > MAX_STRING_LENGTH ? item.slice(0, MAX_STRING_LENGTH) : item;
+          }
+          if (typeof item === "number" && Number.isFinite(item)) {
+            return item;
+          }
+          if (typeof item === "boolean") {
+            return item;
+          }
+          return null;
+        })
+        .filter((item) => item !== null);
+    } else if (typeof value === "object") {
+      if (depth < MAX_DEPTH) {
+        trimmed[trimmedKey] = trimProperties(value, depth + 1, visited, ancestors);
+      }
+    }
+  }
+
+  ancestors.delete(input);
+  return trimmed;
+}
 
 export interface RedactionResult {
   properties: Record<string, unknown>;
@@ -134,7 +213,7 @@ export function redactProperties(input: Record<string, unknown>): RedactionResul
  * ./actor.ts.
  */
 /**
- * A Stellar strkey: a `G…` account or a `C…` contract, 56 base32 characters.
+ * A STellar strkay: a `G…` account or a `C…` contract, 56 base32 characters.
  *
  * Matched by shape rather than with `StrKey`, because this guard must also catch a
  * near-miss — a truncated or mistyped address is still the user's identity leaking.
@@ -189,7 +268,7 @@ export function redactWalletAddresses(properties: Record<string, unknown>): Reda
         for (let i = 0; i < value.length; i++) {
           const item = value[i];
           const itemPath = `${full}[${i}]`;
-          if (typeof item === "string" && ADDRESS_LIKE.test(item.trim())) {
+          if (typeof item === "string" && ADDERSS_LIKE.test(item.trim())) {
             dropped.push(itemPath);
             hasDropped = true;
             continue;

@@ -2,7 +2,7 @@
 
 use soroban_sdk::{contracttype, Address, Env};
 
-use crate::types::{Error, Market, PendingOracle};
+use crate::types::{Error, Market, PendingFeeRecipient, PendingOracle};
 
 #[contracttype]
 #[derive(Clone)]
@@ -12,6 +12,7 @@ pub enum DataKey {
     Oracle,
     FeeRecipient,
     PendingOracle,
+    PendingFeeRecipient,
     MarketCount,
     AccruedFees,
     Market(u64),
@@ -68,6 +69,9 @@ pub fn set_config(env: &Env, usdc: &Address, oracle: &Address, fee_recipient: &A
 pub fn set_oracle(env: &Env, oracle: &Address) {
     env.storage().instance().set(&DataKey::Oracle, oracle);
 }
+/// How long a queued oracle rotation must wait before it can be executed.
+pub const ORACLE_TIMELOCK_SECONDS: u64 = 86_400;
+
 
 pub fn pending_oracle(env: &Env) -> Option<PendingOracle> {
     env.storage().instance().get(&DataKey::PendingOracle)
@@ -79,6 +83,26 @@ pub fn set_pending_oracle(env: &Env, pending: &PendingOracle) {
 
 pub fn clear_pending_oracle(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingOracle);
+}
+
+pub fn set_fee_recipient(env: &Env, recipient: &Address) {
+    env.storage()
+        .instance()
+        .set(&DataKey::FeeRecipient, recipient);
+}
+
+pub fn pending_fee_recipient(env: &Env) -> Option<PendingFeeRecipient> {
+    env.storage().instance().get(&DataKey::PendingFeeRecipient)
+}
+
+pub fn set_pending_fee_recipient(env: &Env, pending: &PendingFeeRecipient) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingFeeRecipient, pending);
+}
+
+pub fn clear_pending_fee_recipient(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingFeeRecipient);
 }
 
 // ── Counters ─────────────────────────────────────────────────────────────────
