@@ -24,6 +24,7 @@ import { readClaimRaw } from "@/lib/contract";
 import { toClaimOnChain } from "@/agents/council/shared/types";
 import { evaluateClaimAsPersona } from "@/agents/council/shared/persona-llm";
 import { fetchEvidence } from "@/lib/server/evidence-fetcher";
+import { parseHistory } from "@/lib/council/history";
 import type { ClaimOnChain } from "@/agents/council/shared/types";
 
 const MAX_EVIDENCE_CHARS = 8_000;
@@ -36,32 +37,13 @@ function personaAddress(ctx: HTTPRequestContext): string {
   return payTo;
 }
 
-/**
- * Optional `history` param: prior jurors' reports for sequential
- * (self-resolving) voting. URL-encoded JSON array of strings; anything
- * malformed degrades to an empty history rather than failing the vote.
- */
-function parseHistory(raw: string | null): string[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((entry): entry is string => typeof entry === "string")
-      .slice(0, 8)
-      .map((entry) => entry.slice(0, 300));
-  } catch {
-    return [];
-  }
-}
-
 async function handler(req: NextRequest): Promise<NextResponse> {
   const { searchParams } = req.nextUrl;
   const claimId = Number(searchParams.get("claimId"));
   const slug = (searchParams.get("persona") ?? "").toLowerCase().trim();
   const history = parseHistory(searchParams.get("history"));
 
-  // A handler error means no settlement, so an unservable request costs nothing.
+  // A handler error means no settlement, so an unservicable request costs nothing.
   const persona = getPersonaBySlug(slug);
   if (!persona) return NextResponse.json({ error: `unknown persona '${slug}'` }, { status: 400 });
   if (!persona.promptBias) {
