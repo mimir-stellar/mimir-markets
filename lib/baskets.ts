@@ -145,6 +145,8 @@ export interface NavMember {
   mode: string;
   paused?: boolean;
   stale?: boolean;
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
 }
 export interface BasketReturnPoint { timestamp: number; returnsBps: Record<string, number> }
 export interface BasketPolicy { maxSingleAgentBps: number; maxCategoryBps: number; staleSignalAction: "skip" | "pause"; failedCopyAction: "keep_idle" | "pause" }
@@ -178,10 +180,6 @@ export interface BasketExposurePreview {
   agentBars: BasketExposureBar[];
   errors: string[];
   policy: BasketPolicy;
-}
-
-  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
-  returns: number[];
 }
 
 /**
