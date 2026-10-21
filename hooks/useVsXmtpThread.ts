@@ -183,13 +183,13 @@ export function useVsXmtpThread({
       await d.sync();
       const next = await loadThreadMessages(d);
       setMessages(next);
-      // A fresh that lands proves the transport is alive again, so the
+      // A refresh that lands proves the transport is alive again, so the
       // "messages may be stale" notice from a dead stream no longer applies.
       setStreamFailure(null);
       // Viewing the thread counts as reading it.
       markCurrentThreadRead();
     } catch (e) {
-      const { kind, message } = classifyXMtpThreadError(e);
+      const { kind, message } = classifyXmtpThreadError(e);
       if (isNonFatalSyncNotice(message)) {
         return;
       }

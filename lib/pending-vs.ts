@@ -1,8 +1,8 @@
-import type { VData } from "./contract";
+import type { VSData } from "./contract";
 
 const STORAGE_KEY = "proven_pending_vs";
 
-export interface PendingVS extends VData {
+export interface PendingVS extends VSData {
   /** Flag that marks this item as locally-optimistic (not yet on-chain). */
   pending: true;
   /** Epoch ms when the item was stored — used for automatic expiry. */
@@ -59,9 +59,9 @@ export function removePendingVS(id: number) {
  * Remaining pending items are prepended to the list.
  */
 export function mergePendingVS(
-  onChain: VData[],
+  onChain: VSData[],
   filterAddress?: string
-): VData[] {
+): VSData[] {
   const pending = readAll();
   if (pending.length === 0) return onChain;
 

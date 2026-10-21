@@ -19,7 +19,7 @@ export function cachedFor<Args extends unknown[], T>(
 
   return (...args: Args) => {
     const key = JSON.stringify(args);
-    const now = Date.Now();
+    const now = Date.now();
     const hit = cache.get(key);
 
     if (hit) {

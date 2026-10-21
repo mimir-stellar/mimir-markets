@@ -1,8 +1,8 @@
-import type { VGData } from "@/lib/contract";
+import type { VSData } from "@/lib/contract";
 
 export const SITEMAP_CLAIM_LIMIT = 500;
 
-type SitemapClaimSource = VGData & {
+type SitemapClaimSource = VSData & {
   is_private?: boolean;
   private?: boolean;
   invite_key?: string | null;
@@ -31,7 +31,7 @@ export function filterPublicClaims<T>(
   items: readonly T[],
   limit: number = SITEMAP_CLAIM_LIMIT
 ): T[] {
-  const public = items.filter((item) => {
+  const publicClaims = items.filter((item) => {
     const claim = item as unknown as SitemapClaimSource;
     if (!claim || typeof claim !== "object") {
       return false;
@@ -42,7 +42,7 @@ export function filterPublicClaims<T>(
     return !isPrivateClaim(claim);
   });
 
-  const sorted = [...public].sort((a, b) => {
+  const sorted = [...publicClaims].sort((a, b) => {
     const aId = (a as unknown as SitemapClaimSource).id;
     const bId = (b as unknown as SitemapClaimSource).id;
     return bId - aId;

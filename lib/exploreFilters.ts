@@ -1,4 +1,4 @@
-import type { VData } from "@/lib/contract";
+import type { VSData } from "@/lib/contract";
 import { CATEGORIES } from "@/lib/constants";
 import { computeClaimQuality } from "@/lib/claimQuality";
 import { assessUnderdog, compareByUpside, isChallengerUnderdog } from "@/lib/underdog";

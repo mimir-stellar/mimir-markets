@@ -182,6 +182,18 @@ jobs:
         run: npm ci
       - if: matrix.name == 'release'
         run: npm run verify:artifacts -- --require-built
+      # Only the release build is what `npm run deploy:contract` would ship; keep
+      # it so a reviewer can compare hashes without building locally. Uploading
+      # before the drift guard also means a run that fails that guard still
+      # carries the wasm, which is the only place `sdk/contracts/` can be
+      # regenerated from when the reviewer has no Rust toolchain.
+      - if: matrix.name == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm-release
+          path: contracts-soroban/target/wasm32v1-none/release/*.wasm
+          if-no-files-found: error
+          retention-days: 14
       # Bindings drift guard: compare the contract spec embedded in the committed
       # sdk/contracts/* bindings with the spec inside the freshly built release
       # wasm, and fail on any difference. A contract signature change without
@@ -191,15 +203,6 @@ jobs:
       - if: matrix.name == 'release'
         name: check generated contract bindings are up to date
         run: npm run check:bindings -- --wasm-dir contracts-soroban/target/wasm32v1-none/release
-      # Only the release build is what `npm run deploy:contract` would ship; keep
-      # it so a reviewer can compare hashes without building locally.
-      - if: matrix.name == 'release'
-        uses: actions/upload-artifact@v4
-        with:
-          name: contract-wasm-release
-          path: contracts-soroban/target/wasm32v1-none/release/*.wasm
-          if-no-files-found: error
-          retention-days: 14
 
   browser-smoke:
     runs-on: ubuntu-latest

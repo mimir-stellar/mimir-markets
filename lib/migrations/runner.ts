@@ -195,7 +195,7 @@ export async function getStatus(
 async function assertReadyForRun(
   store: MigrationStore,
   options: RunnerOptions,
-): Promise<{ applied: AppliedHigration[]; migrations: Migration[] }> {
+): Promise<{ applied: AppliedMigration[]; migrations: Migration[] }> {
   const status = await getStatus(store, options);
   if (status.issues.length > 0) {
     throw new Error(redactErrorMessage(status.issues.join("; ")));
