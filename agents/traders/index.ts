@@ -20,6 +20,7 @@
  * Env: TRADER_<NAME>_SECRET, GROQ_API_KEY, DATABASE_URL,
  *      NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID, NEXT_PUBLIC_STELLAR_RPC_URL
  *      TRADER_POLL_INTERVAL_MS=900000  (poll cadence, default 15m)
+ *      TRADER_POLL_JITTER_MS=90000     (± spread per cycle, default 10%; 0 = fixed)
  *      TRADER_MAX_STAKES_PER_CYCLE=1   (stakes per trader per cycle)
  *      TRADER_DRY_RUN=1                (decide and log, stake nothing)
  */
@@ -50,6 +51,7 @@ import {
   describeBackoffError,
   withBackoff,
 } from "../../lib/ops/backoff-policies";
+import { resolvePollJitterMs } from "../../lib/ops/poll-jitter";
 import { AUTHORITY_LEVELS, defaultLimits, REGISTRY_SCHEMA_VERSION, type AgentRecord } from "../../lib/agents/registry";
 import { loadAgent, saveAgent } from "../../lib/agents/store";
 import { getClaimsByFilter, getChallengersByClaimId } from "../../lib/db";
@@ -57,6 +59,8 @@ import { TRADER_PERSONAS, isTraderVerdict, shouldStake, type TraderPersona, type
 import { filterJoinableClaims } from "./policy";
 
 const POLL_INTERVAL_MS = Number(process.env.TRADER_POLL_INTERVAL_MS ?? "900000");
+// ± around each cycle; unset = 10% of the interval, 0 = fixed scheduling.
+const POLL_JITTER_MS = resolvePollJitterMs(POLL_INTERVAL_MS, process.env.TRADER_POLL_JITTER_MS);
 const MAX_STAKES_PER_CYCLE = Number(process.env.TRADER_MAX_STAKES_PER_CYCLE ?? "1");
 const DRY_RUN = process.env.TRADER_DRY_RUN === "1";
 /**
@@ -334,11 +338,17 @@ async function main(): Promise<void> {
   console.log(`  Traders    : ${TRADER_PERSONAS.map((p) => p.agentId).join(", ")}`);
   console.log(`  Stake      : ${TRADER_PERSONAS[0].stakeUsdc} USDC · max ${MAX_STAKES_PER_CYCLE}/cycle each`);
   console.log(`  Poll every : ${POLL_INTERVAL_MS / 1000}s${DRY_RUN ? " · DRY RUN" : ""}`);
+  console.log(`  Poll jitter: ±${(POLL_JITTER_MS / 1000).toFixed(1)}s`);
   console.log("═══════════════════════════════════════════════\n");
 
   void randomUUID; // reserved for per-cycle correlation ids
   const safePoll = () => reportingPoll("traders", "traders", POLL_INTERVAL_MS / 1000, poll);
-  await runWorkerLoop({ worker: "traders", intervalMs: POLL_INTERVAL_MS, cycle: safePoll });
+  await runWorkerLoop({
+    worker: "traders",
+    intervalMs: POLL_INTERVAL_MS,
+    jitterMs: POLL_JITTER_MS,
+    cycle: safePoll,
+  });
 }
 
 main().catch((err) => {

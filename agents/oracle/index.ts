@@ -42,6 +42,7 @@
  *      ORACLE_LLM_THROTTLE_MS=0 (min ms between LLM calls; raise to stay
  *                                under free-tier RPM, e.g. 5000 ≈ 12 RPM)
  *      ORACLE_POLL_INTERVAL_MS=60000 (poll cadence in ms, default 60s)
+ *      ORACLE_POLL_JITTER_MS=6000   (± spread per cycle, default 10%; 0 = fixed)
  */
 
 // Worker-scoped Gemini key. When ORACLE_GEMINI_API_KEY is set we override the
@@ -89,6 +90,7 @@ import {
 } from "../../lib/stellar";
 import { fetchWithBudget, payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
+import { resolvePollJitterMs } from "../../lib/ops/poll-jitter";
 import { isPaused, pauseState } from "../../lib/ops/flags";
 import {
   DependencyFailureError,
@@ -132,6 +134,8 @@ import { RiskManager } from "../../lib/oracle-risk";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
+// ± around each cycle; unset = 10% of the interval, 0 = fixed scheduling.
+const POLL_JITTER_MS        = resolvePollJitterMs(POLL_INTERVAL_MS, process.env.ORACLE_POLL_JITTER_MS);
 const MAX_CONTENT_CHARS     = 8_000;
 const CONTRACT_ID           = requireMarketContractId();
 const AUTO_CHALLENGE        = process.env.AUTO_CHALLENGE === "1";
@@ -952,6 +956,7 @@ async function main(): Promise<void> {
     console.warn(`[oracle] settlement retry config: ${warning}`);
   }
   console.log(`  Poll every : ${POLL_INTERVAL_MS / 1000}s`);
+  console.log(`  Poll jitter: ±${(POLL_JITTER_MS / 1000).toFixed(1)}s`);
   console.log(`  Auto-challenge: ${AUTO_CHALLENGE ? `YES (≥${CHALLENGE_CONFIDENCE}% confidence, ${CHALLENGE_STAKE_USDC} USDC/claim)` : "OFF (set AUTO_CHALLENGE=1 to enable)"}`);
   console.log("═══════════════════════════════════════════════\n");
 
@@ -959,7 +964,12 @@ async function main(): Promise<void> {
   // failing on /api/health rather than merely stale.
   const safePoll = () => reportingPoll("oracle", "oracle", POLL_INTERVAL_MS / 1000, poll);
 
-  await runWorkerLoop({ worker: "oracle", intervalMs: POLL_INTERVAL_MS, cycle: safePoll });
+  await runWorkerLoop({
+    worker: "oracle",
+    intervalMs: POLL_INTERVAL_MS,
+    jitterMs: POLL_JITTER_MS,
+    cycle: safePoll,
+  });
 }
 
 main().catch((err) => {

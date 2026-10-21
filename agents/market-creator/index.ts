@@ -26,6 +26,7 @@
  *      MAX_CLAIMS_PER_RUN=5      (max new claims per run, default 5)
  *      MAX_ACTIVE_CLAIMS=30      (skip run if joinable on-chain claims >= this)
  *      RUN_INTERVAL_HOURS=6      (hours between runs, default 6h)
+ *      MARKET_CREATOR_POLL_JITTER_MS=2160000 (± spread per run, default 10%)
  *      MARKET_CREATOR_MAX_PER_CATEGORY_MARKETS=5      (open markets per category)
  *      MARKET_CREATOR_MAX_PER_CATEGORY_EXPOSURE_USDC=100 (open USDC per category)
  *      MARKET_CREATOR_CATEGORY_CAPS={"crypto":{"maxMarkets":3,"maxExposureUsdc":40}}
@@ -56,6 +57,7 @@ import {
 } from "../../lib/stellar";
 import { payingWalletFor } from "../../lib/x402/buyer";
 import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
+import { resolvePollJitterMs } from "../../lib/ops/poll-jitter";
 import { isCategoryEnabled } from "../../lib/ops/flags";
 import { unitsToUsdc } from "../../lib/usdc";
 import { gatherCouncilPreflight } from "./council-preflight";
@@ -94,6 +96,9 @@ const CREATOR_STAKE_USDC = Number(
 const MAX_CLAIMS_PER_RUN  = Number(process.env.MAX_CLAIMS_PER_RUN ?? "5");
 const MAX_ACTIVE_CLAIMS   = Number(process.env.MAX_ACTIVE_CLAIMS ?? "30");
 const RUN_INTERVAL_HOURS  = Number(process.env.RUN_INTERVAL_HOURS ?? "6");
+const RUN_INTERVAL_MS     = RUN_INTERVAL_HOURS * 3600 * 1000;
+// ± around each run; unset = 10% of the interval, 0 = fixed scheduling.
+const POLL_JITTER_MS      = resolvePollJitterMs(RUN_INTERVAL_MS, process.env.MARKET_CREATOR_POLL_JITTER_MS);
 // Creator open-exposure ceiling (USDC). Parsed explicitly so a bad env value
 // fails closed instead of disabling the funded-state safety rail.
 const _exposurePolicy = parseExposureCapPolicy(process.env);
@@ -1333,6 +1338,7 @@ async function main(): Promise<void> {
   console.log(`  Create gap : ${CREATE_DELAY_MS / 1000}s`);
   console.log(`  Cancel gap : ${CANCEL_DELAY_MS / 1000}s`);
   console.log(`  Interval   : every ${RUN_INTERVAL_HOURS}h`);
+  console.log(`  Run jitter : ±${(POLL_JITTER_MS / 1000).toFixed(0)}s`);
   console.log("═══════════════════════════════════════════════\n");
 
   const safeRun = () =>
@@ -1341,8 +1347,9 @@ async function main(): Promise<void> {
     });
 
   await runWorkerLoop({
-    worker: "market-creator",
-    intervalMs: RUN_INTERVAL_HOURS * 3600 * 1000,
+    worker: "market_creator",
+    intervalMs: RUN_INTERVAL_MS,
+    jitterMs: POLL_JITTER_MS,
     cycle: safeRun,
   });
 }
