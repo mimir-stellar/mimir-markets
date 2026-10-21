@@ -34,7 +34,12 @@ jobs:
         # fallback) — that is the fail-closed signal, surfaced by the next step.
         continue-on-error: true
         env:
-          BEFORE: ${{ github.event.before }}
+          # For a pull request the change set is the whole branch against its
+          # base. `github.event.before` is the *previous head* of the PR branch,
+          # so using it here would classify only the newest push: paths that
+          # enabled a tier earlier would vanish from the diff, and a file the
+          # branch deletes from the base would look like an unknown addition.
+          BEFORE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: |
           args=""
           if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
