@@ -182,22 +182,15 @@ jobs:
         run: npm ci
       - if: matrix.name == 'release'
         run: npm run verify:artifacts -- --require-built
-      # Bindings drift guard: regenerate sdk/contracts/* from the freshly built
-      # wasm with the pinned stellar-cli and fail if the committed bindings
-      # differ. A contract signature change without regenerated bindings fails
-      # here instead of at runtime as a simulation error. Offline: no network,
-      # no secrets. See docs/CONTRACT_TOOLCHAINS.md for the regenerate command.
+      # Bindings drift guard: compare the contract spec embedded in the committed
+      # sdk/contracts/* bindings with the spec inside the freshly built release
+      # wasm, and fail on any difference. A contract signature change without
+      # regenerated bindings fails here instead of at runtime as a simulation
+      # error. Offline: no network, no external generator, no secrets.
+      # See docs/CONTRACT_TOOLCHAINS.md for how to regenerate.
       - if: matrix.name == 'release'
         name: check generated contract bindings are up to date
-        run: |
-          set -euo pipefail
-          npx --yes @stellar/stellar-cli@22.8.1 contract bindings typescript \
-            --wasm contracts-soroban/target/wasm32v1-none/release/mimir_market.wasm \
-            --output-dir sdk/contracts/mimir-market --overwrite
-          npx --yes @stellar/stellar-cli@22.8.1 contract bindings typescript \
-            --wasm contracts-soroban/target/wasm32v1-none/release/mimir_squad.wasm \
-            --output-dir sdk/contracts/mimir-squad --overwrite
-          git diff --exit-code sdk/contracts
+        run: npm run check:bindings -- --wasm-dir contracts-soroban/target/wasm32v1-none/release
       # Only the release build is what `npm run deploy:contract` would ship; keep
       # it so a reviewer can compare hashes without building locally.
       - if: matrix.name == 'release'

@@ -13,7 +13,7 @@ they disagree.
 ## What each CI entry means
 
 - `contracts (msrv)`: the contracts still build and pass on the oldest supported rustc. A failure here means a change used a newer language or library feature. Either avoid it, or raise the MSRV on purpose (see below).
-- `contracts (release)`: the toolchain deployed wasm is built with. The job writes each wasm's sha256 to the run summary and uploads the files as the `contract-wasm-release` artifact (kept 14 days). A reviewer can compare those hashes against `verify:deployment` output without installing Rust. It also regenerates the TypeScript bindings from the built wasm and fails when `sdk/contracts/*` is out of date (see below).
+- `contracts (release)`: the toolchain deployed wasm is built with. The job writes each wasm's sha256 to the run summary and uploads the files as the `contract-wasm-release` artifact (kept 14 days). A reviewer can compare those hashes against `verify:deployment` output without installing Rust. It also checks the committed bindings against the built wasm and fails when `sdk/contracts/*` no longer describes the contract (see below).
 - `contracts (stable)`: an early warning for the next Rust release. It doesn't change what gets deployed. A failure means the next release-pin bump needs work first; it is not a reason to bump the pin.
 
 The matrix uses `fail-fast: false`, so one failing entry never hides the others. We suggest maintainers make `verify`, `contracts (msrv)` and `contracts (release)` required checks. `contracts (stable)` can break without anyone touching this repo, when a new Rust ships, so it stays advisory.
@@ -41,18 +41,19 @@ Against the live testnet deployment (requires the deployed contract ids in your 
 npm run stellar:bindings
 ```
 
-Against local wasm builds (no network access or secrets, this is what CI runs):
+Against local wasm builds (no network, no secrets, no extra tool to install — this is what CI runs):
 
 ```bash
 # Build the wasm with the release toolchain first.
 cargo build --release --locked --target wasm32v1-none --manifest-path contracts-soroban/Cargo.toml
-npx tsx scripts/check-binding-drift.ts --wasm-dir target/wasm32v1-none/release --write
-git diff --exit-code sdk/contracts
+npm run check:bindings
 ```
 
-The generator is `stellar contract bindings`, pinned to a specific `stellar-cli` release in the contracts job. To check without writing, drop `--write; the script exits non-zero and lists the files that differ.
+`npm run check:bindings` (`scripts/check-binding-drift.ts`) compares the spec the committed bindings were generated from with the spec of the built contract. Both sides carry the same data: generated `src/index.ts` hands `new ContractSpec([...])` an array of base64 `ScSpecEntry` XDR, and the wasm holds those entries in its `contractspecv0` custom section. The check decodes them with `@stellar/stellar-sdk`, the package the bindings already import, so nothing outside `npm ci` is needed. It exits non-zero and names every entry that is missing, stale or changed, and it fails closed: an unbuilt wasm, a bindings file with no readable spec, or an entry that will not decode are errors, never skips.
 
-`Binding drift` is checked separately by `scripts/check-binding-drift.ts`, which regenerates `sdk/contracts/*` from the release wasm and compares the result against the committed files. It needs no network access or secrets.
+Comparing specs rather than files is what makes the check runnable in CI at all — a byte-for-byte regeneration would need the same generator that produced the committed packages, and that one runs against the live deployment. It also means the check says nothing about the deployed contract id each package embeds; regenerating that is `npm run stellar:bindings`, and it stays a local step.
+
+`tests/node/binding-drift.test.ts` pins the four findings, the fail-closed cases, and the round trip through the repo's own committed bindings.
 
 ## Changing a version
 
