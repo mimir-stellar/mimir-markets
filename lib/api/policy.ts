@@ -26,6 +26,7 @@
  *    endpoint.
  */
 
+import { WeakSecretError, assertStrongSecret } from "../ops/secrets";
 import { apiError, type ApiErrorCode, type ApiErrorResult } from "./errors";
 import { consume, DEFAULT_RULES, type LimitRule, type RateLimitKeys } from "./rate-limit";
 
@@ -171,6 +172,16 @@ export function authorizeRequest(
     // An unset secret refuses rather than waves everyone through: a deploy that
     // forgets it must fail closed, not open.
     if (!expected) return refuse("forbidden", "worker secret is not configured");
+    // A short or placeholder CRON_SECRET is a production misconfiguration, not a
+    // caller problem. Refuse with the variable named instead of throwing a 500
+    // from deep inside the check. Outside production this only warns, so the
+    // CI value (`mimir-ci-coverage-test`) keeps working.
+    try {
+      assertStrongSecret("CRON_SECRET", expected);
+    } catch (error) {
+      if (error instanceof WeakSecretError) return refuse("forbidden", error.message);
+      throw error;
+    }
     const presented = ctx.presentedSecret?.trim() ?? "";
     if (!presented || !secretsMatch(presented, expected)) {
       return refuse("unauthenticated", "invalid worker credentials");
