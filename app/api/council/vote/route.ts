@@ -19,7 +19,7 @@ import { tracedRoute } from "@/lib/ops/trace-http";
 import type { HTTPRequestContext } from "@x402/core/http";
 import { PRICES } from "@/lib/x402/config";
 import { getPersonaBySlug } from "@/agents/council/personas";
-import { getCouncilAddress } from "@/lib/agent-wallets";
+import { councilPayoutRefusal, resolveCouncilPayout } from "@/lib/ops/council-payouts";
 import { readClaimRaw } from "@/lib/contract";
 import { toClaimOnChain } from "@/agents/council/shared/types";
 import { evaluateClaimAsPersona } from "@/agents/council/shared/persona-llm";
@@ -31,9 +31,24 @@ const MAX_EVIDENCE_CHARS = 8_000;
 /** Recipient of this vote's fee — the juror itself, not the platform. */
 function personaAddress(ctx: HTTPRequestContext): string {
   const slug = queryParam(ctx, "persona").toLowerCase().trim();
-  const payTo = getCouncilAddress(slug);
-  if (!payTo) throw new Error(`persona '${slug}' has no wallet configured`);
-  return payTo;
+  const payout = resolveCouncilPayout(slug);
+  if (!payout.ok) throw new Error(payout.reason);
+  return payout.address;
+}
+
+/**
+ * Refuse to quote a 402 for a persona whose payout address failed validation.
+ * An unknown persona stays the handler's 400 — there is no address to validate.
+ */
+function personaQuotable(req: NextRequest): NextResponse | null {
+  const slug = (req.nextUrl.searchParams.get("persona") ?? "").toLowerCase().trim();
+  if (!getPersonaBySlug(slug)) return null;
+  const refusal = councilPayoutRefusal(slug);
+  if (!refusal) return null;
+  return NextResponse.json(refusal.body, {
+    status: refusal.status,
+    headers: { "Cache-Control": "no-store" },
+  });
 }
 
 /**
@@ -72,10 +87,18 @@ async function handler(req: NextRequest): Promise<NextResponse> {
   if (!Number.isInteger(claimId) || claimId < 1) {
     return NextResponse.json({ error: "claimId must be a positive integer" }, { status: 400 });
   }
-  const payTo = getCouncilAddress(slug);
-  if (!payTo) {
-    return NextResponse.json({ error: `persona '${slug}' has no wallet configured` }, { status: 503 });
+  const payout = resolveCouncilPayout(slug);
+  if (!payout.ok) {
+    return NextResponse.json(
+      {
+        error: payout.reason,
+        code: "payment_recipient_unavailable",
+        variable: payout.variable,
+      },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
   }
+  const payTo = payout.address;
 
   // Read the claim from chain. One `get_claim` through the generated bindings,
   // which returns a NAMED struct — the positional-tuple decoder this used to go
@@ -137,4 +160,10 @@ async function handler(req: NextRequest): Promise<NextResponse> {
 // `tracedRoute` is the outermost wrapper, so a 402 that never reached the handler
 // is still traced: the oracle's buy-a-vote cycle and the web request it made share
 // one id, and the response carries it. See docs/TRACE_CORRELATION.md.
-export const GET = tracedRoute("api.council.vote", paidRoute("councilVote", handler, { payTo: personaAddress }));
+export const GET = tracedRoute(
+  "api.council.vote",
+  paidRoute("councilVote", handler, {
+    payTo: personaAddress,
+    beforeQuote: personaQuotable,
+  }),
+);
