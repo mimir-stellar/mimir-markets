@@ -1,6 +1,6 @@
 /// Typed contract events, mirroring the `event` declarations in MimirSquad.sol.
 
-use soroban_sdk:{contractevent, Address, String};
+use soroban_sdk::{contractevent, Address, String};
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

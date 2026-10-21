@@ -349,6 +349,15 @@ impl MimirMarket {
         storage::withdrawable(&env, &who)
     }
 
+    /// One balance per input address, in input order; unseen addresses read `0`.
+    /// Over-sized batches are rejected before any storage read.
+    pub fn get_withdrawable_batch(
+        env: Env,
+        addrs: Vec<Address>,
+    ) -> Result<Vec<i128>, Error> {
+        storage::get_withdrawable_batch(&env, addrs)
+    }
+
     pub fn get_accrued_fees(env: Env, who: Address) -> i128 {
         storage::accrued_fees(&env, &who)
     }

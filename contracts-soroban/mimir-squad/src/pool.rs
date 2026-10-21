@@ -6,13 +6,11 @@ use crate::escrow;
 use crate::events;
 use crate::storage;
 use crate::types::{
-    ClaimResult, Error, Market, PendingOracle, BPS_DIVISOR, MAX_DURATION, MAX_FEE_BPS,
-    MAX_PARTICIPANTS_PER_SIDE, MAX_QUESTION_BYTES, MAX_SQUAD_MEMBERS, MIN_DURATION,
-    ORACLE_TIMELOCK_SECONDS, RESULT_CANCELLED, SIDE_A, SIDE_B,
+    ClaimResult, Error, Market, PendingFeeRecipient, PendingOracle, BPS_DIVISOR,
+    FEE_RECIPIENT_TIMELOCK_SECONDS, MAX_DURATION, MAX_FEE_BPS, MAX_PARTICIPANTS_PER_SIDE,
+    MAX_QUESTION_BYTES, MAX_SQUAD_MEMBERS, MIN_DURATION, ORACLE_TIMELOCK_SECONDS,
+    RESULT_CANCELLED, SIDE_A, SIDE_B,
 };
-
-#[cfg(test)]
-mod payout_fixtures;
 
 /// The fee on one winning claim: `floor(profit * fee_bps / BPS_DIVISOR)`.
 ///
@@ -734,6 +732,61 @@ pub fn execute_oracle(env: &Env) -> Result<(), Error> {
     storage::set_oracle(env, &queued.next);
     storage::clear_pending_oracle(env);
     events::OracleChanged {
+        next: queued.next,
+        previous,
+    }
+    .publish(env);
+    Ok(())
+}
+
+/// Queue a fee recipient rotation. The current fee recipient must authorize.
+///
+/// Same shape as an oracle rotation: the destination of the profit fee is
+/// timelocked, so depositors can see where fees are headed before they move.
+pub fn queue_fee_recipient(env: &Env, new_recipient: Address) -> Result<(), Error> {
+    storage::fee_recipient(env)?.require_auth();
+    let executable_at = env
+        .ledger()
+        .timestamp()
+        .checked_add(FEE_RECIPIENT_TIMELOCK_SECONDS)
+        .ok_or(Error::Overflow)?;
+
+    storage::set_pending_fee_recipient(
+        env,
+        &PendingFeeRecipient {
+            next: new_recipient.clone(),
+            executable_at,
+        },
+    );
+    events::FeeRecipientQueued {
+        next: new_recipient,
+        executable_at,
+    }
+    .publish(env);
+    Ok(())
+}
+
+pub fn cancel_fee_recipient(env: &Env) -> Result<(), Error> {
+    storage::fee_recipient(env)?.require_auth();
+    if storage::pending_fee_recipient(env).is_none() {
+        return Err(Error::NoFeeRecipientQueued);
+    }
+    storage::clear_pending_fee_recipient(env);
+    events::FeeRecipientCancelled { cancelled: true }.publish(env);
+    Ok(())
+}
+
+/// Permissionless once the timelock has elapsed. Fees already accrued but
+/// unclaimed at execution time are paid to `next`, the new recipient.
+pub fn execute_fee_recipient(env: &Env) -> Result<(), Error> {
+    let queued = storage::pending_fee_recipient(env).ok_or(Error::NoFeeRecipientQueued)?;
+    if env.ledger().timestamp() < queued.executable_at {
+        return Err(Error::Timelocked);
+    }
+    let previous = storage::fee_recipient(env)?;
+    storage::set_fee_recipient(env, &queued.next);
+    storage::clear_pending_fee_recipient(env);
+    events::FeeRecipientChanged {
         next: queued.next,
         previous,
     }

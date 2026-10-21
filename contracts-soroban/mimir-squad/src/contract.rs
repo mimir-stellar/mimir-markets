@@ -6,7 +6,9 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 use crate::escrow;
 use crate::pool;
 use crate::storage;
-use crate::types::{ClaimResult, Error, Market, PendingOracle, MAX_BATCH_SIZE};
+use crate::types::{
+    ClaimResult, Error, Market, PendingFeeRecipient, PendingOracle, MAX_BATCH_SIZE,
+};
 
 #[contract]
 pub struct MimirSquad;
@@ -193,7 +195,7 @@ impl MimirSquad {
         storage::fee_recipient(&env)
     }
 
-    pub fn get_pending_fee_recipient(env: Env) -> Option<Address> {
+    pub fn get_pending_fee_recipient(env: Env) -> Option<PendingFeeRecipient> {
         storage::pending_fee_recipient(&env)
     }
 
