@@ -38,6 +38,7 @@
  *      MARKET_CREATOR_MAX_PER_CATEGORY_MARKETS=5      (open markets per category)
  *      MARKET_CREATOR_MAX_PER_CATEGORY_EXPOSURE_USDC=100 (open USDC per category)
  *      MARKET_CREATOR_CATEGORY_CAPS={"crypto":{"maxMarkets":3,"maxExposureUsdc":40}}
+ *      MARKET_CREATOR_DRY_RUN=1    (full pipeline, log would-be creates, no txs, no x402)
  */
 
 // Worker-scoped Gemini key. Falls back to the shared GEMINI_API_KEY when
@@ -58,6 +59,7 @@ import {
   createClaim as createClaimOnChain,
   getClaimCount,
   readClaimRaw,
+  type CreateClaimParams,
 } from "../../lib/contract";
 import { getCreatorWallet, readAgentBalances } from "../../lib/agent-wallets";
 import { sha256Hex } from "../../lib/content-hash";
@@ -92,6 +94,10 @@ import {
   parseCategoryCapPolicy,
   summariseCreatorCaps,
 } from "../../lib/market-creator/category-caps";
+import {
+  creatorSideEffectPolicy,
+  isMarketCreatorDryRun,
+} from "../../lib/market-creator/dry-run";
 import {
   BackoffError,
   CREATOR_BACKOFF,
@@ -296,6 +302,12 @@ export function cryptoThresholdReason(candidate: ClaimCandidate, event: CryptoEv
 
 async function applyCouncilPreflight(candidates: ClaimCandidate[]): Promise<ClaimCandidate[]> {
   if (!PREFLIGHT_ENABLED || candidates.length === 0) {
+    return candidates;
+  }
+  if (!SIDE_EFFECTS.paidPreflight) {
+    console.log(
+      `[market-creator] DRY_RUN — skipping paid council preflight for ${candidates.length} candidate(s).`,
+    );
     return candidates;
   }
 
@@ -753,6 +765,28 @@ async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
   // fractional deadlineHours, and the contract takes whole seconds.
   const deadline = Math.floor(Date.now() / 1000 + candidate.deadlineHours * 3600);
 
+  const params: CreateClaimParams = {
+    question:              candidate.question,
+    creator_position:      candidate.creatorPosition,
+    counter_position:      candidate.counterPosition,
+    resolution_url:        candidate.resolutionUrl,
+    deadline,
+    stake_amount:          CREATOR_STAKE_USDC,
+    category:              candidate.category,
+    market_type:           candidate.marketType,
+    odds_mode:             "pool",
+    settlement_rule:       candidate.settlementRule,
+    max_challengers:       100,
+    visibility:            "public",
+    agent_owner_recipient: FEE_RECIPIENT,
+  };
+
+  if (!SIDE_EFFECTS.createClaim) {
+    console.log(`[market-creator] DRY_RUN — would call create_claim with:`);
+    console.log(`[market-creator] ${JSON.stringify(params)}`);
+    return "(dry-run)";
+  }
+
   // Check the USDC bankroll. Fees are XLM and separate, so staking cannot strand
   // the creator for fees.
   const balances = await readAgentBalances(CREATOR_ADDR);
@@ -885,6 +919,13 @@ async function sweepAndCount(): Promise<{ cancelled: number; joinable: number; j
     if (claim.creator !== CREATOR_ADDR) continue;
     if (claim.state !== "open") continue;
     if (claim.deadline > now) continue;
+
+    if (!SIDE_EFFECTS.cancelClaim) {
+      console.log(
+        `[market-creator] DRY_RUN — would cancel stale claim #${id} (expired, no challenger)`,
+      );
+      continue;
+    }
 
     console.log(`[market-creator] Cancelling stale claim #${id} (expired, no challenger)`);
     try {
@@ -1198,7 +1239,8 @@ async function run(): Promise<void> {
         `Set MARKET_CREATOR_AUTONOMOUS=1 once review precision has been measured.`,
     );
   } else {
-    console.log(`\n[market-creator] Created ${created}/${approvedCandidates.length} approved markets this run.`);
+    const verb = DRY_RUN ? "Would create" : "Created";
+    console.log(`\n[market-creator] ${verb} ${created}/${approvedCandidates.length} approved markets this run.`);
   }
 }
 
@@ -1228,6 +1270,7 @@ async function main(): Promise<void> {
   console.log(`  Exposure   : ${MAX_OPEN_EXPOSURE_USDC} USDC open-creator ceiling`);
   console.log(`  Cat caps   : ${describeCategoryCapPolicy(CREATOR_POLICY.categoryCaps)}`);
   console.log(`  Preflight  : ${PREFLIGHT_ENABLED ? `on via ${PREFLIGHT_BASE_URL}` : "off"}`);
+  console.log(`  Dry run    : ${DRY_RUN ? "on — no transactions, no x402 payments" : "off"}`);
   console.log(`  Create gap : ${CREATE_DELAY_MS / 1000}s`);
   console.log(`  Cancel gap : ${CANCEL_DELAY_MS / 1000}s`);
   console.log(`  Interval   : every ${RUN_INTERVAL_HOURS}h`);
