@@ -44,7 +44,8 @@ export interface DriftFinding {
   detail: string;
 }
 
-const SPEC_MARKER = "new ContractSpec([";
+/** The Rust CLI aliases `Spec` to `ContractSpec`; the SDK generator does not. */
+const SPEC_MARKERS = ["new ContractSpec([", "new Spec(["];
 
 const ENTRY_LABELS: Record<string, string> = {
   scSpecEntryFunctionV0: "function",
@@ -62,12 +63,13 @@ const ENTRY_LABELS: Record<string, string> = {
  * nothing, and a silent pass is the failure mode the check exists to prevent.
  */
 export function committedSpecEntries(bindings: string): string[] {
-  const start = bindings.indexOf(SPEC_MARKER);
-  if (start < 0) {
+  const marker = SPEC_MARKERS.find((candidate) => bindings.includes(candidate));
+  if (!marker) {
     throw new Error("no `new ContractSpec([...])` argument in the committed bindings");
   }
+  const start = bindings.indexOf(marker);
   const literals: string[] = [];
-  let cursor = start + SPEC_MARKER.length;
+  let cursor = start + marker.length;
   for (;;) {
     while (cursor < bindings.length && /[\s,]/.test(bindings[cursor]!)) cursor += 1;
     const quote = bindings[cursor];

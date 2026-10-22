@@ -980,7 +980,7 @@ export async function queueFeePolicy(
     await marketWriter(signer).queue_fee_policy({
       platform_fee_bps: params.platform_fee_bps,
       agent_owner_fee_bps: params.agent_owner_fee_bps,
-      platform_recipient: params.platform_recipient ?? undefined,
+      platform_recipient: params.platform_recipient ?? null,
     }),
   );
   return write;
@@ -1249,7 +1249,7 @@ export async function challengeClaim(
       challenger: signer.publicKey,
       claim_id: BigInt(claimId),
       stake_amount: usdcToUnits(stakeAmount),
-      invite_key: inviteKey || undefined,
+      invite_key: inviteKey || null,
     }),
   );
   return { ...write, claimId };
@@ -1704,9 +1704,9 @@ function buildCreateParams(p: CreateClaimParams): MimirMarket.CreateParams {
     is_private: p.visibility === "private",
     // `Option<String>`: an empty invite key is `None`, not `Some("")`. Passing an
     // empty string would hash to a real key hash and lock the market to it.
-    invite_key:            p.invite_key ? p.invite_key : undefined,
+    invite_key:            p.invite_key ? p.invite_key : null,
     context_hash:          fromHex32(p.context_hash, "context_hash"),
-    agent_owner_recipient: p.agent_owner_recipient ?? undefined,
+    agent_owner_recipient: p.agent_owner_recipient ?? null,
   };
 }
 

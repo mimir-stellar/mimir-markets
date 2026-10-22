@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
@@ -11,11 +10,12 @@ import {
   committedSpecEntries,
   type DriftFinding,
 } from "../../scripts/lib/binding-drift";
+import { packageSources } from "../../scripts/lib/contract-bindings";
 
 const ROOT = path.resolve(import.meta.dirname, "..", "..");
 
 function committedBindings(contract: string): string {
-  return readFileSync(path.join(ROOT, "sdk", "contracts", contract, "src", "index.ts"), "utf8");
+  return packageSources(path.join(ROOT, "sdk", "contracts", contract, "src"));
 }
 
 function uleb128(value: number): Buffer {

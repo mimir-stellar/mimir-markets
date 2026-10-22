@@ -46,6 +46,7 @@
     "stellar:keys": "tsx --env-file-if-exists=.env.local scripts/stellar-keys.ts",
     "stellar:usdc": "tsx --env-file-if-exists=.env.local scripts/stellar-usdc-faucet.ts",
     "stellar:bindings": "tsx --env-file-if-exists=.env.local scripts/stellar-bindings.ts",
+    "stellar:bindings:local": "tsx scripts/write-contract-bindings.ts",
     "deploy:contract": "tsx --env-file-if-exists=.env.local deploy/deploy.ts",
     "verify:deployment": "tsx --env-file-if-exists=.env.local scripts/verify-deployment.ts",
     "verify:artifacts": "tsx scripts/verify-artifact-provenance.ts",

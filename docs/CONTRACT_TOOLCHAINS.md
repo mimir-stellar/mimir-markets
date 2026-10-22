@@ -35,23 +35,24 @@ Inside this repo, rustup picks `rust-toolchain.toml` over your default toolchain
 
 `sdk/contracts/mimir-market` and `sdk/contracts/mimir-squad` are generated TypeScript bindings consumed by `lib/contract.ts`. When a contract entry point changes, the bindings must be regenerated in the same PR. The `contracts (release)` job enforces this.
 
-Against the live testnet deployment (requires the deployed contract ids in your env):
+Against a local release wasm build (no network, no secrets, no extra tool to install — this is what CI checks, and the route to use after any contract change):
+
+```bash
+# Build the wasm with the release toolchain first.
+cargo build --release --locked --target wasm32v1-none --manifest-path contracts-soroban/Cargo.toml
+npm run stellar:bindings:local
+npm run check:bindings
+```
+
+`scripts/write-contract-bindings.ts` uses the bindings generator that ships inside the pinned `@stellar/stellar-sdk` — the same package the bindings import and the same code path the guard reads — and carries each package's existing `networks` block over, so the deployed contract id survives regeneration.
+
+Against the live testnet deployment (requires the deployed contract ids in your env, and the `stellar` CLI on your PATH):
 
 ```bash
 npm run stellar:bindings
 ```
 
-Against local wasm builds (no network, no secrets, no extra tool to install — this is what CI runs):
-
-```bash
-# Build the wasm with the release toolchain first.
-cargo build --release --locked --target wasm32v1-none --manifest-path contracts-soroban/Cargo.toml
-npm run check:bindings
-```
-
-`npm run check:bindings` (`scripts/check-binding-drift.ts`) compares the spec the committed bindings were generated from with the spec of the built contract. Both sides carry the same data: generated `src/index.ts` hands `new ContractSpec([...])` an array of base64 `ScSpecEntry` XDR, and the wasm holds those entries in its `contractspecv0` custom section. The check decodes them with `@stellar/stellar-sdk`, the package the bindings already import, so nothing outside `npm ci` is needed. It exits non-zero and names every entry that is missing, stale or changed, and it fails closed: an unbuilt wasm, a bindings file with no readable spec, or an entry that will not decode are errors, never skips.
-
-Comparing specs rather than files is what makes the check runnable in CI at all — a byte-for-byte regeneration would need the same generator that produced the committed packages, and that one runs against the live deployment. It also means the check says nothing about the deployed contract id each package embeds; regenerating that is `npm run stellar:bindings`, and it stays a local step.
+`npm run check:bindings` (`scripts/check-binding-drift.ts`) compares the spec the committed bindings were generated from with the spec of the built contract. Both sides carry the same data: generated `src/client.ts` hands `new Spec([...])` an array of base64 `ScSpecEntry` XDR, and the wasm holds those entries in its `contractspecv0` custom section. The check decodes them with `@stellar/stellar-sdk`, so nothing outside `npm ci` is needed. It exits non-zero and names every entry that is missing, stale or changed, and it fails closed: an unbuilt wasm, a package with no readable spec, or an entry that will not decode are errors, never skips.
 
 `tests/node/binding-drift.test.ts` pins the four findings, the fail-closed cases, and the round trip through the repo's own committed bindings.
 

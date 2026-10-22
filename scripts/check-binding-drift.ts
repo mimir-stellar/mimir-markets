@@ -5,20 +5,23 @@
  * A contract entry point that changed without regenerated bindings otherwise
  * fails at runtime as a simulation error; this fails it in CI instead. Offline
  * and secret-free: it reads the built wasm and the committed bindings, nothing
- * else. The bindings themselves are regenerated against the live deployment by
- * `npm run stellar:bindings`.
+ * else. Regenerate with `npm run stellar:bindings:local` (from a wasm build) or
+ * `npm run stellar:bindings` (from the live testnet contracts).
  *
  * Run: npm run check:bindings [-- --wasm-dir <dir>]
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
+import {
+  BINDING_PACKAGES,
+  DEFAULT_WASM_DIR,
+  contractWasmPath,
+  packageSources,
+} from "./lib/contract-bindings";
 import { bindingsSpecEntries, checkBindings, type DriftFinding } from "./lib/binding-drift";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CONTRACTS = ["mimir-market", "mimir-squad"];
-const DEFAULT_WASM_DIR = path.join(ROOT, "contracts-soroban", "target", "wasm32v1-none", "release");
+const ROOT = path.resolve(import.meta.dirname, "..");
 
 function flag(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
@@ -34,9 +37,10 @@ const relative = (file: string) => path.relative(ROOT, file).replace(/\\/g, "/")
 const wasmDir = flag("--wasm-dir", DEFAULT_WASM_DIR);
 
 const findings: DriftFinding[] = [];
-for (const contract of CONTRACTS) {
-  const wasmPath = path.join(wasmDir, `${contract.replace(/-/g, "_")}.wasm`);
-  const bindingsPath = path.join(ROOT, "sdk", "contracts", contract, "src", "index.ts");
+for (const contract of BINDING_PACKAGES) {
+  const wasmPath = contractWasmPath(wasmDir, contract);
+  const srcDir = path.join(ROOT, "sdk", "contracts", contract, "src");
+  const bindings = packageSources(srcDir);
 
   if (!existsSync(wasmPath)) {
     findings.push({
@@ -46,23 +50,20 @@ for (const contract of CONTRACTS) {
     });
     continue;
   }
-  if (!existsSync(bindingsPath)) {
+  if (!bindings) {
     findings.push({
       code: "BINDINGS_NOT_COMMITTED",
       contract,
-      detail: `${relative(bindingsPath)} is missing; regenerate the bindings`,
+      detail: `${relative(srcDir)} has no TypeScript sources; regenerate the bindings`,
     });
     continue;
   }
 
-  const entries = bindingsSpecEntries(readFileSync(bindingsPath, "utf8")).length;
-  const drift = checkBindings({
-    name: contract,
-    wasm: readFileSync(wasmPath),
-    bindings: readFileSync(bindingsPath, "utf8"),
-  });
+  const drift = checkBindings({ name: contract, wasm: readFileSync(wasmPath), bindings });
   if (drift.length === 0) {
-    console.log(`✓ ${contract}: ${entries} spec entries match ${relative(wasmPath)}`);
+    console.log(
+      `✓ ${contract}: ${bindingsSpecEntries(bindings).length} spec entries match ${relative(wasmPath)}`,
+    );
   } else {
     findings.push(...drift);
   }
@@ -75,7 +76,7 @@ if (findings.length > 0) {
   if (findings.some((finding) => !finding.code.startsWith("WASM_"))) {
     console.error(
       "\nThe committed bindings no longer describe the built contract. Regenerate them with\n" +
-        "  npm run stellar:bindings\n" +
+        "  npm run stellar:bindings:local\n" +
         "and commit sdk/contracts/ in the same pull request. See docs/CONTRACT_TOOLCHAINS.md.",
     );
   }

@@ -109,11 +109,11 @@ function smokeCreateParams(deadline: number): CreateParams {
     settlement_rule: "Smoke test only — not for real settlement",
     max_challengers: 100,
     is_private: false,
-    invite_key: undefined,
+    invite_key: null,
     // A real context pack is hashed here in production; a deterministic digest of
     // the nonce keeps each smoke claim distinguishable on chain.
     context_hash: createHash("sha256").update(nonce).digest(),
-    agent_owner_recipient: undefined,
+    agent_owner_recipient: null,
   };
 }
 
@@ -195,7 +195,7 @@ async function smokeMarket(): Promise<void> {
     challenger: oracle,
     claim_id: claimId,
     stake_amount: STAKE,
-    invite_key: undefined,
+    invite_key: null,
   });
   await sendAndUnwrap<void>("challenge_claim", challengeTx);
   console.log("  ✓ challenge accepted");

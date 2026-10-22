@@ -1,21 +1,23 @@
 /**
  * Barrel for the generated Soroban contract bindings.
  *
- * `mimir-market/` and `mimir-squad/` are produced verbatim by
+ * `mimir-market/` and `mimir-squad/` are generated packages: `src/index.ts`
+ * re-exports the typed `Client` from `src/client.ts` and every contract type
+ * from `src/types.ts`, and carries the `networks` block with the deployed
+ * testnet contract id, so `Client` can be constructed without repeating it.
  *
- *   stellar contract bindings typescript \
- *     --contract-id <deployed id> --output-dir sdk/contracts/<name> \
- *     --network testnet --overwrite
+ * Do not hand-edit them — regenerate:
  *
- * (see `npm run stellar:bindings`). Do not hand-edit them — regenerate instead.
- * Each generated package embeds the deployed testnet contract id in its
- * `networks.testnet` export, so `Client` can be constructed without repeating it.
+ *   npm run stellar:bindings:local   # from a release wasm build; keeps `networks`
+ *   npm run stellar:bindings         # from the live testnet contracts (needs the
+ *                                    # Stellar CLI and the deployed ids)
  *
- * The two packages each re-export the whole of `@stellar/stellar-sdk`, so they
- * are namespaced here rather than flattened. Generated `package.json` files pin
- * `@stellar/stellar-sdk@^14`; this repo consumes the TypeScript sources directly
- * against the hoisted `^16` instead of running a nested `npm install`, which
- * keeps exactly one copy of the SDK in the tree.
+ * `npm run check:bindings` fails when the committed packages no longer describe
+ * the built contract, so a contract change cannot ship with stale bindings.
+ *
+ * Generated `package.json` files pin the same `@stellar/stellar-sdk` major this
+ * repo already uses; the sources are consumed directly, without a nested
+ * `npm install`, which keeps exactly one copy of the SDK in the tree.
  */
 export * as MimirMarket from "./mimir-market/src/index";
 export * as MimirSquad from "./mimir-squad/src/index";
