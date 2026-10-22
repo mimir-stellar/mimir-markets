@@ -157,8 +157,8 @@ impl MimirMarket {
 
     // ── Pull payments ────────────────────────────────────────────────────────
 
-    /// Solidity used `msg.sender`; Soroban has no equivalent for a top-level
-    /// call, so the beneficiary is an explicit argument that must authorize.
+    /// The EVM version used `msg.sender`; Soroban has no equivalent for a
+    /// top-level call, so the beneficiary is an explicit argument that must authorize.
     pub fn withdraw(env: Env, who: Address) -> Result<i128, Error> {
         resolve::withdraw(&env, who)
     }
@@ -282,7 +282,7 @@ impl MimirMarket {
 
     /// A paginated window into the challenger roster.
     ///
-    /// Returns up to `limit` entries starting at `offset` (0-based).  
+    /// Returns up to `limit` entries starting at `offset` (0-based).
     /// `limit = 0` returns all entries from `offset` to the end of the roster —
     /// identical to `get_challenger_list` when `offset = 0`.
     ///

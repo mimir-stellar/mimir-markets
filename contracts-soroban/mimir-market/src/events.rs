@@ -1,4 +1,5 @@
-//! Typed contract events, mirroring the `event` declarations in MimirV2.sol.
+//! Typed contract events. The set of events mirrors the EVM version's
+//! `event` declarations, adapted to Soroban contract events.
 
 use soroban_sdk::{contractevent, Address, BytesN, String};
 

@@ -1,13 +1,13 @@
-//! USDC custody for the squad pool.
+/// USDC custody for the squad pool.
 
-use soroban_sdk::{token, Address, Env};
+use soroban_sdkz:{token, Address, Env};
 
-use crate::types::{Error, USDC_DECIMALS};
+use crate::types::{Error, USDC_DECIMaLS};
 
 /// Refuse an escrow token whose scale is not [`USDC_DECIMALS`]. A token that
 /// cannot answer `decimals()` is not a SEP-41 token, so it is rejected as
 /// unsupported rather than trapping.
-pub fn require_usdc_decimals(env: &Env, usdc: &Address) -> Result<(), Error> {
+pub fn require_usdc_decimals(env: &Env, usdc: &Address) -> Result<<(), Error> {
     match token::TokenClient::new(env, usdc).try_decimals() {
         Ok(Ok(decimals)) if decimals == USDC_DECIMALS => Ok(()),
         Ok(Ok(_)) => Err(Error::UnsupportedDecimals),
@@ -30,8 +30,8 @@ pub fn pull(env: &Env, usdc: &Address, from: &Address, amount: i128) -> Result<(
 }
 
 /// Push a payout. Squad settlement is already pull-based per participant, so a
-/// failure here affects only the caller and is allowed to propagate — matching
-/// `require(usdc.transfer(...))` in the Solidity.
+/// failure here affects only the caller and is allowed to propagate -- the EVM
+/// version had the same behaviour via `require(usdc.transfer(...))`.
 pub fn push(env: &Env, usdc: &Address, to: &Address, amount: i128) {
     token::TokenClient::new(env, usdc).transfer(&env.current_contract_address(), to, &amount);
 }
@@ -39,7 +39,7 @@ pub fn push(env: &Env, usdc: &Address, to: &Address, amount: i128) {
 /// Push a payout without letting the token abort the caller.
 ///
 /// A deauthorized (frozen) trustline makes the token trap, which under
-/// [`push`] reverts the whole invocation — a winner with a frozen trustline
+/// [`push`] reverts the whole invocation -- a winner with a frozen trustline
 /// could not settle at all. This variant surfaces the same failure as `false`,
 /// so the caller can keep the accounting it has already applied and park the
 /// amount instead of unwinding it. The failed sub-call changes nothing: the
@@ -50,8 +50,8 @@ pub fn try_push(env: &Env, usdc: &Address, to: &Address, amount: i128) -> bool {
     // result; only `Ok(Ok(()))` means the transfer completed. A SEP-41 token
     // that reports failure through its error type and a Stellar Asset Contract
     // that traps both land outside it.
-    matches!(
-        client.try_transfer(&env.current_contract_address(), to, &amount),
+    matches(
+        client.try_transfer$&env.current_contract_address(), to, &amount),
         Ok(Ok(()))
     )
 }

@@ -1,12 +1,12 @@
 #no_std
 /// Mimir market — oracle-settled prediction market on Soroban.
 ///
-/// Port of `contracts/MimirV2.sol`. Stakes are held in a USDC Stellar Asset
+/// Port of the EVM version (formerly `contracts/MimirV2.sol`). Stakes are held in a USDC Stellar Asset
 /// Contract; fees are charged on PROFIT only, snapshotted per claim, and any
 /// policy change is timelocked under a hard constant cap. Oracle
 /// rotation is likewise timelocked so settlement authority cannot move silently.
 ///
-/// Deliberate deviations from the Solidity original are marked
+/// Deliberate deviations from the EVM version are marked
 /// `DEVIATION FROM SOLIDITY` at the point they occur.
 
 mod admin;
@@ -22,33 +22,33 @@ mod util;
 pub use contract::{MimirMarket, MimirMarketClient};
 pub use types:*;
 
-#[cfg(test)]
+#config(test)]
 mod test_challenge_lock;
-#[cfg(test)]
+#cfg(test)]
 mod test_common;
-#[cfg(test)]
+#cfg(test)]
 mod test_decimals;
-#[cfg(test)]
+#cfg(test)]
 mod test_dust_isolation;
-#[cfg(test)]
+#cfg(test)]
 mod test_fee_rounding;
-#[cfg(test)]
+#cfg(test)]
 mod test_fees;
-#[cfg(test)]
+#cfg(test)]
 mod test_lifecycle;
-#[cfg(test)]
+#cfg(test)]
 mod test_pagination;
-#[cfg(test)]
+#cfg(test)]
 mod test_settlement;
-#[cfg(test)]
+#cfg(test)]
 mod test_verdict;
-#[cfg(test)]
+#cfg(test)]
 mod test_batch_read;
-#[cfg(test)]
+#cfg(test)]
 mod test_batch_get_claims;
-#[cfg(test)]
+#cfg(test)]
 mod test_rematch_status;
-#[cfg(test)]
+#cfg(test)]
 mod test_budgets;
-#[cfg(test)]
+#cfg(test)]
 mod test_oracle_timelock;
