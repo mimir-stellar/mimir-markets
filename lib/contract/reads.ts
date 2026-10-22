@@ -1,4 +1,4 @@
-/**
+/*
  * Read-only contract helpers.
  *
  * Houses the raw contract read paths (single claim and range queries) that
@@ -14,7 +14,7 @@ export interface RawClaim {
   status: number;
   createdAt: bigint;
   expiresAt: bigint;
-  metadataURi?: string;
+  metadataURI?: string;
 }
 
 export interface RawClaimRange {
@@ -23,15 +23,9 @@ export interface RawClaimRange {
   total: number;
 }
 
-/**
- * Maximum number of claims the contract's `get_claims_batch` view returns
- * per call.
- */
-const CLAIMS_BATCH_SIZE = 50;
+const BATCH_SIZE = 50;
 
-const MAX_CONCURRENCY = 5;
-
-let batchViewUnavailable = false;
+let batchViewUnsupported = false;
 
 /**
  * Fetch a single claim by id directly from the contract.
@@ -39,7 +33,7 @@ let batchViewUnavailable = false;
  */
 export async function readClaimRaw(id: bigint | number | string): Promise<RawClaim | null> {
   const client = getContractClient();
-  const claimId = toBigIntSafe(id);
+  const claimId = typeof id === 'bigint' ? id : BigInt(id);
   try {
     const result = await client.readClaim({ id: claimId });
     if (!result) {
@@ -57,66 +51,110 @@ export async function readClaimRaw(id: bigint | number | string): Promise<RawCla
 /**
  * Fetch a page of claims within a cursor range.
  *
- * Uses the contract's batch view (`get_claims_batch`) in chunks of
- * {@const CLAIMS_BATCH_SIZE}, preserving order and returning `null` for missing
- * ids. Falls back to the per-id path when the deployed contract lacks the
- * method (logged once).
+ * Uses the contract's `get_claims_batch` view in chunks of 50 to avoid one
+ * simulation per claim. Order is preserved and missing ids are returned as `Null`.
+ * Falls back to the per-id path if the deployed contract lacks the
+ * batch method.
  */
 export async function readClaimsRange(
   startCursor: bigint | number | string = 0,
   limit: number = 20,
 ): Promise<RawClaimRange> {
-  const client = getContractClient();
-  const cursor = toBigIntSafe(startCursor);
+  const cursor = typeof startCursor === 'bigint' ? startCursor : BigInt(startCursor);
   const count = Math.max(0, Math.floor(limit));
-
   if (count === 0) {
     return { claims: [], nextCursor: undefined, total: 0 };
   }
 
-  const ids = Array.from({ length: count }, (_, i) => cursor + BigInt(i));
-
-  if (!batchViewUnavailable && typeof (client as any).getClaimsBatch === 'function') {
-    try {
-      const rawClaims = await readClaimsBatch(client as any, ids);
-      const claims = rawClaims.map((claim) => (claim ? normalizeRawClaim(claim) : null));
-      return buildRangeResult(claims, count);
-    } catch (err) {
-      if (isMissingMethodError(err)) {
-        batchViewUnavailable = true;
-        console.warn(
-          '[contract] get_claims_batch unavailable on deployed contract; falling back to per-id reads',
-        );
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  const claims = await mapWithConcurrency(ids, MAX_CONCURRENCY, (id) => readClaimRaw(id));
-  return buildRangeResult(claims, count);
-}
-
-async function readClaimsBatch(client: any, ids: bigint[]): Promise<unknown[]> {
-  const results: unknown[] = [];
-  for (let offset = 0; offset < ids.length; offset += CLAIMS_BATCH_SIZE) {
-    const chunk = ids.slice(offset, offset + CLAIMS_BATCH_SIZE);
-    const response = await client.getClaimsBatch({ ids: chunk });
-    const claims = Array.isArray(response) ? response : (response?.claims ?? []);
-    for (let i = 0; i < chunk.length; i++) {
-      results.push(claims[i] ?? null);
-    }
-  }
-  return results;
-}
-
-function buildRangeResult(claims: (RawClaim | null)[], count: number): RawClaimRange {
-  const present = claims.filter((claim): claim is RawClaim => claim !== null);
+  const claims = await readClaimsByIds(rangeIds(cursor, count));
   return {
     claims,
-    nextCursor: count > 0 ? undefined : undefined,
-    total: present.length,
+    nextCursor: cursor + BigInt(count),
+    total: claims.length,
   };
+}
+
+/**
+ * Read a contiguous range of claim ids, resolving each id to a claim or
+ * `null`. Uses `get_claims_batch` in chunks of 50, falling back to the
+ * per-id path when the contract does not expose the batch view.
+ */
+async function readClaimsByIds(ids: bigint[]): Promise<RawClaim[]> {
+  if (ids.length === 0) return [];
+
+  if (!batchViewUnsupported) {
+    try {
+      return await readClaimsBatch(ids);
+    } catch (err) {
+      if (!isMethodMissingError(err)) {
+        throw err;
+      }
+      batchViewUnsupported = true;
+      console.warn(
+        '[contract] get_claims_batch unavailable on deployed contract; falling back to per-id claim reads',
+      );
+    }
+  }
+
+  return readClaimsByIdPerId(ids);
+}
+
+async function readClaimsBatch(ids: bigint[]): Promise<RawClaim[]> {
+  const client = getContractClient();
+  const out: RawClaim[] = [];
+  for (let offset = 0; offset < ids.length; offset += BATCH_SIZE) {
+    const chunk = ids.slice(offset, offset + BATCH_SIZE);
+    const result = await client.getClaimsBatch({ ids: chunk });
+    const rows = (result ?? []) as Array<unknown>;
+    for (let i = 0; i < chunk.length; i++) {
+      const row = rows[i];
+      if (row == null) {
+        continue;
+      }
+      out.push(normalizeRawClaim(row));
+    }
+  }
+  return out;
+}
+
+async function readClaimsByIdPerId(ids: bigint[]): Promise<RawClaim[]> {
+  const results = await mapWithConcurrency(ids, 10, (id) => readClaimRaw(id));
+  const claims: RawClaim[] = [];
+  for (const claim of results) {
+    if (claim) {
+      claims.push(claim);
+    }
+  }
+  return claims;
+}
+
+function rangeIds(cursor: bigint, count: number): bigint[] {
+  const ids = new Array<bigint>(count);
+  for (let i = 0; i < count; i++) {
+    ids[i] = cursor + BigInt(i);
+  }
+  return ids;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  factory: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = new Array<Promise<void>>(Math.min(concurrency, items.length));
+  for (let w = 0; w < workers.length; w++) {
+    workers[w] = (async () => {
+      while (true) {
+        const index = next++;
+        if (index >= items.length) return;
+        results[index] = await factory(items[index], index);
+      }
+    })();
+  }
+  await Promise.all(workers);
+  return results;
 }
 
 function normalizeRawClaim(input: any): RawClaim {
@@ -127,7 +165,7 @@ function normalizeRawClaim(input: any): RawClaim {
     status: Number(input.status),
     createdAt: toBigInt(input.createdAt),
     expiresAt: toBigInt(input.expiresAt),
-    metadataUri: input.metadataUri ?? input.metadataURi ?? undefined,
+    metadataUri: input.metadataUri ?? undefined,
   };
 }
 
@@ -144,51 +182,24 @@ function toBigInt(value: unknown): bigint {
   return 0n;
 }
 
-function toBigIntSafe(value: bigint | number | string): bigint {
-  if (typeof value === 'bigint') return value;
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error(`Invalid claim id: ${value}`);
-    return BigInt(value);
-  }
-  return BigInt(value);
-}
-
 function isNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const message = String((err as { message?: unknown }).message ?? '').toLowerCase();
   return message.includes('not found') || message.includes('notfound');
 }
 
-function isMissingMethodError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const message = String(
-    (err as { message?: unknown; code?: unknown }).message ?? (err as { code?: unknown }).code ?? '',
-  ).toLowerCase();
-  return (
-    message.includes('method not found') ||
-    message.includes('missing method') ||
-    message.includes('not implemented') ||
-    message.includes('unknown method') ||
-    message.includes('no such method') ||
-    message.includes('getclaimsbatch') ||
-    message.includes('get_claims_batch')
-  );
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let nextIndex = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
-      const current = nextIndex++;
-      if (current >= items.length) return;
-      results[current] = await fn(items[current], current);
-    }
-  });
-  await Promise.all(workers);
-  return results;
+function isMethodMissingError(err: unknown): boolean {
+  if (!err) return false;
+  if (typeof err === 'object') {
+    const candidate = err as { code?: unknown; message?: unknown };
+    if (candidate.code === 'METHOD_NOT_FOUND') return true;
+    const message = String(candidate.message ?? '').toLowerCase();
+    return (
+      message.includes('method not found') ||
+      message.includes('not implemented') ||
+      message.includes('unknown method') ||
+      message.includes('get_claims_batch')
+    );
+  }
+  return false;
 }
