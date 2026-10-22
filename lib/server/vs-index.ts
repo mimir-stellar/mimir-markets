@@ -832,37 +832,85 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
   };
 }
 
+export interface VsFeedSnapshotOptions {
+  forceRefresh?: boolean;
+  cursor?: number;
+  limit?: number;
+  category?: string;
+  categories?: string[];
+  state?: string;
+  states?: string[];
+  creator?: string;
+  sort?: string;
+  orderBy?: "id_desc" | "updated_desc" | "deadline_asc" | "deadline_desc";
+}
+
 export async function getVsFeedSnapshot(
-  options: { forceRefresh?: boolean; cursor?: number; limit?: number } = {}
+  options: VsFeedSnapshotOptions = {}
 ): Promise<VSFeedSnapshot> {
   try {
-    const { cursor, limit = 50 } = options;
-    const rows = await getClaimsByFilter({
-      visibility: "public",
-      orderBy: "id_desc",
+    const { cursor, limit = 50, category, categories, state, states, creator } = options;
+
+    let orderBy: "id_desc" | "updated_desc" | "deadline_asc" | "deadline_desc" = "id_desc";
+    if (options.orderBy) {
+      orderBy = options.orderBy;
+    } else if (options.sort) {
+      switch (options.sort) {
+        case "expiring":
+        case "deadline_asc":
+          orderBy = "deadline_asc";
+          break;
+        case "deadline_desc":
+          orderBy = "deadline_desc";
+          break;
+        case "updated":
+        case "updated_desc":
+          orderBy = "updated_desc";
+          break;
+        case "newest":
+        case "id_desc":
+        default:
+          orderBy = "id_desc";
+          break;
+      }
+    }
+
+    const filterParams = {
+      visibility: "public" as const,
+      category,
+      categories,
+      state,
+      states,
+      creator,
+      orderBy,
       cursor,
       limit: limit + 1, // Fetch one extra to determine if there's a next page
-    });
+    };
+
+    const rows = await getClaimsByFilter(filterParams);
     
     const hasMore = rows.length > limit;
     const paginatedRows = hasMore ? rows.slice(0, limit) : rows;
     const nextCursor = hasMore ? paginatedRows[paginatedRows.length - 1].id : null;
 
+    const hasFilters = Boolean(
+      category ||
+      (categories && categories.length > 0) ||
+      state ||
+      (states && states.length > 0) ||
+      creator
+    );
+
     const lastSyncAt = Number((await getSyncMeta("last_sync_at")) ?? "0");
     const shouldRefresh =
       options.forceRefresh ||
-      rows.length === 0 ||
+      (!hasFilters && rows.length === 0) ||
       !lastSyncAt ||
       !isFresh(lastSyncAt, LIST_FRESHNESS_MS);
 
-    if (options.forceRefresh || rows.length === 0) {
+    if (options.forceRefresh || (!hasFilters && rows.length === 0)) {
       await reconcileVsIndex();
-      const refreshedRows = await getClaimsByFilter({
-        visibility: "public",
-        orderBy: "id_desc",
-        cursor,
-        limit: limit + 1,
-      });
+      const refreshedRows = await getClaimsByFilter(filterParams);
       const refreshedHasMore = refreshedRows.length > limit;
       const refreshedPaginatedRows = refreshedHasMore ? refreshedRows.slice(0, limit) : refreshedRows;
       const refreshedNextCursor = refreshedHasMore ? refreshedPaginatedRows[refreshedPaginatedRows.length - 1].id : null;
@@ -897,10 +945,20 @@ export async function getVsFeedSnapshot(
         cache: makeContractFreshness(),
       };
     }
+    let fallbackItems = (await getVsFeedFromCache()).filter(
+      (c) => !c.is_private && c.visibility !== "private"
+    );
+    if (options.category) {
+      fallbackItems = fallbackItems.filter((c) => c.category === options.category);
+    }
+    if (options.state) {
+      fallbackItems = fallbackItems.filter((c) => c.state === options.state);
+    }
+    if (options.creator) {
+      fallbackItems = fallbackItems.filter((c) => c.creator === options.creator);
+    }
     return {
-      items: (await getVsFeedFromCache()).filter(
-        (c) => !c.is_private && c.visibility !== "private"
-      ),
+      items: fallbackItems,
       cache: buildVSCacheFreshness({
         updatedAtMs: null,
         freshnessWindowMs: LIST_FRESHNESS_MS,

@@ -71,7 +71,9 @@ export interface ChallengerRow {
 export interface ClaimFilters {
   ids?: number[];
   creator?: string;
+  category?: string;
   categories?: string[];
+  state?: string;
   states?: string[];
   parentId?: number;
   visibility?: string;
@@ -174,6 +176,9 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_claims_parent ON claims(parent_id)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_claims_visibility ON claims(visibility)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_claims_active ON claims(state, is_final)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_claims_visibility_category_id ON claims(visibility, category, id DESC)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_claims_visibility_state_id ON claims(visibility, state, id DESC)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_claims_visibility_creator_id ON claims(visibility, creator, id DESC)" },
   { sql: `CREATE TABLE IF NOT EXISTS challengers (
     claim_id BIGINT NOT NULL,
     address TEXT NOT NULL,
@@ -1069,11 +1074,17 @@ export async function getClaimsByFilter(filters: ClaimFilters = {}): Promise<Cla
     clauses.push("creator = ?");
     args.push(filters.creator);
   }
-  if (filters.categories && filters.categories.length > 0) {
+  if (filters.category) {
+    clauses.push("category = ?");
+    args.push(filters.category);
+  } else if (filters.categories && filters.categories.length > 0) {
     clauses.push(`category IN (${makeListPlaceholders(filters.categories)})`);
     args.push(...filters.categories);
   }
-  if (filters.states && filters.states.length > 0) {
+  if (filters.state) {
+    clauses.push("state = ?");
+    args.push(filters.state);
+  } else if (filters.states && filters.states.length > 0) {
     clauses.push(`state IN (${makeListPlaceholders(filters.states)})`);
     args.push(...filters.states);
   }
