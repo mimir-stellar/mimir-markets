@@ -48,6 +48,17 @@ export function makeContractFreshness(): VSCacheFreshness {
   });
 }
 
+/**
+ * Maps a freshness snapshot to the warning state surfaced on indexed views.
+ * Returns null when no warning should be shown (non-index or fresh reads).
+ */
+export function mapFreshnessToWarning(
+  freshness: VSCacheFreshness | null,
+  nowMs = Date.now()
+): VSCacheFreshness | null {
+  return isStaleIndexSnapshot(freshness, nowMs) ? freshness : null;
+}
+
 /** A warning applies only to indexed reads, never to an on-chain snapshot. */
 export function isStaleIndexSnapshot(
   freshness: VSCacheFreshness | null,
@@ -68,4 +79,28 @@ export function isStaleIndexSnapshot(
   }
 
   return nowMs - updatedAtMs > freshness.freshnessWindowMs * STALE_MULTIPLIER;
+}
+
+/**
+ * Compute a weak ETag for the public VS feed from its max `updated_at`
+ * and item count. Returns null when there is no usable validator data.
+ */
+export function buildVsFeedEtag(args: {
+  maxUpdatedAt?: string | null;
+  itemCount?: number | null;
+}): string | null {
+  const itemCount =
+    typeof args.itemCount === "number" && Number.isFinite(args.itemCount)
+      ? Math.max(0, Math.floor(args.itemCount))
+      : null;
+  if (itemCount == null) return null;
+
+  const maxUpdatedAt =
+    typeof args.maxUpdatedAt === "string" && args.maxUpdatedAt.trim() !== ""
+      ? args.maxUpdatedAt.trim()
+      : null;
+  if (maxUpdatedAt == null) return null;
+
+  // Weak ETag: semantically equivalent, byte-identity not required.
+  return `W/"${maxUpdatedAt}:${itemCount}"`;
 }

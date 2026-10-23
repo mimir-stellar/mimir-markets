@@ -1,23 +1,41 @@
 "use client";
 
 /**
- * One line chart for both agent P&L and basket NAV.
+ * One line chart for oth agent P&amp;L and basket NAV.
  *
  * Inline SVG rather than a charting library: this is a path, a baseline and a
  * hover readout — a chart dependency would ship more JavaScript than the rest of
  * the page. Colours come from theme tokens so it inverts with the palette.
  *
- * The line draws itself on mount via stroke-dashoffset, which animates on the
+ * The line draws itself on mount via stroke-dasharray, which animates on the
  * compositor rather than by re-rendering React on every frame. Anyone who asked
  * their system not to animate gets the finished line immediately.
+ *
+ * Keyboard and screen-reader users can't hover, so a "Show data" toggle
+ * reveals a table of the same points (last MAX_TABLE_ROWS).
  */
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
+import {
+  buildPerformanceChartRows,
+  formatChartDay,
+  MAX_TABLE_ROWS,
+} from "@/lib/performance-chart-rows";
+
 export interface ChartPoint {
   timestamp: number;
-  /** Display units — USDC for both NAV and cumulative P&L. */
+  /** Display units — USDC for both NAV and cumulative P&amp;L. */
   value: number;
+}
+
+export interface ChartSeries {
+  points: ChartPoint[];
+  /** CSS colour; defaults to the accent/danger token pair by the series' sign. */
+  stroke?: string;
+  label?: string;
+  /** Area fill under the line. Only the primary series fills by default. */
+  area?: boolean;
 }
 
 const VIEW_WIDTH = 720;
@@ -26,11 +44,12 @@ const PAD_X = 10;
 const PAD_Y = 14;
 
 function formatDay(timestamp: number): string {
-  return new Date(timestamp).toISOString().slice(5, 10);
+  return formatChartDay(timestamp);
 }
 
 export function PerformanceChart({
   points,
+  series,
   baseline,
   label,
   valueSuffix = " USDC",
@@ -39,7 +58,7 @@ export function PerformanceChart({
   height = 180,
 }: {
   points: ChartPoint[];
-  /** The line drawn as "flat": starting NAV, or zero for cumulative P&L. */
+  /** The line drawn as "flat": starting NAV, or zero for cumulative P&amp;L. */
   baseline: number;
   label: string;
   valueSuffix?: string;
@@ -48,11 +67,18 @@ export function PerformanceChart({
   height?: number;
 }) {
   const gradientId = useId();
+  const tableId = useId();
   const [drawn, setDrawn] = useState(false);
   const [hover, setHover] = useState<number | null>(null);
+  const [showData, setShowData] = useState(false);
   const pathRef = useRef<SVGPathElement>(null);
-  const invalid = !Number.isFinite(baseline) || points.some((point) =>
-    !Number.isFinite(point.timestamp) || point.timestamp <= 0 || !Number.isFinite(point.value)
+
+  const allSeries = series && series.length > 0 ? series : points ? [{ points }] : [];
+  const primaryCount = allSeries[0]?.points.length ?? 0;
+  const invalid = !Number.isFinite(baseline) || allSeries.some((s) =>
+    s.points.some((point) =>
+      !Number.isFinite(point.timestamp) || point.timestamp <= 0 || !Number.isFinite(point.value)
+    )
   );
 
   useEffect(() => {
@@ -61,18 +87,36 @@ export function PerformanceChart({
     // Next frame, so the dashoffset transition has an initial value to move from.
     const frame = requestAnimationFrame(() => setDrawn(true));
     return () => cancelAnimationFrame(frame);
-  }, [points.length]);
+  }, [primaryCount]);
 
   const geometry = useMemo(() => {
-    if (invalid || points.length === 0) return null;
-    const values = points.map((point) => point.value);
+    if (invalid || allSeries.length === 0) return null;
+    const allPoints = allSeries.flatMap((s) => s.points);
+    if (allPoints.length === 0) return null;
+    const values = allPoints.map((point) => point.value);
     const min = Math.min(baseline, ...values);
     const max = Math.max(baseline, ...values);
     // A flat series would divide by zero; give it a nominal band so it centres.
     const span = max - min || Math.max(1, Math.abs(max) * 0.02);
 
-    const x = (index: number) =>
-      PAD_X + (index / Math.max(1, points.length - 1)) * (VIEW_WIDTH - PAD_X * 2);
+    const buildSeriesGeom = (s: ChartSeries) => {
+      const pts = s.points;
+      if (pts.length === 0) return { coords: [] as Array<{ x: number; y: number; timestamp: number; value: number }>, line: "", area: "" };
+      const x = (index: number) =>
+        PAD_X + (index / Math.max(1, pts.length - 1)) * (VIEW_WIDTH - PAD_X * 2);
+      const y = (value: number) =>
+        VIEW_HEIGHT - PAD_Y - ((value - min) / span) * (VIEW_HEIGHT - PAD_Y * 2);
+      const coords = pts.map((point, index) => ({
+        x: x(index), y: y(point.value), timestamp: point.timestamp, value: point.value,
+      }));
+      const line = pts.length === 1
+        ? `M${PAD_X},${coords[0].y} L${VIEW_WIDTH - PAD_X},${coords[0].y}`
+        : coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
+      const area = `${line} L${(pts.length === 1 ? VIEW_WIDTH - PAD_X : coords.at(-1)!.x).toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${PAD_X},${VIEW_HEIGHT - PAD_Y} Z`;
+      return { coords, line, area };
+    };
+
+    const seriesGeoms = allSeries.map(buildSeriesGeom);
     const y = (value: number) =>
       VIEW_HEIGHT - PAD_Y - ((value - min) / span) * (VIEW_HEIGHT - PAD_Y * 2);
 
@@ -81,8 +125,7 @@ export function PerformanceChart({
     const line = points.length === 1
       ? `M${PAD_X},${coords[0].y} L${VIEW_WIDTH - PAD_X},${coords[0].y}`
       : coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
-    const area = `${line} L${(points.length === 1 ? VIEW_WIDTH - PAD_X : coords.at(-1)!.x).toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${PAD_X},${VIEW_HEIGHT - PAD_Y} Z`;
-
+    const area = `${line} L${points.length === 1 ? VIEW_WIDTH - PAD_X : coords.at(-1)!.x.toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${PAD_X},${VIEW_HEIGHT - PAD_Y} Z`;
     return { coords, line, area, baselineY: y(baseline) };
   }, [points, baseline, invalid]);
 
@@ -99,19 +142,21 @@ export function PerformanceChart({
 
   if (!geometry) {
     return (
-      <div className="border border-pv-ink/[0.1] bg-pv-surface/40 px-4 py-12 text-center text-sm text-pv-muted">
+      <div className="border border-pv-ink/[0.1] bv-surface/40 px-4 py-12 text-center text-sm text-pv-muted">
         {emptyMessage}
       </div>
     );
   }
 
-  const last = points.at(-1)!;
+  const primary = geometry.seriesGeoms[0];
+  const active = hover === null ? primary.coords.length - 1 : hover;
+  const activeCoord = primary.coords[active];
+  const activePoint = activeCoord ?? primary.coords[primary.coords.length - 1];
+  const last = primary.coords[primary.coords.length - 1];
   const up = last.value >= baseline;
-  const stroke = up ? "rgb(var(--pv-accent))" : "rgb(var(--pv-danger))";
-  const active = hover === null ? points.length - 1 : hover;
-  const activePoint = points[active];
-  const activeCoord = geometry.coords[active];
+  const strokeDefault = up ? "rgb(var(--pv-accent))" : "rgb(var(--pv-danger))";
   const length = pathRef.current?.getTotalLength?.() ?? 2000;
+  const table = buildPerformanceChartRows(points, valueSuffix);
 
   return (
     <figure className="border border-pv-ink/[0.1] bg-pv-surface/40 p-3">
@@ -120,13 +165,13 @@ export function PerformanceChart({
         style={{ height }}
         className="w-full touch-none"
         role="img"
-        aria-label={`${label}: ${points.length} point${points.length === 1 ? "" : "s"}, ending at ${last.value.toFixed(2)}${valueSuffix}`}
+        aria-label={`${label}: ${primary.coords.length} point${primary.coords.length === 1 ? "" : "s"}, ending at ${last.value.toFixed(2)}${valueSuffix}`}
         onMouseLeave={() => setHover(null)}
       >
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={stroke} stopOpacity="0.22" />
-            <stop offset="100%" stopColor={stroke} stopOpacity="0" />
+            <stop offset="0%" stopColor={strokeDefault} stopOpacity="0.22" />
+            <stop offset="100%" stopColor={strokeDefault} stopOpacity="0" />
           </linearGradient>
         </defs>
 
@@ -152,22 +197,22 @@ export function PerformanceChart({
           style={{
             strokeDasharray: length,
             strokeDashoffset: drawn ? 0 : length,
-            transition: "stroke-dashoffset 900ms cubic-bezier(0.22, 1, 0.36, 1)",
+            transition: "stroke-dasharray 900ms cubic-bezier(0.22, 1, 0.36, 1)",
           }}
         />
 
         {/* Hover targets: one invisible column per point, so the pointer never has
             to find a 4px dot. */}
-        {points.map((point, index) => (
+        {primary.coords.map((coord, index) => (
           <rect
-            key={`${point.timestamp}-${index}`}
-            x={index === 0 ? 0 : (geometry.coords[index - 1].x + geometry.coords[index].x) / 2}
+            key={`${coord.timestamp}-${index}`}
+            x={index === 0 ? 0 : (primary.coords[index - 1].x + coord.x) / 2}
             y={0}
             width={
-              index === points.length - 1
+              index === primary.coords.length - 1
                 ? VIEW_WIDTH
-                : (geometry.coords[index + 1].x - geometry.coords[index].x) / 2
-                  + (index === 0 ? geometry.coords[index].x : (geometry.coords[index].x - geometry.coords[index - 1].x) / 2)
+                : (primary.coords[index + 1].x - coord.x) / 2
+                  + (index === 0 ? coord.x : (coord.x - primary.coords[index - 1].x) / 2)
             }
             height={VIEW_HEIGHT}
             fill="transparent"
@@ -175,28 +220,68 @@ export function PerformanceChart({
           />
         ))}
 
-        {hover !== null && (
+        {hover !== null && activeCoord && (
           <line
             x1={activeCoord.x} x2={activeCoord.x} y1={PAD_Y} y2={VIEW_HEIGHT - PAD_Y}
             stroke="rgb(var(--pv-ink) / 0.2)" strokeWidth="1"
           />
         )}
         <circle
-          cx={activeCoord.x}
-          cy={activeCoord.y}
+          cx={activePoint.x}
+          cy={activePoint.y}
           r="4"
-          fill={stroke}
+          fill={strokeDefault}
           style={{ opacity: drawn ? 1 : 0, transition: "opacity 300ms ease-out 700ms" }}
         />
       </svg>
 
       <figcaption className="mt-2 flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-wider text-pv-muted">
-        <span>{formatDay(points[0].timestamp)}</span>
+        <span>{formatDay(geometry.firstTimestamp)}</span>
         <span className="text-pv-text">
           {formatDay(activePoint.timestamp)} · {activePoint.value.toFixed(2)}{valueSuffix}
         </span>
-        <span>{formatDay(last.timestamp)}</span>
+        <span>{formatDay(geometry.lastTimestamp)}</span>
       </figcaption>
+
+      <div className="mt-3 flex flex-col items-start gap-2">
+        <button
+          type="button"
+          aria-expanded={showData}
+          aria-controls={tableId}
+          onClick={() => setShowData((value) => !value)}
+          className="rounded-sm border border-pv-ink/[0.15] px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-pv-muted hover:text-pv-text focus:outline focus:outline-2 focus:outline-offset-2 focus:outline-pv-accent"
+        >
+          {showData ? "Hide data" : "Show data"}
+        </button>
+        {showData && (
+          <div id={tableId} className="max-h-64 w-full overflow-auto">
+            <table className="w-full border-collapse text-left font-mono text-xs text-pv-text">
+              <caption className="py-1 text-left text-pv-muted">
+                {label}
+              </caption>
+              <thead>
+                <tr className="text-pv-muted">
+                  <th scope="col" className="py-1 pr-3 font-semibold">Date</th>
+                  <th scope="col" className="py-1 font-semibold">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {table.rows.map((row, index) => (
+                  <tr key={`${row.date}-${index}`}>
+                    <td className="py-0.5 pr-3">{row.date}</td>
+                    <td className="py-0.5">{row.value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {table.truncated && (
+              <p className="mt-1 text-xs text-pv-muted">
+                Showing the last {table.rows.length} of {table.total} points.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     </figure>
   );
 }

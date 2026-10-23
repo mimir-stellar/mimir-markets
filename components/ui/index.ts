@@ -17,10 +17,12 @@ export {
   RivalryPanelSkeleton,
   DashboardPanelSkeleton,
   ExplorerPanelSkeleton,
+  StatsPanelSkeleton,
 } from "./AsyncPanelSkeleton";
 export { default as PoolBadge } from "./PoolBadge";
 export { default as CountdownTimer } from "./CountdownTimer";
 export { default as VSStrip } from "./VSStrip";
+export { default as ConfirmDialog } from "./ConfirmDialog";
 
 // Protocol system components
 export { default as Stage } from "../Stage";

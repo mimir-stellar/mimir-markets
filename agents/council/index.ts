@@ -40,11 +40,12 @@
 applyWorkerGeminiKey("COUNCIL_GEMINI_API_KEY");
 
 import { requireAnyLLMKey, applyWorkerGeminiKey } from "../../lib/agent-bootstrap";
-import { getClaimCount, readClaimRaw } from "../../lib/contract";
+import { getClaimCount, readClaimRaw, readClaimsBatch } from "../../lib/contract";
 import { readAgentBalances } from "../../lib/agent-wallets";
 import { STELLAR_NETWORK, requireMarketContractId } from "../../lib/stellar";
 import { unitsToUsdc } from "../../lib/usdc";
-import { reportingPoll } from "../../lib/ops/heartbeat";
+import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
+import { resolvePollJitterMs } from "../../lib/ops/poll-jitter";
 import {
   BackoffError,
   DependencyFailureError,
@@ -74,25 +75,41 @@ import {
 import { runPersonaForClaim } from "./shared/persona-runner";
 import { buyPeerReasoning } from "./shared/peer-reasoning";
 import { toClaimOnChain } from "./shared/types";
+import { parseCouncilConfig } from "./shared/config";
 import type {
   ClaimOnChain,
   PersonaRunnerContext,
   EvidenceCacheEntry,
 } from "./shared/types";
 
-const POLL_INTERVAL_MS = Number(process.env.COUNCIL_POLL_INTERVAL_MS ?? 180_000);
+// ── Config ────────────────────────────────────────────────────────────────────
+// Parse and validate all numeric settings up front so a malformed value stops
+// the worker at boot instead of silently disabling loops/caps with NaN.
+const PARSED_CONFIG = parseCouncilConfig(process.env);
+if (!PARSED_CONFIG.ok) {
+  console.error("[council] Invalid configuration:");
+  for (const error of PARSED_CONFIG.errors) {
+    console.error(`  - ${error}`);
+  }
+  process.exit(1);
+}
+const CONFIG = PARSED_CONFIG.config;
+
+const POLL_INTERVAL_MS = CONFIG.pollIntervalMs;
+// ± around each cycle; unset = 10% of the interval, 0 = fixed scheduling.
+const POLL_JITTER_MS = resolvePollJitterMs(POLL_INTERVAL_MS, process.env.COUNCIL_POLL_JITTER_MS);
 /**
  * Per-cycle work cap to stay under Gemini free-tier rate limits.
  * Claims are sorted by deadline-proximity so the council focuses on
  * the markets closest to settling.
  */
-const MAX_CLAIMS_PER_CYCLE = Number(process.env.COUNCIL_MAX_CLAIMS ?? 1);
-const DECISION_DELAY_MS    = Number(process.env.COUNCIL_DECISION_DELAY_MS ?? 30000);
+const MAX_CLAIMS_PER_CYCLE = CONFIG.maxClaimsPerCycle;
+const DECISION_DELAY_MS    = CONFIG.decisionDelayMs;
 const PEER_READS_ENABLED   = process.env.COUNCIL_PEER_READS === "1";
 const PEER_READS_BASE_URL  = process.env.MIMIR_BASE_URL ?? "http://localhost:3000";
-const PEER_READS_PER_PERSONA = Number(process.env.COUNCIL_PEER_READS_PER_PERSONA ?? 2);
-const PEER_READ_DELAY_MS   = Number(process.env.COUNCIL_PEER_READ_DELAY_MS ?? 15000);
-const PEER_READ_CAP_USDC   = Number(process.env.COUNCIL_PEER_READ_CAP_USDC ?? "0.003");
+const PEER_READS_PER_PERSONA = CONFIG.peerReadsPerPersona;
+const PEER_READ_DELAY_MS   = CONFIG.peerReadDelayMs;
+const PEER_READ_CAP_USDC   = CONFIG.peerReadCapUsdc;
 const CONTRACT_ID          = requireMarketContractId();
 
 // ── Env guard ─────────────────────────────────────────────────────────────────
@@ -172,6 +189,19 @@ async function fetchClaim(claimId: number): Promise<ClaimOnChain | null> {
   return claim ? toClaimOnChain(claim) : null;
 }
 
+/**
+ * Pure helper: pick claims that are still joinable at `now`.
+ *
+ * Extracted so the selection rule can be unit-tested without touching the
+ * chain. A claim is joinable when its state is `open` or `active` and its
+ * deadline has not yet passed.
+ */
+export function selectJoinableClaims(claims: ClaimOnChain[], now: number): ClaimOnChain[] {
+  return claims.filter(
+    (claim) => (claim.state === "open" || claim.state === "active") && claim.deadline > now,
+  );
+}
+
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 async function poll(): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
@@ -206,13 +236,17 @@ async function poll(): Promise<void> {
   };
 
   // Pre-load joinable claims so we don't refetch in the inner loop.
-  const allClaims: ClaimOnChain[] = [];
-  for (let id = 1; id <= total; id++) {
-    const claim = await fetchClaim(id);
-    if (!claim) continue;
-    const joinable = (claim.state === "open" || claim.state === "active") && claim.deadline > now;
-    if (joinable) allClaims.push(claim);
+  // Batched read: one RPC simulation per BATCH_SIZE ids instead of one per id,
+  // so the per-poll cost drops from `total` to `ceil(total / BATCH_SIZE)`.
+  const fetched: ClaimOnChain[] = [];
+  if (total > 0) {
+    const rawClaims = await readClaimsBatch(1, total);
+    for (const raw of rawClaims) {
+      if (!raw) continue;
+      fetched.push(toClaimOnChain(raw));
+    }
   }
+  const allClaims = selectJoinableClaims(fetched, now);
   if (allClaims.length === 0) {
     console.log("[council] No joinable claims this round.");
     return;
@@ -299,6 +333,7 @@ async function main(): Promise<void> {
   console.log(`  Peer reads     : ${PEER_READS_ENABLED ? `${PEER_READS_PER_PERSONA}/persona via ${PEER_READS_BASE_URL}` : "off"}`);
   console.log(`  Peer read gap  : ${PEER_READ_DELAY_MS / 1000}s`);
   console.log(`  Poll every     : ${POLL_INTERVAL_MS / 1000}s`);
+  console.log(`  Poll jitter    : ±${(POLL_JITTER_MS / 1000).toFixed(1)}s`);
   console.log("───────────────────────────────────────────────");
 
   for (const p of ALL_ACTIVE) {
@@ -324,8 +359,12 @@ async function main(): Promise<void> {
   const safePoll = () =>
     reportingPoll("council", "council", POLL_INTERVAL_MS / 1000, poll, { pause: "council_worker" });
 
-  await safePoll();
-  setInterval(safePoll, POLL_INTERVAL_MS);
+  await runWorkerLoop({
+    worker: "council",
+    intervalMs: POLL_INTERVAL_MS,
+    jitterMs: POLL_JITTER_MS,
+    cycle: safePoll,
+  });
 }
 
 main().catch((err) => {

@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 import { cachedFor } from "@/lib/server/ttl-cache";
 import { getClaimSummaries, getClaimCount, getOracle, getOwner } from "@/lib/contract";
 import { readAgentBalances } from "@/lib/agent-wallets";
@@ -22,6 +22,11 @@ import { BlueprintHeading } from "@/components/BlueprintGrid";
 // The event-derived sections (`fetchStakers`, `fetchSettlements`) cover only the
 // ~1 week Soroban RPC retains, and say so in the UI. The claim-derived KPIs are
 // read from `get_claim`, which is authoritative and complete.
+export const metadata = {
+  title: "Stats",
+  description: "Live on-chain statistics, staker rankings, and oracle settlement performance.",
+};
+
 export const revalidate = 30;
 
 // ── Data ─────────────────────────────────────────────────────────────────────

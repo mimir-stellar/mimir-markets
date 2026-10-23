@@ -12,9 +12,14 @@
 // client bundle.
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+import { assertStrongSecret } from "./ops/secrets";
+
 function secret(): string {
   const s = process.env.PASS_SECRET;
   if (!s) throw new Error("PASS_SECRET required to sign passes");
+  // A guessable HMAC key lets anyone mint a pass for any payer. Refused in
+  // production, warned about everywhere else (tests run with short values).
+  assertStrongSecret("PASS_SECRET", s);
   return s;
 }
 
@@ -31,7 +36,11 @@ export interface PassClaims {
 /** Issue a pass valid for `ttlMs` from now. */
 export function issuePass(payer: string, plan: string, ttlMs: number): { pass: string; expiresAt: number } {
   const exp = Date.now() + ttlMs;
-  const body = `${payer.toLowerCase()}.${exp}.${plan}`;
+  // Stellar strkeys are case-sensitive base32 — bind the pass to the payer
+  // verbatim (trimmed). Lowercasing would yield a payer that is not a valid
+  // address when echoed back to the client.
+  const normalizedPayer = payer.trim();
+  const body = `${normalizedPayer}.${exp}.${plan}`;
   const pass = `${Buffer.from(body).toString("base64url")}.${sign(body)}`;
   return { pass, expiresAt: exp };
 }

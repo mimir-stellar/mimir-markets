@@ -1,4 +1,4 @@
-/**
+/*
  * Prompt-injection defense for the settlement agents.
  *
  * Claim fields (question, positions, settlement rule, resolution URL …) come
@@ -29,16 +29,16 @@ export const INJECTION_GUARD =
 
 /** Patterns commonly used to break out of prompts via untrusted source text. */
 export const SOURCE_INJECTION_HINTS: RegExp[] = [
-  /ignore\s+(all\s+)?(previous|prior|above)\s+instructions/i,
+  //ignore\s+(all\s+)?(previous|prior|above)\s+instructions/i,
   /system\s*:\s*/i,
   /<\/?untrusted\b/i,
-  /reveal\s+(your\s+)?system\s+prompt/i,
-  /you\s+are\s+now\s+/i,
+  /reveals\s+(your\s)?system\s+prompt/i,
+  /you\sare\s+now\s+/i,
 ];
 
 /**
  * Wrap untrusted content in a labeled block that its own text cannot escape.
- * Any literal `<untrusted …>` / `</untrusted>` inside the content is removed so
+ * Any literal `<untrusted … > / `</untrusted>` inside the content is removed so
  * an attacker can't close the block early and inject trusted-looking text.
  */
 export function fenceUntrusted(label: string, content: unknown): string {

@@ -2,8 +2,10 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { formatDeadline, getTimeRemaining } from "@/lib/constants";
-import { useLocale } from "next-intl";
+import { formatDeadline } from "@/lib/constants";
+import { useCountdown } from "@/lib/hooks";
+import { useLocale, useTranslations } from "next-intl";
+import { resolveCountdownLocale } from "@i18n/locale";
 
 interface LiveDeadlineProps {
   deadline: number;
@@ -23,10 +25,10 @@ interface LiveDeadlineProps {
 }
 
 const PHASE_CONFIG = {
-  open: { label: "OPEN", color: "text-pv-cyan", bg: "bg-pv-cyan", border: "border-pv-cyan/30" },
-  locked: { label: "LOCKED", color: "text-pv-fuch", bg: "bg-pv-fuch", border: "border-pv-fuch/30" },
-  verifying: { label: "VERIFYING", color: "text-pv-gold", bg: "bg-pv-gold", border: "border-pv-gold/30" },
-  proven: { label: "SETTLED", color: "text-pv-emerald", bg: "bg-pv-emerald", border: "border-pv-emerald/30" },
+  open: { color: "text-pv-cyan", bg: "bg-pv-cyan", border: "border-pv-cyan/30" },
+  locked: { color: "text-pv-fuch", bg: "bg-pv-fuch", border: "border-pv-fuch/30" },
+  verifying: { color: "text-pv-gold", bg: "bg-pv-gold", border: "border-pv-gold/30" },
+  proven: { color: "text-pv-emerald", bg: "bg-pv-emerald", border: "border-pv-emerald/30" },
 } as const;
 
 /**
@@ -49,8 +51,9 @@ export default function LiveDeadline({
   className = "",
 }: LiveDeadlineProps) {
   const locale = useLocale();
-  const countdownLocale = locale === "en" ? "en" : "es";
-  const [state, setState] = useState(() => getTimeRemaining(deadline, countdownLocale));
+  const countdownLocale = resolveCountdownLocale(locale);
+  const t = useTranslations("liveDeadline");
+  const state = useCountdown(deadline);
   // Resolve timezone only after mount so SSR markup stays stable and the
   // absolute label always reflects the viewer's zone (not the server's).
   const [mounted, setMounted] = useState(false);
@@ -59,18 +62,10 @@ export default function LiveDeadline({
     setMounted(true);
   }, []);
 
-  useEffect(() => {
-    const id = setInterval(
-      () => setState(getTimeRemaining(deadline, countdownLocale)),
-      1000
-    );
-    return () => clearInterval(id);
-  }, [deadline, countdownLocale]);
-
   const absoluteLocal = useMemo(() => {
-    if (!mounted || hideAbsolute) return "";
+    if (!mounted || !Number.isFinite(new Date(deadline * 1000).getTime())) return "";
     return formatDeadline(deadline, countdownLocale);
-  }, [mounted, hideAbsolute, deadline, countdownLocale]);
+  }, [mounted, deadline, countdownLocale]);
 
   // Calculate progress (0→1 where 1 = full time, 0 = expired)
   // Assume max range of 30 days for visual scaling
@@ -99,9 +94,10 @@ export default function LiveDeadline({
     : "bg-pv-cyan";
 
   const phaseConfig = phase ? PHASE_CONFIG[phase] : null;
+  const phaseLabel = phase ? t(`phase.${phase}`) : "";
 
   return (
-    <div className={`flex flex-col gap-1.5 ${className}`} role="timer" aria-live="polite">
+    <div className={`flex flex-col gap-1.5 ${className}`} role="timer">
       <div className="flex items-center gap-2">
         {/* Phase badge */}
         <AnimatePresence mode="wait">
@@ -121,7 +117,7 @@ export default function LiveDeadline({
                   phase === "verifying" ? "animate-phase-glow" : ""
                 }`}
               />
-              {phaseConfig.label}
+              {phaseLabel}
             </motion.span>
           )}
         </AnimatePresence>
@@ -139,7 +135,7 @@ export default function LiveDeadline({
       {absoluteLocal ? (
         <time
           dateTime={new Date(deadline * 1000).toISOString()}
-          className={`font-mono tabular-nums text-pv-muted ${
+          className={hideAbsolute ? "sr-only" : `font-mono tabular-nums text-pv-muted ${
             compact ? "text-[9px] leading-tight" : "text-[10px] leading-snug"
           }`}
           title={absoluteLocal}
@@ -156,7 +152,7 @@ export default function LiveDeadline({
               isCritical ? "animate-phase-glow" : ""
             }`}
             initial={{ width: "100%" }}
-            animate={{ width: `${Math.max(progress * 100, 1)}%` }}
+            animate={{ width: `${Math.max(progress * 100, 1)}%`}}
             transition={{ duration: 0.8, ease: [0.25, 0.46, 0.45, 0.94] }}
           />
         </div>

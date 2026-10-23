@@ -16,21 +16,37 @@
 import { NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api/policy";
 import { pruneExpiredNonces } from "@/lib/server/nonce-store";
+import { pruneRateLimits } from "@/lib/api/rate-limit";
+import { apiError } from "@/lib/api/errors";
 
 export const dynamic = "force-dynamic";
 
-function authorizeWorker(request: Request, route: string) {
+export interface NoncePruneDeps {
+  pruneNonces?: () => Promise<number | null>;
+  pruneRateLimits?: () => Promise<number>;
+}
+
+let pruneNoncesOverride: (() => Promise<number | null>) | null = null;
+
+/** Test seam to inject custom/failing prune implementation in tests. */
+export function setPruneNoncesForTesting(
+  fn: (() => Promise<number | null>) | null,
+): void {
+  pruneNoncesOverride = fn;
+}
+
+async function authorizeWorker(request: Request, route: string) {
   const header = request.headers.get("authorization") ?? "";
   const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
-  return authorizeRequest("internal_worker", {
+  return await authorizeRequest("internal_worker", {
     route,
     presentedSecret: presented,
     expectedSecret: process.env.CRON_SECRET,
   });
 }
 
-export async function GET(request: Request) {
-  const auth = authorizeWorker(request, "/api/cron/nonce-prune");
+export async function GET(request: Request, deps?: NoncePruneDeps) {
+  const auth = await authorizeWorker(request, "/api/cron/nonce-prune");
   if (!auth.allowed && auth.error) {
     return NextResponse.json(auth.error.body, {
       status: auth.error.status,
@@ -39,15 +55,24 @@ export async function GET(request: Request) {
   }
 
   try {
-    const pruned = await pruneExpiredNonces();
+    const pruneNoncesFn = deps?.pruneNonces ?? pruneNoncesOverride ?? pruneExpiredNonces;
+    const pruneRateLimitsFn = deps?.pruneRateLimits ?? pruneRateLimits;
+
+    const pruned = await pruneNoncesFn();
+    const rateLimitWindowsPruned = await pruneRateLimitsFn();
     return NextResponse.json(
-      { pruned, at: Date.now() },
+      { pruned, rateLimitWindowsPruned, at: Date.now() },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
-    return NextResponse.json(
-      { error: "prune failed", detail: error instanceof Error ? error.message : String(error) },
-      { status: 500, headers: { "Cache-Control": "no-store" } },
-    );
+    console.error("[cron/nonce-prune] Failed to prune nonces:", error);
+    const err = apiError("internal_error", "Failed to prune nonces");
+    return NextResponse.json(err.body, {
+      status: err.status,
+      headers: {
+        ...err.headers,
+        "Cache-Control": "no-store",
+      },
+    });
   }
 }

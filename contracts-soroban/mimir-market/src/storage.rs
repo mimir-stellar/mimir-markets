@@ -10,11 +10,20 @@ use crate::types::{
     RematchStatus, Verdict,
 };
 
+/// Maximum number of addresses accepted by [`get_withdrawable_batch`].
+///
+/// Keeps the ledger-entry footprint of a single read bounded.
+pub const MAX_BATCH_SIZE: u32 = 50;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     /// One-time initialisation guard.
     Init,
+    /// Global pause flag. When set, state-changing market operations are
+    /// halted, but withdrawals and fee pulls MUST remain available so user
+    /// funds are never trapped by an operator pause.
+    Paused,
     Owner,
     Oracle,
     Usdc,
@@ -53,6 +62,22 @@ pub fn is_initialized(env: &Env) -> bool {
 
 pub fn mark_initialized(env: &Env) {
     env.storage().instance().set(&DataKey::Init, &true);
+}
+
+/// Whether the market is currently paused.
+///
+/// Pause is a *state-changing* gate only: it must never be consulted on the
+/// withdrawal or fee-pull paths. See [`require_not_paused`] for the guard used
+/// by mutating entry points.
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
 pub fn owner(env: &Env) -> Result<Address, Error> {
@@ -322,6 +347,38 @@ pub fn clear_withdrawable(env: &Env, who: &Address) {
     set_address_i128(env, DataKey::Withdrawable(who.clone()), 0);
 }
 
+/// Read the withdrawable balance without any pause check.
+///
+/// Withdrawals are a user-funds escape hatch and MUST remain readable and
+/// payable while the market is paused. This accessor exists so callers can
+/// make that intent explicit and so a future refactor of [`withdrawable`]
+/// cannot accidentally reintroduce a pause gate on the read path.
+pub fn withdrawable_unpaused(env: &Env, who: &Address) -> i128 {
+    withdrawable(env, who)
+}
+
+/// Batched read of withdrawable balances keyed by an address list.
+///
+/// Returns one entry per input address, in the same order as `addrs`.
+/// Addresses with no parked balance (or never seen) return `0`.
+///
+/// Rejects inputs longer than [`MAX_BATCH_SIZE`] with [`Error::BatchTooLarge`]
+/// *before* touching storage, so an over-sized call costs no ledger reads.
+///
+/// Sits next to `get_claims_batch` as the operator-facing batch primitive for
+/// finding parked payouts without replaying `WithdrawalPending` events.
+pub fn get_withdrawable_batch(env: &Env, addrs: Vec<Address>) -> Result<Vec<i128>, Error> {
+    if addrs.len() > MAX_BATCH_SIZE {
+        return Err(Error::BatchTooLarge);
+    }
+
+    let mut out = Vec::new(env);
+    for who in addrs.iter() {
+        out.push_back(withdrawable(env, &who));
+    }
+    Ok(out)
+}
+
 pub fn accrued_fees(env: &Env, who: &Address) -> i128 {
     address_i128(env, DataKey::Accrued(who.clone()))
 }
@@ -334,6 +391,14 @@ pub fn add_accrued_fees(env: &Env, who: &Address, delta: i128) {
 
 pub fn clear_accrued_fees(env: &Env, who: &Address) {
     set_address_i128(env, DataKey::Accrued(who.clone()), 0);
+}
+
+/// Read accrued, unclaimed fees without any pause check.
+///
+/// Fee pulls are always pull-based and MUST remain available while paused so
+/// accrued protocol/beneficiary funds are never frozen by an operator pause.
+pub fn accrued_fees_unpaused(env: &Env, who: &Address) -> i128 {
+    accrued_fees(env, who)
 }
 
 // ── Rematch Parent Link Validation ───────────────────────────────────────────

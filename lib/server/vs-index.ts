@@ -38,6 +38,13 @@ import {
   makeContractFreshness,
   type VSCacheFreshness,
 } from "@/lib/vs-freshness";
+import {
+  getContractEvents,
+  getDeployLedger,
+  isMarketConfigured,
+  requireMarketContractId,
+} from "@/lib/stellar";
+import { scValToNative, type rpc } from "@stellar/stellar-sdk";
 
 const LIST_FRESHNESS_MS = 60_000;
 const DETAIL_FRESHNESS_MS = 15_000;
@@ -45,6 +52,11 @@ const CLAIM_SYNC_PAGE_SIZE = 50;
 const POST_WRITE_REFRESH_ATTEMPTS = 5;
 const POST_WRITE_REFRESH_DELAY_MS = 1_500;
 const BACKGROUND_REFRESH_COOLDOWN_MS = 30_000;
+
+export const CLAIM_EVENTS_CURSOR_KEY = "claim_events_cursor_ledger";
+const CLAIM_EVENTS_MAX_PAGES_PER_PASS = 30;
+const RANGE_RECONCILE_INTERVAL_RUNS = 10;
+let reconcileRunCount = 0;
 
 // Re-export chain-state reconciliation types and functions for backwards compatibility
 export type { ClaimDiscrepancy } from "@/lib/server/sync-helpers";
@@ -271,6 +283,15 @@ function sanitizeClaimForPublicRead(claim: ClaimData): ClaimData {
 
 function isClaimFinal(state: string) {
   return state === "resolved" || state === "cancelled";
+}
+
+function sortToOrderBy(sort: VsSort | undefined): ClaimFilters["orderBy"] {
+  switch (sort) {
+    case "expiring": return "deadline_asc";
+    case "updated": return "updated_desc";
+    case "newest":
+    default: return "id_desc";
+  }
 }
 
 function isFresh(updatedAt: number, thresholdMs: number) {
@@ -550,117 +571,260 @@ export async function getVsWithInvite(
 const RECONCILE_MAX_NEW_PAGES = 2;
 const RECONCILE_MAX_ACTIVE_REFRESHES = 25;
 
+export interface ClaimEventSyncResult {
+  fromLedger: number;
+  toLedger: number;
+  eventsProcessed: number;
+  claimIdsTouched: number[];
+  claimsRefreshed: number;
+  stateChanges: number;
+  truncated: boolean;
+}
+
+function decodeClaimEventTopics(event: rpc.Api.EventResponse): { name: string; claimId: number | null } | null {
+  const topics = event.topic ?? [];
+  if (topics.length === 0) return null;
+
+  let name: string;
+  try {
+    name = String(scValToNative(topics[0]));
+  } catch {
+    return null;
+  }
+
+  // Topic[1] is claim id for ClaimCreated, ClaimChallenged, ClaimResolved, ClaimCancelled, MarketSettled
+  let claimId: number | null = null;
+  if (topics.length > 1) {
+    try {
+      const native = scValToNative(topics[1]);
+      if (typeof native === "bigint" || typeof native === "number") {
+        claimId = Number(native);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return { name, claimId };
+}
+
+/**
+ * Incrementally ingest claim updates from Soroban contract events.
+ * Listens for ClaimCreated, ClaimChallenged, ClaimResolved, MarketSettled, ClaimCancelled.
+ * Updates only the claims touched by these events and advances the persisted ledger cursor.
+ */
+export async function syncClaimsFromEvents(): Promise<ClaimEventSyncResult> {
+  const empty: ClaimEventSyncResult = {
+    fromLedger: 0,
+    toLedger: 0,
+    eventsProcessed: 0,
+    claimIdsTouched: [],
+    claimsRefreshed: 0,
+    stateChanges: 0,
+    truncated: false,
+  };
+
+  if (!isMarketConfigured()) return empty;
+  const contractId = requireMarketContractId();
+
+  const stored = await getSyncMeta(CLAIM_EVENTS_CURSOR_KEY).catch(() => null);
+  const validatedStored = validateCursorValue(stored, CLAIM_EVENTS_CURSOR_KEY, "vs-index");
+  const fromLedger = validatedStored !== null && validatedStored > 0 ? validatedStored : getDeployLedger();
+
+  const scan = await getContractEvents(contractId, {
+    startLedger: fromLedger,
+    maxPages: CLAIM_EVENTS_MAX_PAGES_PER_PASS,
+  });
+
+  const touchedClaimIds = new Set<number>();
+  let eventsProcessed = 0;
+
+  for (const rawEvent of scan.events) {
+    const decoded = decodeClaimEventTopics(rawEvent);
+    if (!decoded) continue;
+
+    const { name, claimId } = decoded;
+    if (claimId === null || !Number.isInteger(claimId) || claimId <= 0) continue;
+
+    // Check relevant claim events:
+    // ClaimCreated: claim_created
+    // ClaimChallenged: claim_challenged
+    // ClaimResolved: claim_resolved
+    // MarketSettled: market_settled
+    // ClaimCancelled: claim_cancelled
+    if (
+      name === "claim_created" ||
+      name === "ClaimCreated" ||
+      name === "claim_challenged" ||
+      name === "ClaimChallenged" ||
+      name === "claim_resolved" ||
+      name === "ClaimResolved" ||
+      name === "market_settled" ||
+      name === "MarketSettled" ||
+      name === "claim_cancelled" ||
+      name === "ClaimCancelled"
+    ) {
+      touchedClaimIds.add(claimId);
+      eventsProcessed += 1;
+    }
+  }
+
+  let claimsRefreshed = 0;
+  let stateChanges = 0;
+
+  // Refresh only the touched claims
+  for (const claimId of touchedClaimIds) {
+    const existing = await getClaimById(claimId);
+    const fresh = await refreshIndexedClaim({ claimId });
+    if (!fresh) continue;
+
+    claimsRefreshed += 1;
+    if (
+      !existing ||
+      fresh.state !== existing.state ||
+      fresh.total_challenger_stake !== existing.total_challenger_stake ||
+      fresh.challenger_count !== existing.challenger_count
+    ) {
+      stateChanges += 1;
+    }
+  }
+
+  // Monotonically advance cursor
+  const reached = scan.events.reduce((max, event) => Math.max(max, Number(event.ledger ?? 0)), fromLedger);
+  const nextCursor = scan.truncated ? reached : Math.max(reached, scan.latestLedger);
+  if (nextCursor > fromLedger) {
+    await advanceCursor(CLAIM_EVENTS_CURSOR_KEY, nextCursor);
+  }
+
+  return {
+    fromLedger,
+    toLedger: scan.latestLedger,
+    eventsProcessed,
+    claimIdsTouched: Array.from(touchedClaimIds),
+    claimsRefreshed,
+    stateChanges,
+    truncated: scan.truncated,
+  };
+}
+
 export async function reconcileVsIndex(): Promise<ReconcileResult> {
   const now = Date.now();
-  const [lastClaimCountValue, totalClaimCount, activeRows] = await Promise.all([
-    getSyncMeta("last_claim_count"),
-    getClaimCount(),
-    getClaimsByFilter({
-      states: ["open", "active"],
-      orderBy: "id_desc",
-    }),
-  ]);
+  reconcileRunCount += 1;
 
-  // Use validated cursor; fall back to 0 if corrupted
-  const lastClaimCount = validateCursorValue(lastClaimCountValue, "last_claim_count", "vs-index") ?? 0;
   let synced = 0;
   let newClaims = 0;
   let stateChanges = 0;
   let corrected = 0;
   let inconsistencies = 0;
 
-  // 1. Backfill new claims page by page, checkpointing after EVERY page.
-  //    The old version wrote last_claim_count only at the very end, so any
-  //    timeout or RPC failure threw away all progress and the index stalled.
-  let pagesDone = 0;
-  for (
-    let startId = lastClaimCount + 1;
-    startId <= totalClaimCount && pagesDone < RECONCILE_MAX_NEW_PAGES;
-    startId += CLAIM_SYNC_PAGE_SIZE, pagesDone += 1
-  ) {
-    const pageEnd = Math.min(startId + CLAIM_SYNC_PAGE_SIZE - 1, totalClaimCount);
-    const expected = pageEnd - startId + 1;
-    const pageClaims = await getClaimSummaries(startId, expected);
-    
-    // Validate chain-state accounting before persisting
-    for (const claim of pageClaims) {
-      const accountingErrors = validateClaimAccounting(claim, "vs-index");
-      if (accountingErrors.length > 0) {
-        console.warn(`[vs-index] Chain state accounting errors for claim ${claim.id}:`, accountingErrors);
-        // Still persist the claim as-is from chain (contract-first principle)
-        // but log the discrepancy for investigation
-      }
-    }
-    
-    if (pageClaims.length > 0) {
-      await persistIndexedClaims(pageClaims);
-      synced += pageClaims.length;
-      newClaims += pageClaims.length;
-    }
-
-    if (pageClaims.length < expected) {
-      // Claim ids are dense on-chain, so a short page means RPC reads failed.
-      // Checkpoint only the contiguous prefix that DID come back, then stop:
-      // the next run retries from there instead of skipping the gap forever.
-      const got = new Set(pageClaims.map((claim) => claim.id));
-      let checkpoint = startId - 1;
-      while (got.has(checkpoint + 1)) checkpoint += 1;
-      if (checkpoint >= startId) {
-        await advanceCursor("last_claim_count", checkpoint);
-      }
-      break;
-    }
-
-    await advanceCursor("last_claim_count", pageEnd);
+  // 1. Primary incremental ingestion: follow contract events from the persisted ledger cursor
+  try {
+    const eventSync = await syncClaimsFromEvents();
+    synced += eventSync.claimsRefreshed;
+    stateChanges += eventSync.stateChanges;
+  } catch (err) {
+    console.warn("[vs-index] Incremental event sync encountered error, continuing with fallback safety net:", err);
   }
 
-  // 2. Refresh claims the index believes are open/active by reading only
-  //    those ids, instead of re-scanning the entire chain to find them.
-  const rowsToRefresh = activeRows.slice(0, RECONCILE_MAX_ACTIVE_REFRESHES);
-  for (const row of rowsToRefresh) {
-    const fresh = await refreshIndexedClaim({ claimId: row.id });
-    if (!fresh) continue;
-    
-    // Validate chain-state accounting
-    const accountingErrors = validateClaimAccounting(fresh, "vs-index");
-    if (accountingErrors.length > 0) {
-      console.warn(`[vs-index] Chain state accounting errors for refreshed claim ${fresh.id}:`, accountingErrors);
-      inconsistencies += 1;
-    }
-    
-    synced += 1;
-    if (
-      fresh.state !== row.state ||
-      fresh.total_challenger_stake !== row.total_challenger_stake ||
-      fresh.challenger_count !== row.challenger_count
+  // 2. Range reconcile as periodic safety net at lower frequency
+  const shouldRunRangeSafetyNet =
+    reconcileRunCount % RANGE_RECONCILE_INTERVAL_RUNS === 1 || reconcileRunCount === 1;
+
+  if (shouldRunRangeSafetyNet) {
+    const [lastClaimCountValue, totalClaimCount, activeRows] = await Promise.all([
+      getSyncMeta("last_claim_count"),
+      getClaimCount(),
+      getClaimsByFilter({
+        states: ["open", "active"],
+        orderBy: "id_desc",
+      }),
+    ]);
+
+    // Use validated cursor; fall back to 0 if corrupted
+    const lastClaimCount = validateCursorValue(lastClaimCountValue, "last_claim_count", "vs-index") ?? 0;
+
+    // 2a. Backfill new claims page by page, checkpointing after EVERY page.
+    let pagesDone = 0;
+    for (
+      let startId = lastClaimCount + 1;
+      startId <= totalClaimCount && pagesDone < RECONCILE_MAX_NEW_PAGES;
+      startId += CLAIM_SYNC_PAGE_SIZE, pagesDone += 1
     ) {
-      stateChanges += 1;
+      const pageEnd = Math.min(startId + CLAIM_SYNC_PAGE_SIZE - 1, totalClaimCount);
+      const expected = pageEnd - startId + 1;
+      const pageClaims = await getClaimSummaries(startId, expected);
       
-      // Detect discrepancies between indexed and chain state
-      const discrepancies = compareClaimStates(row, fresh);
-      if (discrepancies.length > 0) {
-        console.warn(`[vs-index] Chain-index discrepancy for claim ${row.id}:`, discrepancies);
-        inconsistencies += discrepancies.filter(d => d.severity === "critical").length;
-        corrected += 1; // This correction came from chain state
+      // Validate chain-state accounting before persisting
+      for (const claim of pageClaims) {
+        const accountingErrors = validateClaimAccounting(claim, "vs-index");
+        if (accountingErrors.length > 0) {
+          console.warn(`[vs-index] Chain state accounting errors for claim ${claim.id}:`, accountingErrors);
+        }
       }
-    }
-  }
+      
+      if (pageClaims.length > 0) {
+        await persistIndexedClaims(pageClaims);
+        synced += pageClaims.length;
+        newClaims += pageClaims.length;
+      }
 
-  // 3. Periodic full validation of a sample of indexed claims
-  //    This catches drift that might have been missed in the incremental refresh
-  if (pagesDone === 0 && activeRows.length > 0) {
-    const sampleSize = Math.min(5, activeRows.length);
-    const sampleRows = activeRows.slice(0, sampleSize);
-    
-    for (const row of sampleRows) {
+      if (pageClaims.length < expected) {
+        const got = new Set(pageClaims.map((claim) => claim.id));
+        let checkpoint = startId - 1;
+        while (got.has(checkpoint + 1)) checkpoint += 1;
+        if (checkpoint >= startId) {
+          await advanceCursor("last_claim_count", checkpoint);
+        }
+        break;
+      }
+
+      await advanceCursor("last_claim_count", pageEnd);
+    }
+
+    // 2b. Safety refresh for active claims
+    const rowsToRefresh = activeRows.slice(0, RECONCILE_MAX_ACTIVE_REFRESHES);
+    for (const row of rowsToRefresh) {
       const fresh = await refreshIndexedClaim({ claimId: row.id });
       if (!fresh) continue;
       
-      const discrepancies = compareClaimStates(row, fresh);
-      if (discrepancies.length > 0) {
-        console.warn(`[vs-index] Validation discrepancy for claim ${row.id}:`, discrepancies);
-        inconsistencies += discrepancies.filter(d => d.severity === "critical").length;
-        corrected += 1;
+      const accountingErrors = validateClaimAccounting(fresh, "vs-index");
+      if (accountingErrors.length > 0) {
+        console.warn(`[vs-index] Chain state accounting errors for refreshed claim ${fresh.id}:`, accountingErrors);
+        inconsistencies += 1;
+      }
+      
+      synced += 1;
+      if (
+        fresh.state !== row.state ||
+        fresh.total_challenger_stake !== row.total_challenger_stake ||
+        fresh.challenger_count !== row.challenger_count
+      ) {
+        stateChanges += 1;
+        
+        const discrepancies = compareClaimStates(row, fresh);
+        if (discrepancies.length > 0) {
+          console.warn(`[vs-index] Chain-index discrepancy for claim ${row.id}:`, discrepancies);
+          inconsistencies += discrepancies.filter(d => d.severity === "critical").length;
+          corrected += 1;
+        }
+      }
+    }
+
+    // 2c. Periodic full validation sample
+    if (pagesDone === 0 && activeRows.length > 0) {
+      const sampleSize = Math.min(5, activeRows.length);
+      const sampleRows = activeRows.slice(0, sampleSize);
+      
+      for (const row of sampleRows) {
+        const fresh = await refreshIndexedClaim({ claimId: row.id });
+        if (!fresh) continue;
+        
+        const discrepancies = compareClaimStates(row, fresh);
+        if (discrepancies.length > 0) {
+          console.warn(`[vs-index] Validation discrepancy for claim ${row.id}:`, discrepancies);
+          inconsistencies += discrepancies.filter(d => d.severity === "critical").length;
+          corrected += 1;
+        }
       }
     }
   }
@@ -677,14 +841,30 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
   };
 }
 
+export type VsSort = "newest" | "expiring" | "updated";
+
+export interface VsFeedOptions {
+  forceRefresh?: boolean;
+  cursor?: number;
+  limit?: number;
+  category?: string;
+  states?: string[];
+  creator?: string;
+  sort?: VsSort;
+}
+
 export async function getVsFeedSnapshot(
-  options: { forceRefresh?: boolean; cursor?: number; limit?: number } = {}
+  options: VsFeedOptions = {}
 ): Promise<VSFeedSnapshot> {
   try {
-    const { cursor, limit = 50 } = options;
+    const { forceRefresh = false, cursor, limit = 50, category, states, creator, sort } = options;
+    const orderBy = sortToOrderBy(sort);
     const rows = await getClaimsByFilter({
       visibility: "public",
-      orderBy: "id_desc",
+      category: category ? [category] : undefined,
+      states,
+      creator,
+      orderBy,
       cursor,
       limit: limit + 1, // Fetch one extra to determine if there's a next page
     });
@@ -692,26 +872,29 @@ export async function getVsFeedSnapshot(
     const hasMore = rows.length > limit;
     const paginatedRows = hasMore ? rows.slice(0, limit) : rows;
     const nextCursor = hasMore ? paginatedRows[paginatedRows.length - 1].id : null;
-
+    
     const lastSyncAt = Number((await getSyncMeta("last_sync_at")) ?? "0");
     const shouldRefresh =
-      options.forceRefresh ||
+      forceRefresh ||
       rows.length === 0 ||
       !lastSyncAt ||
       !isFresh(lastSyncAt, LIST_FRESHNESS_MS);
-
-    if (options.forceRefresh || rows.length === 0) {
+    
+    if (forceRefresh || rows.length === 0) {
       await reconcileVsIndex();
       const refreshedRows = await getClaimsByFilter({
         visibility: "public",
-        orderBy: "id_desc",
+        category: category ? [category] : undefined,
+        states,
+        creator,
+        orderBy,
         cursor,
         limit: limit + 1,
       });
       const refreshedHasMore = refreshedRows.length > limit;
       const refreshedPaginatedRows = refreshedHasMore ? refreshedRows.slice(0, limit) : refreshedRows;
       const refreshedNextCursor = refreshedHasMore ? refreshedPaginatedRows[refreshedPaginatedRows.length - 1].id : null;
-
+    
       return {
         items: refreshedPaginatedRows.map((row) => claimRowToVSData(row)),
         cache: buildVSCacheFreshness({
@@ -722,11 +905,11 @@ export async function getVsFeedSnapshot(
         nextCursor: refreshedNextCursor,
       };
     }
-
+    
     if (shouldRefresh) {
       refreshVsIndexInBackground();
     }
-
+    
     return {
       items: paginatedRows.map((row) => claimRowToVSData(row)),
       cache: await buildListCacheFreshness(paginatedRows),
@@ -736,7 +919,7 @@ export async function getVsFeedSnapshot(
     // Silent before: a DB outage (unset/expired DATABASE_URL, paused Neon) here
     // makes markets + stats + revenue all go dark with zero log. Surface it.
     console.error("[vs-index] getVsFeedSnapshot DB read failed:", err instanceof Error ? err.message : err);
-    if (options.forceRefresh) {
+    if (forceRefresh) {
       return {
         items: (await refreshVSIndex()).items,
         cache: makeContractFreshness(),
