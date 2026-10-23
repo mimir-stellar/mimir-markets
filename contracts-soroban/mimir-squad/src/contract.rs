@@ -6,7 +6,10 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 use crate::escrow;
 use crate::pool;
 use crate::storage;
-use crate::types::{ClaimResult, Error, Market, PendingOracle, MAX_BATCH_SIZE};
+use crate::types::{
+    ClaimResult, Error, Market, PendingOracle, SquadLimits, MAX_BATCH_SIZE, MAX_DURATION,
+    MAX_FEE_BPS, MAX_QUESTION_BYTES, MIN_DURATION,
+};
 
 #[contract]
 pub struct MimirSquad;
@@ -53,7 +56,6 @@ impl MimirSquad {
         pool::withdraw_before_deadline(&env, participant, market_id, side, amount)
     }
 
-    
     pub fn transition_deadline(env: Env, market_id: u64) -> Result<(), Error> {
         pool::transition_deadline(&env, market_id)
     }
@@ -103,16 +105,6 @@ impl MimirSquad {
         pool::claim_parked_payout(&env, participant, market_id, side)
     }
 
-    pub fn withdraw_before_deadline(
-        env: Env,
-        participant: Address,
-        market_id: u64,
-        side: u32,
-        amount: i128,
-    ) -> Result<(), Error> {
-        pool::withdraw_before_deadline(&env, participant, market_id, side, amount)
-    }
-
     // ── Views ────────────────────────────────────────────────────────────────
 
     pub fn get_market(env: Env, market_id: u64) -> Result<Market, Error> {
@@ -130,10 +122,6 @@ impl MimirSquad {
         if ids.len() > MAX_BATCH_SIZE {
             return Err(Error::BatchTooLarge);
         }
-        if !storage::is_initialized(&env) {
-            return Err(Error::NotInitialized);
-        }
-
         if !storage::is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
@@ -233,6 +221,16 @@ impl MimirSquad {
     pub fn get_escrow_balance(env: Env) -> Result<i128, Error> {
         let usdc = storage::usdc(&env)?;
         Ok(escrow::balance(&env, &usdc))
+    }
+
+    /// Read-only view exposing the protocol limits enforced in `create_market`.
+    pub fn get_limits(_env: Env) -> SquadLimits {
+        SquadLimits {
+            max_fee_bps: MAX_FEE_BPS,
+            min_duration: MIN_DURATION,
+            max_duration: MAX_DURATION,
+            max_question_bytes: MAX_QUESTION_BYTES,
+        }
     }
 
     pub fn get_paused_flag(env: Env) -> bool {
