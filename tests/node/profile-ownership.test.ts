@@ -1,8 +1,30 @@
 import assert from "node:assert/strict";
+import Module from "node:module";
 import test from "node:test";
 
-import { buildProfile, findAgentOwner, type ProfileDataSources } from "../../lib/server/profile";
 import { REGISTRY_SCHEMA_VERSION, type AgentRecord } from "../../lib/agents/registry";
+import type { ProfileDataSources } from "../../lib/server/profile";
+
+// Stub Next.js "server-only" before loading lib/server/profile and its
+// transitive imports (agent-directory, api-validation, …). Static `import`
+// statements for node builtins above are fine — only the server module needs
+// the CJS require path.
+const moduleLoader = Module as unknown as {
+  _load: (request: string, parent: { filename?: string } | null, isMain: boolean) => unknown;
+};
+const originalLoad = moduleLoader._load;
+moduleLoader._load = function stubLoad(request, parent, isMain) {
+  if (request === "server-only") return {};
+  return originalLoad.call(this, request, parent, isMain);
+};
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { buildProfile, findAgentOwner } = require("../../lib/server/profile") as {
+  buildProfile: typeof import("../../lib/server/profile").buildProfile;
+  findAgentOwner: typeof import("../../lib/server/profile").findAgentOwner;
+};
+
+moduleLoader._load = originalLoad;
 
 const OWNER = "GBMGZBFKUNOS7JWPRPF5IMZR27DCR6BEP6SQVFV2I354UPY35FZTIR2Y";
 const OPERATOR = "GDZCBCIU6EI5FM5UC5IAWRT5ZY76OK4QDX5BEELC5V3NTNGAUIX5X4UH";

@@ -151,18 +151,18 @@ export async function buildProfile(
   });
 
   const { performance, results } = computeAgentPerformance(ownRows, { sinceMs });
-  // Newest claim first, then slice at the cursor so the profile page only pays for
-  // the markets it actually renders.
+  // Newest claim first. Pagination is handled by the caller (profile page or API
+  // route) using paginateByCursor so that buildProfile stays cursor-agnostic and
+  // injectable for tests.
   const sorted = results.sort((a, b) => b.claimId - a.claimId);
-  const page = paginateByCursor(sorted, cursor, PROFILE_PAGE_SIZE, (result) => result.claimId);
 
   return {
     address,
     agent,
     ownedAgents,
     performance,
-    results: page.items,
-    nextCursor: page.nextCursor,
+    results: sorted,
+    nextCursor: null,
     agentsRealisedPnlAtomic: agentsRealisedPnlAtomic,
     agentsSettled: agentsSettled,
   };
