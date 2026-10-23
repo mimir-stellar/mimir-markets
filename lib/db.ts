@@ -2590,27 +2590,17 @@ export async function getAgentTradeRows(address: string): Promise<AgentTradeRow[
   return rows;
 }
 
-/** Registry listing for the agents page. Revoked agents are shown, not hidden. */
-export async function listAgentRecords(limit = 100): Promise<AgentRecord[]> {
-  const pool = await getDb();
-  const [records, capabilities] = await Promise.all([
-    execute(pool, {
-      sql: "SELECT * FROM agent_registry ORDER BY created_at ASC LIMIT ?",
-      args: [limit],
-    }),
-    execute(pool, {
-      sql: "SELECT agent_id, capability FROM agent_capabilities WHERE revoked_at IS NULL",
-    }),
-  ]);
-
+function mapAgentRecords(
+  recordRows: unknown[], capabilityRows: unknown[],
+): AgentRecord[] {
   const byAgent = new Map<string, string[]>();
-  for (const raw of capabilities.rows) {
+  for (const raw of capabilityRows) {
     const row = raw as Record<string, unknown>;
     const id = getString(row.agent_id);
     byAgent.set(id, [...(byAgent.get(id) ?? []), getString(row.capability)]);
   }
 
-  return records.rows.map((raw) => {
+  return recordRows.map((raw) => {
     const row = raw as Record<string, unknown>;
     const agentId = getString(row.agent_id);
     let limits: AgentRecord["limits"];
@@ -2639,70 +2629,37 @@ export async function listAgentRecords(limit = 100): Promise<AgentRecord[]> {
   });
 }
 
-// ── Postgres-backed rate-limit store ──────────────────────────────────────────
-// Implements the same contract as the in-memory store in lib/api/rate-limit.ts.
-// The atomic INSERT ... ON CONFLICT ... RETURNING is what makes the count hold
-// across serverless instances: two concurrent requests for the same bucket
-// serialise on the row, so neither can read a stale count and both increment.
-
-/**
- * Increment the bucket for (dimension, key, windowStart) and return the new
- * count. `expiresAt` is epoch ms at which the row becomes garbage.
- *
- * The window is part of the primary key, so a request landing in a new window
- * inserts a fresh row at count 1 rather than resetting the old one — a reset
- * would race with a concurrent request still in the previous window.
- */
-export async function consumeRateLimit(args: {
-  dimension: string;
-  key: string;
-  windowStart: number;
-  expiresAt: number;
-}): Promise<number> {
+/** Registry listing for the agents page. Revoked agents are shown, not hidden. */
+export async function listAgentRecords(limit = 100): Promise<AgentRecord[]> {
   const pool = await getDb();
-  const result = await execute(pool, {
-    sql: `INSERT INTO rate_limit_buckets (dimension, bucket_key, window_start, count, expires_at)
-      VALUES (?, ?, ?, 1, ?)
-      ON CONFLICT(dimension, bucket_key, window_start) DO UPDATE SET
-        count = rate_limit_buckets.count + 1,
-        expires_at = GREATEST(rate_limit_buckets.expires_at, excluded.expires_at)
-      RETURNING count`,
-    args: [args.dimension, args.key, args.windowStart, args.expiresAt],
+  const [records, capabilities] = await Promise.all([
+    execute(pool, {
+      sql: "SELECT * FROM agent_registry ORDER BY created_at ASC LIMIT ?",
+      args: [limit],
+    }),
+    execute(pool, {
+      sql: "SELECT agent_id, capability FROM agent_capabilities WHERE revoked_at IS NULL",
+    }),
+  ]);
+  return mapAgentRecords(records.rows, capabilities.rows);
+}
+
+/** Registry agents owned by this exact, case-sensitive Stellar address. */
+export async function listAgentRecordsByOwner(ownerWallet: string): Promise<AgentRecord[]> {
+  const pool = await getDb();
+  const records = await execute(pool, {
+    sql: "SELECT * FROM agent_registry WHERE owner_wallet = ? ORDER BY created_at ASC",
+    args: [ownerWallet],
   });
-  const row = result.rows[0];
-  return row ? getNumber((row as Record<string, unknown>).count) : 0;
-}
+  if (records.rows.length === 0) return [];
 
-/**
- * Delete rate-limit rows whose window has closed.
- *
- * Safe to call at any time: a row with `expires_at <= now` belongs to a window
- * that can no longer be presented, so deleting it cannot let a request through.
- * Returns the number of rows deleted.
- */
-export async function pruneExpiredRateLimits(now: number): Promise<number> {
-  const pool = await getDb();
-  const result = await pool.query(
-    "DELETE FROM rate_limit_buckets WHERE expires_at <= $1",
-    [now],
-  );
-  return result.rowCount ?? 0;
-}
-
-/**
- * Postgres-backed `RateLimitStore`. Constructed by `lib/api/rate-limit.ts` when
- * `RATE_LIMIT_STORE=postgres` is set; the caller is responsible for falling
- * back to the in-memory store on any error thrown here.
- */
-export function createPostgresRateLimitStore(): RateLimitStore {
-  return {
-    async consume(dimension, key, windowStart, expiresAt) {
-      return consumeRateLimit({ dimension, key, windowStart, expiresAt });
-    },
-    async prune(now) {
-      return pruneExpiredRateLimits(now);
-    },
-  };
+  const capabilities = await execute(pool, {
+    sql: `SELECT ac.agent_id, ac.capability FROM agent_capabilities ac
+      JOIN agent_registry ar ON ar.agent_id = ac.agent_id
+      WHERE ar.owner_wallet = ? AND ac.revoked_at IS NULL`,
+    args: [ownerWallet],
+  });
+  return mapAgentRecords(records.rows, capabilities.rows);
 }
 
 // ── User-created baskets ──────────────────────────────────────────────────────
