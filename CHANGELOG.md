@@ -18,3 +18,11 @@ why, the commit history records the what.
   - An undecidable change set (missing event payload, failed fetch, no merge-base) runs all tiers and marks the run red.
   - Doc-only changes (`README.md`, `CHANGELOG.md`, `LICENSE`, `docs/`) are the one explicit "run nothing" outcome.
 - Adding a scope is now a reviewed, parity-checked decision: `lib/ci/path-scope.ts` (the tested contract) and `scripts/ci/changed-paths.mjs` (the workflow driver) must stay identical, enforced by `npm run check:driver-parity` and `tests/node/ci-path-scope.test.ts`. A green CI run now means the suites that ran are exactly the suites the change required.
+
+### Added
+
+- **Two-step ownership transfer** in `contracts-soroban/mimir-market`. Ownership no longer moves on a single call. The owner now calls `propose_owner(new_owner)`, and the proposed address must sign `accept_ownership`` before the owner slot changes. `cancel_owner_proposal` lets the owner withdraw a pending proposal, and a second proposal overwrites the first. This closes the brick risk of a typo or a contract that cannot sign locking fee policy and oracle rotations forever. New events: `OwnershipProposed`, `OwnershipProposalCancelled`, and the existing `OwnershipTransferred` now fires on acceptance. See `docs/LIFECYCLE_EVENTS.md`.
+
+### Deprecated
+
+- `transfer_ownership(new_owner)` is kept as a deprecated alias for `propose_owner(new_owner)`. It no longer changes the owner immediately; it only stores a pending owner that must still be accepted. Callers should migrate to `propose_owner` + `accept_ownership`.

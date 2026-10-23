@@ -1,6 +1,6 @@
 //! Typed contract events, mirroring the `event` declarations in MimirV2.sol.
 
-use soroban_sdk::{contractevent, Address, BytesN, String};
+use soroban_sdk:{contractevent, Address, BytesN, String};
 
 use crate::types::WinnerSide;
 
@@ -124,6 +124,23 @@ pub struct OwnershipTransferred {
     #[topic]
     pub next: Address,
     pub previous: Option<Address>,
+}
+
+/// Emitted when the current owner proposes a new owner. Ownership does not
+/// move until the proposed address signs `accept_ownership`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipProposed {
+    #[topic]
+    pub next: Address,
+    pub previous: Option<Address>,
+}
+
+/// Emitted when the owner cancels a pending ownership proposal.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipProposalCancelled {
+    pub cancelled: bool,
 }
 
 #[contractevent]

@@ -208,6 +208,13 @@ pub struct PendingOracle {
     pub executable_at: u64,
 }
 
+/// A proposed ownership transfer awaiting acceptance by the new owner.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingOwner {
+    pub next: Address,
+}
+
 /// Copied onto each claim at creation and never mutated afterwards.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -431,4 +438,10 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    /// `accept_ownership` was called by an address that is not the pending
+    /// owner. Ownership is left untouched.
+    NotPendingOwner = 48,
+    /// `accept_ownership` or `cancel_owner_proposal` was called with no
+    /// ownership proposal outstanding.
+    NoPendingOwner = 49,
 }

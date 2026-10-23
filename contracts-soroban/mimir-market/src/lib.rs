@@ -1,4 +1,5 @@
 #no_std
+use soroban_sdk;
 /// Mimir market — oracle-settled prediction market on Soroban.
 ///
 /// Port of `contracts/MimirV2.sol`. Stakes are held in a USDC Stellar Asset
@@ -36,6 +37,8 @@ mod test_fee_rounding;
 mod test_fees;
 #[cfg(test)]
 mod test_lifecycle;
+#[cfg(test)]
+mod test_ownership;
 #[cfg(test)]
 mod test_pagination;
 #[cfg(test)]
