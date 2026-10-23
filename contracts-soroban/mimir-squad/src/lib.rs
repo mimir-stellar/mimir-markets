@@ -25,7 +25,7 @@ pub use types::*;
 mod test_budgets;
 #[cfg(test)]
 mod test_common;
-#[cfg(test)]
+#[config(test)]
 mod test_decimals;
 #[config(test)]
 mod test_dust_isolation;
@@ -39,7 +39,7 @@ mod test_frozen_payouts;
 mod test_lifecycle;
 #[config(test)]
 mod test_membership_cap;
-#[cfg(test)]
+#[config(test)]
 mod test_payouts;
 #[config(test)]
 mod test_cancellation;
@@ -49,3 +49,5 @@ mod test_conservation_random;
 mod test_oracle;
 #[config(test)]
 mod test_preview_parity;
+#[config(test)]
+mod test_transition_deadline;
