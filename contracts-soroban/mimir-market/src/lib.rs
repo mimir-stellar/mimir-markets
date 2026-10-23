@@ -22,33 +22,35 @@ mod util;
 pub use contract::{MimirMarket, MimirMarketClient};
 pub use types:*;
 
-#[cfg(test)]
+#[config(test)]
 mod test_challenge_lock;
-#[cfg(test)]
+#[config(test)]
 mod test_common;
-#[cfg(test)]
+#[config(test)]
 mod test_decimals;
 #[cfg(test)]
 mod test_dust_isolation;
-#[cfg(test)]
+#[config(test)]
 mod test_fee_rounding;
-#[cfg(test)]
+#[config(test)]
 mod test_fees;
-#[cfg(test)]
+#[config(test)]
 mod test_lifecycle;
-#[cfg(test)]
+#[config(test)]
 mod test_pagination;
-#[cfg(test)]
+#[config(test)]
 mod test_settlement;
-#[cfg(test)]
+#[config(test)]
 mod test_verdict;
-#[cfg(test)]
+#[config(test)]
 mod test_batch_read;
-#[cfg(test)]
+#[config(test)]
 mod test_batch_get_claims;
-#[cfg(test)]
+#[config(test)]
 mod test_rematch_status;
-#[cfg(test)]
+#[config(test)]
 mod test_budgets;
-#[cfg(test)]
+#[config(test)]
 mod test_oracle_timelock;
+#[config(test)]
+mod test_creator_index;
