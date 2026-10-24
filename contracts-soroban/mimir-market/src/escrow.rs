@@ -1,6 +1,6 @@
 /// USDC custody: exact-amount pulls, and pushes that fall back to a pull.
 
-use soroban_sdk:{token, Address, Env};
+use soroban_sdk::{token, Address, Env};
 
 use crate::events;
 use crate::storage;
@@ -42,11 +42,10 @@ pub fn pull(env: &Env, usdc: &Address, from: &Address, amount: i128) -> Result<(
 
 /// Push a payout; park it on any failure.
 ///
-/// In the EVM version, a blacklisted USDC recipient made `transfer` REVERT, which
-/// would otherwise strand every other payout in the same `resolveClaim`. Soroban has
-/// no blacklist, but a frozen or authorization-revoked trustline makes the SAC
-/// transfer fail the same way — so the pull fallback is kept, using `try_` to
-/// recover from the sub-call failure rather than propagating it.
+/// A failing transfer (for example a frozen or authorization-revoked trustline on
+/// the SAC) must not strand every other payout in the same claim resolution. The
+/// failed payout is therefore parked as withdrawable, using `try_` to recover from
+/// the sub-call failure rather than propagating it.
 pub fn push_or_park(env: &Env, usdc: &Address, to: &Address, amount: i128) {
     if amount == 0 {
         return;

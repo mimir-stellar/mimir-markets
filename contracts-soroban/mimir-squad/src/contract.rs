@@ -43,17 +43,6 @@ impl MimirSquad {
         pool::deposit(&env, participant, market_id, side, amount)
     }
 
-    pub fn withdraw_before_deadline(
-        env: Env,
-        participant: Address,
-        market_id: u64,
-        side: u32,
-        amount: i128,
-    ) -> Result<(), Error> {
-        pool::withdraw_before_deadline(&env, participant, market_id, side, amount)
-    }
-
-    
     pub fn transition_deadline(env: Env, market_id: u64) -> Result<(), Error> {
         pool::transition_deadline(&env, market_id)
     }

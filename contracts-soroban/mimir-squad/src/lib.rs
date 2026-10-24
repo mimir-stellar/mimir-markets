@@ -1,4 +1,4 @@
-#l![no_std]
+#![no_std]
 /// Mimir squad — two-sided USDC pool on Soroban.
 ///
 /// Port of the EVM version (`contracts/MimirSquad.sol`). Shares equal
@@ -11,43 +11,43 @@
 /// `DEVIATION FROM SOLIDITY` at the point they occur.
 
 mod escrow;
-pub_mod events;
+pub mod events;
 mod pool;
 mod storage;
 mod types;
 
-pub_mod contract;
+pub mod contract;
 
 pub use contract::{MimirSquad, MimirSquadClient};
 pub use types::*;
 
-#[config(test)]
+#[cfg(test)]
 mod test_budgets;
 #[cfg(test)]
 mod test_common;
-#[config(test)]
+#[cfg(test)]
 mod test_decimals;
-#[config(test)]
+#[cfg(test)]
 mod test_dust_isolation;
-#[config(test)]
+#[cfg(test)]
 mod test_fee_rounding;
-#[config(test)]
+#[cfg(test)]
 mod test_fee_recipient_rotation;
-#[config(test)]
+#[cfg(test)]
 mod test_frozen_payouts;
-#[config(test)]
+#[cfg(test)]
 mod test_lifecycle;
-#[config(test)]
+#[cfg(test)]
 mod test_membership_cap;
-#[config(test)]
+#[cfg(test)]
 mod test_payouts;
-#[config(test)]
+#[cfg(test)]
 mod test_cancellation;
-#[config(test)]
+#[cfg(test)]
 mod test_conservation_random;
-#[config(test)]
+#[cfg(test)]
 mod test_oracle;
-#[config(test)]
+#[cfg(test)]
 mod test_preview_parity;
-#[config(test)]
+#[cfg(test)]
 mod test_transition_deadline;
