@@ -131,7 +131,6 @@ impl MimirMarket {
         )
     }
 
-    
     pub fn transition_deadline(env: Env, claim_id: u64) -> Result<(), Error> {
         claims::transition_deadline(&env, claim_id)
     }
@@ -157,8 +156,8 @@ impl MimirMarket {
 
     // ── Pull payments ────────────────────────────────────────────────────────
 
-    /// Solidity used `msg.sender`; Soroban has no equivalent for a top-level
-    /// call, so the beneficiary is an explicit argument that must authorize.
+    /// The EVM version used `msg.sender`; Soroban has no equivalent for a
+    /// top-level call, so the beneficiary is an explicit argument that must authorize.
     ///
     /// Withdrawals are intentionally NOT gated by the pause flag: pause
     /// controls may halt new claims, challenges, and resolutions, but must
@@ -296,7 +295,7 @@ impl MimirMarket {
 
     /// A paginated window into the challenger roster.
     ///
-    /// Returns up to `limit` entries starting at `offset` (0-based).  
+    /// Returns up to `limit` entries starting at `offset` (0-based).
     /// `limit = 0` returns all entries from `offset` to the end of the roster —
     /// identical to `get_challenger_list` when `offset = 0`.
     ///

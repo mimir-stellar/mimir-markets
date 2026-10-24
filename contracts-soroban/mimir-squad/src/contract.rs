@@ -43,17 +43,6 @@ impl MimirSquad {
         pool::deposit(&env, participant, market_id, side, amount)
     }
 
-    pub fn withdraw_before_deadline(
-        env: Env,
-        participant: Address,
-        market_id: u64,
-        side: u32,
-        amount: i128,
-    ) -> Result<(), Error> {
-        pool::withdraw_before_deadline(&env, participant, market_id, side, amount)
-    }
-
-    
     pub fn transition_deadline(env: Env, market_id: u64) -> Result<(), Error> {
         pool::transition_deadline(&env, market_id)
     }
@@ -69,9 +58,9 @@ impl MimirSquad {
         pool::cancel_market(&env, market_id)
     }
 
-    /// Pull-based payout. Solidity used `msg.sender`; Soroban has no equivalent
-    /// for a top-level call, so the claimant is an explicit argument that must
-    /// authorize. Returns the net amount transferred.
+    /// Pull-based payout. The EVM version used `msg.sender`; Soroban has no
+    /// equivalent for a top-level call, so the claimant is an explicit argument
+    /// that must authorize. Returns the net amount transferred.
     pub fn claim(env: Env, participant: Address, market_id: u64, side: u32) -> Result<i128, Error> {
         pool::claim(&env, participant, market_id, side)
     }

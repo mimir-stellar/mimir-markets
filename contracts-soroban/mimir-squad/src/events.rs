@@ -1,4 +1,4 @@
-/// Typed contract events, mirroring the `event` declarations in MimirSquad.sol.
+/// Typed contract events, mirroring the `event` declarations in the EVM version (MimirSquad.sol).
 
 use soroban_sdk:{contractevent, Address, String};
 
@@ -183,8 +183,8 @@ pub struct FeeRecipientQueued {
     pub executable_at: u64,
 }
 
-/// Emitted when a queued fee recipier rotation is executed after the timelock.
-/// Any fees accrued but unclaimed at execution time are payable to ``next``.
+/// Emitted when a queued fee recipient rotation is executed after the timelock.
+/// Any fees accrued but unclaimed at execution time are payable to `next`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeeRecipientChanged {
