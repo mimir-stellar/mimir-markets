@@ -18,7 +18,7 @@ mod types;
 
 pub mod contract;
 
-pub use contract::{MimirSquad, MimirSquadClient};
+pub use contract::{MimirSquad, MimirSquadRoles, MimirSquadClient};
 pub use types::*;
 
 #[cfg(test)]
@@ -49,5 +49,7 @@ mod test_conservation_random;
 mod test_oracle;
 #[cfg(test)]
 mod test_preview_parity;
+#[cfg(test)]
+mod test_limits;
 #[cfg(test)]
 mod test_transition_deadline;

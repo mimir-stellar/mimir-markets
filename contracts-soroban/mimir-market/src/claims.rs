@@ -1,16 +1,89 @@
 //! Claim lifecycle: create, challenge, cancel.
 
-use soroban_sdk:{Address, Env, String, Vec};
+use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::escrow;
 use crate::events;
 use crate::fees;
 use crate::storage;
-use crate::types:{
+use crate::types::{
     Challenger, Claim, ClaimState, CreateParams, Error, FeeSnapshot, MarketConfig, WinnerSide,
     BPS_DIVISOR, CHALLENGE_LOCK_SECONDS, DEFAULT_PAYOUT_BPS, MAX_CHALLENGERS, MIN_STAKE,
 };
 use crate::util;
+
+/// Number of claim ids stored per creator-index page. Bounds the size of any
+/// single persistent entry written by `create_claim`.
+const CREATOR_INDEX_PAGE_SIZE: u32 = 100;
+
+fn creator_index_page_key(env: &Env, creator: &Address, page: u32) {
+    (
+        soroban_sdk::symbol_short!("cclm_pg"),
+        creator.clone(),
+        page,
+    )
+}
+
+fn creator_index_count_key(env: &Env, creator: &Address) {
+    (soroban_sdk::symbol_short!("cclm_ct"), creator.clone())
+}
+
+pub fn creator_index_append(env: &Env, creator: &Address, id: u64) {
+    let count_key = creator_index_count_key(env, creator);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let page = count / CREATOR_INDEX_PAGE_SIZE;
+    let key = creator_index_page_key(env, creator, page);
+    let mut ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
+    ids.push_back(id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage().persistent().set(&count_key, &(count + 1));
+}
+
+pub fn get_creator_claims(
+    env: &Env,
+    creator: Address,
+    offset: u32,
+    limit: u32,
+) -> (Vec<u64>, u32) {
+    let count_key = creator_index_count_key(env, &creator);
+    let total: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let mut out = Vec::new(env);
+    if limit == 0 || offset >= total {
+        return (out, total);
+    }
+    let mut remaining = limit.min(total - offset);
+    let mut index = offset;
+    while remaining > 0 {
+        let page = index / CREATOR_INDEX_PAGE_SIZE;
+        let key = creator_index_page_key(env, &creator, page);
+        let ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
+        let page_start = page * CREATOR_INDEX_PAGE_SIZE;
+        let mut local = index - page_start;
+        while local < ids.len() && remaining > 0 {
+            out.push_back(ids.get(local).unwrap());
+            local += 1;
+            index += 1;
+            remaining -= 1;
+        }
+        if local >= ids.len() && remaining > 0 {
+            // Defensive: short page but count says more; avoid infinite loop.
+            break;
+        }
+    }
+    // TTL extension like other reads.
+    env.storage().persistent().extend_ttl(&count_key, 30, env.ledger().max_ttl() / 2);
+    if out.len() > 0 {
+        let first_page = offset / CREATOR_INDEX_PAGE_SIZE;
+        let last_page = (index - 1) / CREATOR_INDEX_PAGE_SIZE;
+        let mut p = first_page;
+        while p <= last_page {
+            let key = creator_index_page_key(env, &creator, p);
+            env.storage().persistent().extend_ttl(&key, 30, env.ledger().max_ttl() / 2);
+            p += 1;
+        }
+    }
+    (out, total)
+}
 
 pub fn create_claim(env: &Env, creator: Address, params: CreateParams) -> Result<u64, Error> {
     creator.require_auth();
@@ -105,6 +178,7 @@ pub fn create_claim(env: &Env, creator: Address, params: CreateParams) -> Result
     let category = claim.category.clone();
     storage::set_claim(env, id, &claim);
     storage::set_challengers(env, id, &Vec::new(env));
+    creator_index_append(env, &creator, id);
 
     events::EscrowSeeded {
         id,
@@ -160,7 +234,7 @@ pub fn challenge_claim(
             return Ok(());
         }
     }
-    let max_challengers = claim.market.max_challengers.min($AX_CHALLENGERS);
+    let max_challengers = claim.market.max_challengers.min(MAX_CHALLENGERS);
     if claim.challenger_count >= max_challengers || list.len() >= max_challengers {
         return Err(Error::ClaimFull);
     }
@@ -287,14 +361,14 @@ pub fn challenge_claim(
         stake: stake_amount,
     }
     .publish(env);
-    Ok()
+    Ok(())
 }
 
 
 pub fn transition_deadline(env: &Env, claim_id: u64) -> Result<(), Error> {
     let mut claim = storage::get_claim(env, claim_id)?;
     if claim.state == ClaimState::Active {
-        return Ok();
+        return Ok(());
     }
     if claim.state != ClaimState::Open {
         return Err(Error::ClaimNotOpen);
@@ -338,14 +412,14 @@ pub fn transition_deadline(env: &Env, claim_id: u64) -> Result<(), Error> {
         parked: storage::withdrawable(env, &creator) > pending_before,
     }
     .publish(env);
-    Ok(()
+    Ok(())
 }
 
-pub fn cancel_claim(env &Env, claim_id: u64) -> Result<(), Error> {
+pub fn cancel_claim(env: &Env, claim_id: u64) -> Result<(), Error> {
     let mut claim = storage::get_claim(env, claim_id)?;
     claim.creator.require_auth();
     if claim.state == ClaimState::Cancelled {
-        return Ok(();
+        return Ok(());
     }
     if claim.state != ClaimState::Open {
         return Err(Error::ClaimNotOpen);
@@ -370,6 +444,7 @@ pub fn cancel_claim(env &Env, claim_id: u64) -> Result<(), Error> {
     let creator = claim.creator.clone();
     let refund = claim.creator_stake;
     claim.state = ClaimState::Cancelled;
+    claim.remaining_escrow = 0;
     storage::set_claim(env, claim_id, &claim);
 
     events::ClaimStateTransitioned {
@@ -395,5 +470,5 @@ pub fn cancel_claim(env &Env, claim_id: u64) -> Result<(), Error> {
         parked: storage::withdrawable(env, &creator) > pending_before,
     }
     .publish(env);
-    Ok()
+    Ok(())
 }

@@ -73,6 +73,7 @@ import {
   philosopherSecretEnv,
 } from "./philosophers";
 import { runPersonaForClaim } from "./shared/persona-runner";
+import { pruneEvidenceCache } from "./shared/evidence-cache";
 import { buyPeerReasoning } from "./shared/peer-reasoning";
 import { toClaimOnChain } from "./shared/types";
 import { parseCouncilConfig } from "./shared/config";
@@ -226,7 +227,9 @@ async function poll(): Promise<void> {
   );
 
   // Shared per-cycle evidence cache — one HTTP fetch per claim no matter
-  // how many personas need it.
+  // how many personas need it. Fresh fetches are also kept in the
+  // module-level cache in shared/evidence-cache.ts, so later cycles reuse them
+  // while they are inside their category's freshness window.
   const evidenceCache = new Map<number, EvidenceCacheEntry>();
   const peerReasoning = new Map<string, string[]>();
   const ctx: PersonaRunnerContext = {
@@ -247,6 +250,8 @@ async function poll(): Promise<void> {
     }
   }
   const allClaims = selectJoinableClaims(fetched, now);
+  // Drop cross-cycle evidence for claims that are no longer joinable.
+  pruneEvidenceCache(new Set(allClaims.map((claim) => claim.id)));
   if (allClaims.length === 0) {
     console.log("[council] No joinable claims this round.");
     return;

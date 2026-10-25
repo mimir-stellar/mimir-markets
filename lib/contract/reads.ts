@@ -1,8 +1,9 @@
 /*
  * Read-only contract helpers.
  *
- * Houses the raw contract read paths (single claim and range queries) that
- * wrap the generated bindings client. No state-changing logic lives here.
+ * Houses the raw contract read paths (single claim, range queries, and
+ * per-creator paginated index reads) that wrap the generated bindings
+ * client. No state-changing logic lives here.
  */
 
 import { getContractClient } from './client';
@@ -14,12 +15,17 @@ export interface RawClaim {
   status: number;
   createdAt: bigint;
   expiresAt: bigint;
-  metadataURI?: string;
+  metadataUri?: string;
 }
 
 export interface RawClaimRange {
   claims: RawClaim[];
   nextCursor?: bigint;
+  total: number;
+}
+
+export interface CreatorClaimsPage {
+  ids: bigint[];
   total: number;
 }
 
@@ -71,6 +77,31 @@ export async function readClaimsRange(
     claims,
     nextCursor: cursor + BigInt(count),
     total: claims.length,
+  };
+}
+
+/**
+ * Fetch a page of claim ids created by a specific creator.
+ *
+ * Uses the contract's per-creator index (`get_creator_claims`), avoiding
+ * the O(total claims) scan that client-side filtering requires.
+ */
+export async function readCreatorClaims(
+  creator: string,
+  offset: number = 0,
+  limit: number = 20,
+): Promise<CreatorClaimsPage> {
+  const client = getContractClient();
+  const result = await client.getCreatorClaims({
+    creator,
+    offset: BigInt(offset),
+    limit: BigInt(limit),
+  });
+  const ids = (result.ids ?? result[0] ?? []).map(toBigInt);
+  const totalRaw = result.total ?? result[1] ?? ids.length;
+  return {
+    ids,
+    total: Number(totalRaw),
   };
 }
 
@@ -165,7 +196,7 @@ function normalizeRawClaim(input: any): RawClaim {
     status: Number(input.status),
     createdAt: toBigInt(input.createdAt),
     expiresAt: toBigInt(input.expiresAt),
-    metadataUri: input.metadataUri ?? undefined,
+    metadataUri: input.metadataUri ?? input.metadataURI ?? undefined,
   };
 }
 
