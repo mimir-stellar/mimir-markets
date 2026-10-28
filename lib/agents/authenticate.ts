@@ -33,7 +33,7 @@ import type { AgentApiAction } from "./api";
  * must be initiated by the owner, not by whatever credential is being replaced.
  */
 export const OWNER_SIGNED_ACTIONS: readonly AgentApiAction[] = [
-  "register", "revoke", "issueKey", "revokeKey", "rotateKey", "grantSpend", "revokeSpend",
+  "register", "revoke", "issueKey", "revokeKey", "rotateKey", "grantSpend", "revokeSpend", "registerWebhook",
 ];
 
 export function requiresOwnerSignature(action: AgentApiAction): boolean {

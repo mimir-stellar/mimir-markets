@@ -34,7 +34,8 @@
         "rotateKey",
         "grantSpend",
         "revokeSpend",
-        "spendStatus"
+        "spendStatus",
+        "registerWebhook"
       ],
       "description": "Must equal the {action} path segment. The action list is the live one in lib/agents/api.ts."
     },

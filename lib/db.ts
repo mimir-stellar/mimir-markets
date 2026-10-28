@@ -7,6 +7,7 @@ import type { AgentApiKeyRecord } from "@/lib/agents/api-keys";
 import type { AgentTradeRow } from "@/lib/agents/performance";
 import type { AgentRecord } from "@/lib/agents/registry";
 import type { SpendPermissionRecord } from "@/lib/agents/spend-permissions";
+import type { AgentWebhookRecord, WebhookEventType } from "@/lib/agents/webhooks";
 import type { CopyAuditRecord, CopyPermission } from "@/lib/copy-trading";
 
 /**
@@ -708,6 +709,19 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_basket_transfers_basket ON basket_ownership_transfers(basket_id, transferred_at DESC)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_basket_transfers_from ON basket_ownership_transfers(from_wallet)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_basket_transfers_to ON basket_ownership_transfers(to_wallet)" },
+  { sql: `CREATE TABLE IF NOT EXISTS agent_webhooks (
+    webhook_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    secret_prefix TEXT NOT NULL,
+    events_json TEXT NOT NULL DEFAULT '[]',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    revoked_at BIGINT
+  )` },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_agent_webhooks_active ON agent_webhooks(active)" },
   {
     sql: "INSERT INTO schema_migrations(migration_id, schema_version, checksum, applied_at) VALUES($1, $2, $3, $4) ON CONFLICT(schema_version) DO NOTHING",
     args: ["base-platform-schema-v2", 2, "market-series-profile-conviction-baskets-v2", 0],

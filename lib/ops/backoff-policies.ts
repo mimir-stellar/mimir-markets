@@ -292,6 +292,20 @@ export const TRADERS_BACKOFF: BackoffPolicy = {
   },
 };
 
+export const WEBHOOK_BACKOFF: BackoffPolicy = {
+  label: "webhooks",
+  maxConsecutiveDependencyFailures: 5,
+  dependencies: ["webhook"],
+  handlers: {
+    malformed_input:            skip,
+    stale_state:                fixed(5_000, "stale_state(5s fixed)"),
+    duplicate_action:           skip,
+    cancelled_by_operator:      skip,
+    paused_worker:              fixed(300_000, "paused_worker(5min fixed)"),
+    dependency_failure:         exponentialWithJitter(1_000, 60_000),
+  },
+};
+
 export const POLICIES: Record<string, BackoffPolicy> = {
   default:            DEFAULT_BACKOFF,
   oracle:             ORACLE_BACKOFF,
@@ -299,6 +313,7 @@ export const POLICIES: Record<string, BackoffPolicy> = {
   council:            COUNCIL_BACKOFF,
   sync:               SYNC_BACKOFF,
   traders:            TRADERS_BACKOFF,
+  webhooks:           WEBHOOK_BACKOFF,
 };
 
 export function policyFor(name: string): BackoffPolicy {

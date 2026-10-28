@@ -66,6 +66,20 @@ import {
   type AgentRecord,
   type AuthorityLevel,
 } from "@/lib/agents/registry";
+import {
+  DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+  MAX_PENDING_WEBHOOK_EVENTS_PER_AGENT,
+  MAX_WEBHOOK_DELIVERY_ATTEMPTS,
+  WEBHOOK_DELIVERY_HEADER,
+  WEBHOOK_EVENTS,
+  WEBHOOK_EVENT_HEADER,
+  WEBHOOK_SIGNATURE_HEADER,
+  WEBHOOK_SIGNATURE_VERSION,
+  WEBHOOK_TIMESTAMP_HEADER,
+  buildWebhookRetrySchedule,
+  signWebhookPayload,
+  type WebhookEventPayload,
+} from "@/lib/agents/webhooks";
 import { apiError, apiErrorCatalogue, type ApiErrorCode, type ApiErrorSpec } from "@/lib/api/errors";
 import { PAUSABLE, pauseEnvKey, type Pausable } from "@/lib/ops/flags";
 import { isContractAddress } from "@/lib/stellar";
@@ -128,12 +142,14 @@ export const SYNTHETIC_WALLET_VALUES: readonly string[] = Object.values(SYNTHETI
  * Regenerate with `Buffer.alloc(64).toString("base64")`.
  */
 export const PLACEHOLDER_API_KEY = "mk_test_EXAMPLEPLACEHOLDER0000000000000000";
+export const PLACEHOLDER_WEBHOOK_SECRET = "whsec_0000000000000000000000000000000000000000000000000000000000000000";
 export const PLACEHOLDER_SIGNATURE = Buffer.alloc(64).toString("base64");
 
 /** Tokens the published documents are allowed to contain, credential-shaped or not. */
 const ALLOWED_TOKENS: readonly string[] = [
   ...SYNTHETIC_WALLET_VALUES,
   PLACEHOLDER_API_KEY,
+  PLACEHOLDER_WEBHOOK_SECRET,
   PLACEHOLDER_SIGNATURE,
 ];
 
@@ -310,6 +326,7 @@ const ACTION_SUMMARY: Record<AgentApiAction, string> = {
   grantSpend: "Record the owner-signed USDC SAC allowance and period budget that funds a key. Owner-signed.",
   revokeSpend: "Stop drawing from a permission. The grant itself is withdrawn on chain by the owner.",
   spendStatus: "Remaining allowance, period window and the agent's limits, in atomic USDC strings.",
+  registerWebhook: "Register an HTTPS webhook URL for claim lifecycle push events. Owner-signed and SSRF-guarded.",
 };
 
 /** The capability an action needs, or null when it needs none. */
@@ -539,6 +556,15 @@ export function buildAgentRequestExamples(): PublishedExample[] {
       signature: placeholderSignature(),
     },
   });
+  const registerWebhook = signedEnvelope({
+    action: "registerWebhook",
+    idempotencyKey: "example-registerwebhook-0001",
+    nonce: "example-registerwebhook-nonce-0001",
+    body: {
+      url: "https://agent.example/webhooks/mimir",
+      events: [...WEBHOOK_EVENTS],
+    },
+  });
   const dryRunApiKey = {
     body: {
       principalUsdc: 25,
@@ -575,6 +601,14 @@ export function buildAgentRequestExamples(): PublishedExample[] {
       credential: "signed",
       request: grantSpend,
       signingMessage: agentRequestMessage(grantSpend as unknown as Omit<SignedAgentRequest, "signature">),
+    },
+    {
+      name: "signedRegisterWebhook",
+      summary: "Owner-signed HTTPS webhook registration for claim lifecycle push events.",
+      action: "registerWebhook",
+      credential: "signed",
+      request: registerWebhook,
+      signingMessage: agentRequestMessage(registerWebhook as unknown as Omit<SignedAgentRequest, "signature">),
     },
     {
       name: "apiKeyDryRun",
@@ -697,6 +731,24 @@ export function buildAgentSuccessExamples(): PublishedResponseExample[] {
         limits: defaultLimits(),
       },
     },
+    {
+      name: "webhookRegistered",
+      summary: "Webhook subscription registered and HMAC secret returned.",
+      status: 200,
+      body: {
+        webhookId: "00000000-0000-4000-8000-000000000001",
+        agentId: "mimir-example-agent",
+        url: "https://agent.example/webhooks/mimir",
+        events: [...WEBHOOK_EVENTS],
+        active: true,
+        secret: PLACEHOLDER_WEBHOOK_SECRET,
+        secretPrefix: PLACEHOLDER_WEBHOOK_SECRET.slice(0, 14),
+        signatureHeader: WEBHOOK_SIGNATURE_HEADER,
+        createdAt: EXAMPLE_SIGNED_AT_MS,
+        updatedAt: EXAMPLE_SIGNED_AT_MS,
+        note: "Store this secret now — verify deliveries with HMAC-SHA256 over `${timestamp}.${rawBody}`.",
+      },
+    },
   ];
 }
 
@@ -777,6 +829,83 @@ function describeErrorCode(spec: ApiErrorSpec): string {
     return "Retryable: a fresh attempt with a new nonce and timestamp can succeed.";
   }
   return `Retryable after ${spec.retryAfterSeconds}s; a fresh attempt with a new nonce and timestamp can succeed.`;
+}
+
+function buildWebhookSection(): Record<string, YamlValue> {
+  const examplePayload: WebhookEventPayload = {
+    schemaVersion: 1,
+    deliveryId: "00000000-0000-4000-8000-000000000002",
+    event: "claim.challenged",
+    occurredAt: EXAMPLE_SIGNED_AT_MS,
+    claim: {
+      id: 42,
+      creator: SYNTHETIC_WALLETS.owner,
+      question: "Will BTC close above 100k USD by deadline?",
+      creatorPosition: "Yes, BTC closes above 100k USD.",
+      counterPosition: "No, BTC closes at or below 100k USD.",
+      category: "crypto",
+      creatorStake: 25,
+      totalChallengerStake: 25,
+      challengerCount: 1,
+      totalPot: 50,
+      deadline: EXAMPLE_START_AT_S + 86_400,
+      state: "active",
+      winnerSide: "",
+      resolutionSummary: "",
+      confidence: 0,
+      marketType: "binary",
+      oddsMode: "pool",
+      visibility: "public",
+    },
+    transition: {
+      previousState: "open",
+      currentState: "active",
+      previousChallengerCount: 0,
+      currentChallengerCount: 1,
+      previousChallengerStake: 0,
+      currentChallengerStake: 25,
+    },
+  };
+  const rawBody = JSON.stringify(examplePayload);
+  const signed = signWebhookPayload(PLACEHOLDER_WEBHOOK_SECRET, rawBody, EXAMPLE_START_AT_S);
+  const retrySchedule = buildWebhookRetrySchedule({ deterministic: true });
+
+  return {
+    events: [...WEBHOOK_EVENTS],
+    headers: {
+      signature: WEBHOOK_SIGNATURE_HEADER,
+      timestamp: WEBHOOK_TIMESTAMP_HEADER,
+      event: WEBHOOK_EVENT_HEADER,
+      delivery: WEBHOOK_DELIVERY_HEADER,
+    },
+    signing: {
+      algorithm: "HMAC-SHA256",
+      version: WEBHOOK_SIGNATURE_VERSION,
+      canonicalInput: "<timestampSeconds>.<rawRequestBody>",
+      headerFormat: `t=<timestampSeconds>,${WEBHOOK_SIGNATURE_VERSION}=<hex_hmac_sha256>`,
+      toleranceSeconds: DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+    },
+    deliveryPolicy: {
+      maxAttempts: MAX_WEBHOOK_DELIVERY_ATTEMPTS,
+      maxPendingEventsPerAgent: MAX_PENDING_WEBHOOK_EVENTS_PER_AGENT,
+      retryCeilingScheduleMs: retrySchedule.map(
+        (step: { attempt: number; ceilingMs: number }) => ({
+          attempt: step.attempt,
+          ceilingMs: step.ceilingMs,
+        })
+      ),
+    },
+    exampleDelivery: {
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        [WEBHOOK_SIGNATURE_HEADER]: signed.header,
+        [WEBHOOK_TIMESTAMP_HEADER]: String(signed.timestampSeconds),
+        [WEBHOOK_EVENT_HEADER]: examplePayload.event,
+        [WEBHOOK_DELIVERY_HEADER]: examplePayload.deliveryId,
+      },
+      body: asYamlValue(examplePayload, "$.x-mimir-webhooks.exampleDelivery.body"),
+    },
+  };
 }
 
 // ── The OpenAPI document ──────────────────────────────────────────────────────
@@ -1002,6 +1131,7 @@ export function buildAgentOpenApiDocument(): YamlValue {
         ]),
       ),
     },
+    "x-mimir-webhooks": buildWebhookSection(),
   };
 }
 

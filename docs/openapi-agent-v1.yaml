@@ -57,6 +57,7 @@ paths:
               - grantSpend
               - revokeSpend
               - spendStatus
+              - registerWebhook
         - name: authorization
           in: header
           required: false
@@ -152,6 +153,31 @@ paths:
                     end: 1757792000
                     salt: "1"
                     signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                  signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+              signedRegisterWebhook:
+                summary: Owner-signed HTTPS webhook registration for claim lifecycle push events.
+                x-mimir-signing-message: |-
+                  Mimir Agent API request
+                  version: v1
+                  agent: mimir-example-agent
+                  action: registerWebhook
+                  idempotency: example-registerwebhook-0001
+                  nonce: example-registerwebhook-nonce-0001
+                  signedAt: 1755200000000
+                  bodyHash: 7db93ddb80236454d862c6938d6ba88a0b18da3e14f6b6571f227fa8ca32615e
+                value:
+                  version: v1
+                  agentId: mimir-example-agent
+                  action: registerWebhook
+                  idempotencyKey: example-registerwebhook-0001
+                  nonce: example-registerwebhook-nonce-0001
+                  signedAt: 1755200000000
+                  body:
+                    url: "https://agent.example/webhooks/mimir"
+                    events:
+                      - claim.created
+                      - claim.challenged
+                      - claim.resolved
                   signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
               apiKeyDryRun:
                 summary: "Bearer path: the body only, with `authorization: Bearer mk_…`. The server fills the envelope."
@@ -276,6 +302,23 @@ paths:
                       maxPositionAtomic: "50000000"
                       allowedCategories: []
                       allowedSettlementModes: []
+                webhookRegistered:
+                  summary: Webhook subscription registered and HMAC secret returned.
+                  value:
+                    webhookId: "00000000-0000-4000-8000-000000000001"
+                    agentId: mimir-example-agent
+                    url: "https://agent.example/webhooks/mimir"
+                    events:
+                      - claim.created
+                      - claim.challenged
+                      - claim.resolved
+                    active: true
+                    secret: whsec_0000000000000000000000000000000000000000000000000000000000000000
+                    secretPrefix: whsec_00000000
+                    signatureHeader: x-mimir-webhook-signature
+                    createdAt: 1755200000000
+                    updatedAt: 1755200000000
+                    note: "Store this secret now — verify deliveries with HMAC-SHA256 over `${timestamp}.${rawBody}`."
         "400":
           description: "Invalid envelope, unknown action, or a body the server refused to parse."
           x-mimir-error-codes:
@@ -611,6 +654,10 @@ paths:
           summary: "Remaining allowance, period window and the agent's limits, in atomic USDC strings."
           credential: operator_signature_or_api_key
           funded: false
+        registerWebhook:
+          summary: Register an HTTPS webhook URL for claim lifecycle push events. Owner-signed and SSRF-guarded.
+          credential: owner_signature
+          funded: false
 components:
   securitySchemes:
     bearerKey:
@@ -774,3 +821,69 @@ x-mimir-rollout:
     vote:
       capability: stake
       env: MIMIR_PAUSE_STAKE
+x-mimir-webhooks:
+  events:
+    - claim.created
+    - claim.challenged
+    - claim.resolved
+  headers:
+    signature: x-mimir-webhook-signature
+    timestamp: x-mimir-webhook-timestamp
+    event: x-mimir-webhook-event
+    delivery: x-mimir-webhook-delivery
+  signing:
+    algorithm: HMAC-SHA256
+    version: v1
+    canonicalInput: "<timestampSeconds>.<rawRequestBody>"
+    headerFormat: "t=<timestampSeconds>,v1=<hex_hmac_sha256>"
+    toleranceSeconds: 300
+  deliveryPolicy:
+    maxAttempts: 5
+    maxPendingEventsPerAgent: 50
+    retryCeilingScheduleMs:
+      - attempt: 1
+        ceilingMs: 2000
+      - attempt: 2
+        ceilingMs: 4000
+      - attempt: 3
+        ceilingMs: 8000
+      - attempt: 4
+        ceilingMs: 16000
+  exampleDelivery:
+    headers:
+      content-type: "application/json; charset=utf-8"
+      x-mimir-webhook-signature: "t=1755200000,v1=237c25bbddffaaf13e4aef5fd5c340528ce6b7e36245f101dc8d01e8f26d2eef"
+      x-mimir-webhook-timestamp: "1755200000"
+      x-mimir-webhook-event: claim.challenged
+      x-mimir-webhook-delivery: "00000000-0000-4000-8000-000000000002"
+    body:
+      schemaVersion: 1
+      deliveryId: "00000000-0000-4000-8000-000000000002"
+      event: claim.challenged
+      occurredAt: 1755200000000
+      claim:
+        id: 42
+        creator: GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK
+        question: "Will BTC close above 100k USD by deadline?"
+        creatorPosition: "Yes, BTC closes above 100k USD."
+        counterPosition: "No, BTC closes at or below 100k USD."
+        category: crypto
+        creatorStake: 25
+        totalChallengerStake: 25
+        challengerCount: 1
+        totalPot: 50
+        deadline: 1755286400
+        state: active
+        winnerSide: ""
+        resolutionSummary: ""
+        confidence: 0
+        marketType: binary
+        oddsMode: pool
+        visibility: public
+      transition:
+        previousState: open
+        currentState: active
+        previousChallengerCount: 0
+        currentChallengerCount: 1
+        previousChallengerStake: 0
+        currentChallengerStake: 25

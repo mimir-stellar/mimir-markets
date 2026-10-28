@@ -832,6 +832,16 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
   // Advance sync timestamp only on successful completion
   await advanceCursor("last_sync_at", now);
 
+  // Deliver pending webhook events without ever blocking or failing the sync loop.
+  try {
+    await flushWebhookQueue({ now });
+  } catch (webhookErr) {
+    console.warn(
+      "[vs-index] Webhook queue flush failed (non-blocking):",
+      webhookErr instanceof Error ? webhookErr.message : webhookErr,
+    );
+  }
+
   return {
     synced,
     new: newClaims,

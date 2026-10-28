@@ -39,7 +39,8 @@
     "basket_definitions",
     "basket_positions",
     "basket_nav_snapshots",
-    "basket_ownership_transfers"
+    "basket_ownership_transfers",
+    "agent_webhooks"
   ],
   "indexes": [
     "idx_claims_state",
@@ -82,7 +83,8 @@
     "idx_market_proposals_queued",
     "idx_basket_transfers_basket",
     "idx_basket_transfers_from",
-    "idx_basket_transfers_to"
+    "idx_basket_transfers_to",
+    "idx_agent_webhooks_active"
   ],
   "migrations": [
     {
