@@ -208,6 +208,31 @@ pub struct PendingOracle {
     pub executable_at: u64,
 }
 
+/// A proposed ownership transfer awaiting acceptance by the new owner.
+///
+/// Two-step transfer: `propose_owner` writes this record; ownership only moves
+/// when `next` calls `accept_owner`. Until then the current owner remains
+/// authoritative and the proposal can be replaced or cancelled, so a mistyped
+/// address can never permanently orphan the contract.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingOwner {
+    pub next: Address,
+}
+
+impl PendingOwner {
+    /// Build a pending transfer to `next`. The caller is responsible for
+    /// authorising the proposal and for persisting the record.
+    pub fn new(next: Address) -> Self {
+        PendingOwner { next }
+    }
+
+    /// True when `caller` is the proposed new owner and may accept the transfer.
+    pub fn is_acceptable_by(&self, caller: &Address) -> bool {
+        self.next == *caller
+    }
+}
+
 /// Copied onto each claim at creation and never mutated afterwards.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -294,141 +319,4 @@ pub struct CreateParams {
     pub parent_id: u64,
     pub market_type: String,
     pub odds_mode: String,
-    pub challenger_payout_bps: u32,
-    pub handicap_line: String,
-    pub settlement_rule: String,
-    pub max_challengers: u32,
-    pub is_private: bool,
-    pub invite_key: Option<String>,
-    pub context_hash: BytesN<32>,
-    /// `None` when the market is not attributed to an agent.
-    pub agent_owner_recipient: Option<Address>,
-}
-
-// ── View return shapes ───────────────────────────────────────────────────────
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimFeeView {
-    pub platform_fee_bps: u32,
-    pub agent_owner_fee_bps: u32,
-    pub platform_recipient: Option<Address>,
-    pub agent_owner_recipient: Option<Address>,
-    pub context_hash: BytesN<32>,
-}
-
-/// What a challenger would receive from `claim_challenger_payout`, without
-/// performing it.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PayoutQuote {
-    pub gross: i128,
-    pub fee: i128,
-    pub net: i128,
-    pub claimed: bool,
-}
-
-/// A paginated window into a claim's challenger roster.
-///
-/// `items` holds up to `limit` entries starting at `offset`.  
-/// `total` is the total roster length so callers can tell when they have read
-/// the last page without fetching an extra empty one.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChallengerPage {
-    /// The slice of challengers for this page.
-    pub items: soroban_sdk::Vec<Challenger>,
-    /// Roster position of the first item returned (mirrors the caller's
-    /// `offset` argument for safe cursor book-keeping).
-    pub offset: u32,
-    /// Total number of challengers in this claim (not just this page).
-    pub total: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlatformStats {
-    pub total_claims: u64,
-    pub resolved: u64,
-    pub balance: i128,
-    pub fees_accrued: i128,
-    pub fees_claimed: i128,
-}
-
-// ── Errors ───────────────────────────────────────────────────────────────────
-
-#[contracterror]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-#[repr(u32)]
-pub enum Error {
-    AlreadyInitialized = 1,
-    NotInitialized = 2,
-    NotOwner = 3,
-    NotOracle = 4,
-    FeeCapExceeded = 5,
-    FeeNeedsRecipient = 6,
-    NothingQueued = 7,
-    Timelocked = 8,
-    StakeTooSmall = 9,
-    DeadlineInPast = 10,
-    EmptyQuestion = 11,
-    ClaimNotFound = 12,
-    ClaimNotOpen = 13,
-    SelfChallenge = 14,
-    AlreadyChallenged = 15,
-    ClaimFull = 16,
-    ChallengeWindowClosed = 17,
-    InvalidInviteKey = 18,
-    DuelNeedsEqualStake = 19,
-    InsufficientCreatorLiquidity = 20,
-    ClaimNotActive = 21,
-    NotYetExpired = 22,
-    InvalidVerdict = 23,
-    NotCreator = 24,
-    NothingToWithdraw = 25,
-    NoFees = 26,
-    PayoutExceedsEscrow = 27,
-    UnsupportedToken = 28,
-    Overflow = 29,
-    InviteKeyTooLong = 30,
-    ZeroStake = 31,
-    ClaimNotResolved = 32,
-    NotAChallenger = 33,
-    AlreadyClaimedPayout = 34,
-    ChallengersDidNotWin = 35,
-    UnsupportedDecimals = 36,
-    InvalidConfidence = 37,
-    /// `cancel_claim` refused because the claim still holds counterparty funds
-    /// or a reserved creator liability: challengers have funded this market, so
-    /// it belongs to settlement, not to a creator refund.
-    ClaimHasActiveClaims = 38,
-    /// Escrow could not back the cancellation refund at the moment of the call.
-    /// The refund is never minted; the claim stays untouched and the creator
-    /// can retry once the contract is solvent again.
-    RefundNotEscrowed = 39,
-    /// A verdict carried an encoding version this contract cannot decode. The
-    /// verdict is refused rather than reinterpreted, so resolution fails closed
-    /// and the claim is left untouched.
-    UnsupportedVerdictVersion = 40,
-    /// A single claim metadata string exceeded `MAX_METADATA_BYTES`. The
-    /// claim is refused rather than silently truncated, so what is stored is
-    /// always exactly what the caller supplied.
-    MetadataTooLong = 41,
-    /// The claim's combined metadata exceeded `MAX_CLAIM_METADATA_BYTES`. No
-    /// stake is pulled and no storage is written for a claim over the budget.
-    ClaimMetadataTooLong = 42,
-    /// The parent claim referenced by `parent_id` does not exist.
-    ParentClaimNotFound = 43,
-    /// The parent claim is not in a state that allows creating a rematch.
-    ParentClaimInvalidState = 44,
-    /// The parent claim has already been used for a rematch (no duplicate rematches).
-    ParentClaimAlreadyRematched = 45,
-    /// `get_claims_batch` was called with more than `MAX_BATCH_SIZE` ids. The
-    /// whole call is refused before any storage is read.
-    BatchTooLarge = 46,
-    /// A claim's escrow bookkeeping broke an accounting invariant (negative
-    /// escrow or stake, liability above stake, or more escrow than was taken
-    /// in). The write is refused so the contract never records an impossible
-    /// state.
-    ConservationViolation = 47,
-}
+    pub chall

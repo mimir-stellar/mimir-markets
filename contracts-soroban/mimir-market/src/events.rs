@@ -118,12 +118,32 @@ pub struct OracleCancelled {
     pub cancelled: bool,
 }
 
+/// Emitted when the proposed owner accepts ownership via `accept_ownership`.
+/// This is the only event that signals ownership has actually moved; a
+/// proposal alone emits `OwnershipProposed`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnershipTransferred {
     #[topic]
     pub next: Address,
     pub previous: Option<Address>,
+}
+
+/// Emitted when the current owner proposes a new owner. Ownership does not
+/// move until the proposed address signs `accept_ownership`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipProposed {
+    #[topic]
+    pub next: Address,
+    pub previous: Option<Address>,
+}
+
+/// Emitted when the owner cancels a pending ownership proposal.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipProposalCancelled {
+    pub cancelled: bool,
 }
 
 #[contractevent]

@@ -7,7 +7,7 @@ use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::types::{
     Challenger, ChallengerPage, Claim, Error, FeePolicy, PendingFeePolicy, PendingOracle,
-    RematchStatus, Verdict,
+    PendingOwner, RematchStatus, Verdict,
 };
 
 /// Maximum number of addresses accepted by [`get_withdrawable_batch`].
@@ -36,6 +36,8 @@ pub enum DataKey {
     Pending,
     /// Queued oracle rotation (separate from fee-policy Pending).
     PendingOracle,
+    /// Proposed new owner awaiting acceptance.
+    PendingOwner,
     ClaimCount,
     TotalResolved,
     FeesAccrued,
@@ -98,6 +100,18 @@ pub fn owner(env: &Env) -> Result<Address, Error> {
 
 pub fn set_owner(env: &Env, who: &Address) {
     env.storage().instance().set(&DataKey::Owner, who);
+}
+
+pub fn pending_owner(env: &Env) -> Option<PendingOwner> {
+    env.storage().instance().get(&DataKey::PendingOwner)
+}
+
+pub fn set_pending_owner(env: &Env, pending: &PendingOwner) {
+    env.storage().instance().set(&DataKey::PendingOwner, pending);
+}
+
+pub fn clear_pending_owner(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingOwner);
 }
 
 pub fn oracle(env: &Env) -> Result<Address, Error> {
@@ -357,190 +371,4 @@ pub fn append_creator_claim(env: &Env, creator: &Address, id: u64) {
     env.storage()
         .persistent()
         .extend_ttl(&count_key, BUMP_THRESHOLD, BUMP_EXTEND);
-}
-
-/// Return a page of claim ids created by `creator`, starting at `offset`, up to
-/// `limit` entries, along with the creator's total claim count.
-///
-/// `limit = 0` is treated as "return all remaining entries from `offset`".
-/// Never panics: an `offset` beyond the end yields an empty slice and the
-/// actual total.
-pub fn get_creator_claims(
-    env: &Env,
-    creator: &Address,
-    offset: u32,
-    limit: u32,
-) -> (Vec<u64>, u64) {
-    let total = creator_claim_count(env, creator);
-    let start = (offset as u64).min(total);
-    let remaining = total - start;
-    let take = if limit == 0 {
-        remaining
-    } else {
-        (limit as u64).min(remaining)
-    };
-
-    let mut out = Vec::new(env);
-    let mut cursor = start;
-    let end = start + take;
-    while cursor < end {
-        let page = (cursor / CREATOR_PAGE_SIZE as u64) as u32;
-        let page_start = (page as u64) * CREATOR_PAGE_SIZE as u64;
-        let list = creator_page(env, creator, page);
-        let local = (cursor - page_start) as u32;
-        let page_len = list.len();
-        let mut i = local;
-        while i < page_len && cursor < end {
-            out.push_back(list.get(i).unwrap());
-            i += 1;
-            cursor += 1;
-        }
-        if i >= page_len {
-            // Guard against a short/missing page: advance to the next page
-            // boundary so the loop always terminates.
-            cursor = page_start + CREATOR_PAGE_SIZE as u64;
-        }
-    }
-
-    (out, total)
-}
-
-// ── Versioned verdicts ───────────────────────────────────────────────────────
-
-/// The versioned verdict stored for a resolved claim, if one was written.
-///
-/// `None` is the pre-versioning case: the claim was resolved by a contract
-/// build that stored only `Claim.winner_side`. Callers must fall back to that
-/// field rather than treating the claim as unresolved.
-pub fn verdict(env: &Env, id: u64) -> Option<Verdict> {
-    let key = DataKey::Verdict(id);
-    let stored: Option<Verdict> = env.storage().persistent().get(&key);
-    if stored.is_some() {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
-    }
-    stored
-}
-
-pub fn set_verdict(env: &Env, id: u64, verdict: &Verdict) {
-    let key = DataKey::Verdict(id);
-    env.storage().persistent().set(&key, verdict);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
-}
-
-// ── Per-address rows ─────────────────────────────────────────────────────────
-
-fn address_i128(env: &Env, key: DataKey) -> i128 {
-    env.storage().persistent().get(&key).unwrap_or(0)
-}
-
-fn set_address_i128(env: &Env, key: DataKey, value: i128) {
-    if value == 0 {
-        env.storage().persistent().remove(&key);
-        return;
-    }
-    env.storage().persistent().set(&key, &value);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
-}
-
-pub fn withdrawable(env: &Env, who: &Address) -> i128 {
-    address_i128(env, DataKey::Withdrawable(who.clone()))
-}
-
-pub fn add_withdrawable(env: &Env, who: &Address, delta: i128) {
-    let key = DataKey::Withdrawable(who.clone());
-    let next = address_i128(env, key.clone()) + delta;
-    set_address_i128(env, key, next);
-}
-
-pub fn clear_withdrawable(env: &Env, who: &Address) {
-    set_address_i128(env, DataKey::Withdrawable(who.clone()), 0);
-}
-
-/// Read the withdrawable balance without any pause check.
-///
-/// Withdrawals are a user-funds escape hatch and MUST remain readable and
-/// payable while the market is paused. This accessor exists so callers can
-/// make that intent explicit and so a future refactor of [`withdrawable`]
-/// cannot accidentally reintroduce a pause gate on the read path.
-pub fn withdrawable_unpaused(env: &Env, who: &Address) -> i128 {
-    withdrawable(env, who)
-}
-
-/// Batched read of withdrawable balances keyed by an address list.
-///
-/// Returns one entry per input address, in the same order as `addrs`.
-/// Addresses with no parked balance (or never seen) return `0`.
-///
-/// Rejects inputs longer than [`MAX_BATCH_SIZE`] with [`Error::BatchTooLarge`]
-/// *before* touching storage, so an over-sized call costs no ledger reads.
-///
-/// Sits next to `get_claims_batch` as the operator-facing batch primitive for
-/// finding parked payouts without replaying `WithdrawalPending` events.
-pub fn get_withdrawable_batch(env: &Env, addrs: Vec<Address>) -> Result<Vec<i128>, Error> {
-    if addrs.len() > MAX_BATCH_SIZE {
-        return Err(Error::BatchTooLarge);
-    }
-
-    let mut out = Vec::new(env);
-    for who in addrs.iter() {
-        out.push_back(withdrawable(env, &who));
-    }
-    Ok(out)
-}
-
-pub fn accrued_fees(env: &Env, who: &Address) -> i128 {
-    address_i128(env, DataKey::Accrued(who.clone()))
-}
-
-pub fn add_accrued_fees(env: &Env, who: &Address, delta: i128) {
-    let key = DataKey::Accrued(who.clone());
-    let next = address_i128(env, key.clone()) + delta;
-    set_address_i128(env, key, next);
-}
-
-pub fn clear_accrued_fees(env: &Env, who: &Address) {
-    set_address_i128(env, DataKey::Accrued(who.clone()), 0);
-}
-
-/// Read accrued, unclaimed fees without any pause check.
-///
-/// Fee pulls are always pull-based and MUST remain available while paused so
-/// accrued protocol/beneficiary funds are never frozen by an operator pause.
-pub fn accrued_fees_unpaused(env: &Env, who: &Address) -> i128 {
-    accrued_fees(env, who)
-}
-
-// ── Rematch Parent Link Validation ───────────────────────────────────────────
-
-pub fn get_rematch_parent_status(
-    env: &Env,
-    parent_id: u64,
-    child_id: u64,
-) -> Option<RematchStatus> {
-    let key = DataKey::RematchParent(parent_id, child_id);
-    env.storage().persistent().get(&key)
-}
-
-pub fn set_rematch_parent_status(
-    env: &Env,
-    parent_id: u64,
-    child_id: u64,
-    status: &RematchStatus,
-) {
-    let key = DataKey::RematchParent(parent_id, child_id);
-    env.storage().persistent().set(&key, status);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
-}
-
-pub fn clear_rematch_parent_status(env: &Env, parent_id: u64, child_id: u64) {
-    let key = DataKey::RematchParent(parent_id, child_id);
-    env.storage().persistent().remove(&key);
 }

@@ -85,14 +85,51 @@ Emitted on fixed-odds liquidity state changes beyond initial reservations.
 
 **Usage:** Risk management and UI display of available liquidity in fixed-odds markets.
 
+### Ownership Governance Events
+
+The owner slot is moved through a two-step propose/accept flow. A single-call transfer can brick admin control if the address is wrong or cannot sign, so ownership only moves when the proposed address signs `accept_ownership`.
+
+#### OwnershipProposed
+Emitted when the current owner proposes a new owner. Ownership does not change yet.
+
+**Fields:**
+- `next` (topic): The proposed new owner
+- `previous`: The current owner at proposal time
+
+**Emitted by:**
+- `propose_owner`
+- `transfer_ownership` (deprecated alias for `propose_owner`)
+
+**Usage:** Indexers can surface a pending ownership change to operators and to the proposed address before it is accepted. A second proposal overwrites the first.
+
+#### OwnershipTransferred
+Emitted when the proposed address accepts ownership (or at initialization for the genesis owner).
+
+**Fields:**
+- `next` (topic): The new owner
+- `previous`: The previous owner (None at initialization)
+
+**Emitted by:**
+- `initialize`
+- `accept_ownership`
+
+#### OwnershipProposalCancelled
+Emitted when the current owner cancels a pending ownership proposal.
+
+**Fields:**
+- `cancelled`: Always `true`
+
+**Emitted by:**
+- `cancel_owner_proposal`
+
 ### Existing Events Enhanced
 
 The following existing events work together with lifecycle events:
 
-- **ClaimCreated**: Initial claim setup, now paired with `EscrowSeeded`
-- **ClaimChallenged**: Challenge acceptance, now paired with `EscrowSeeded` and `ClaimStateTransitioned`
-- **ClaimResolved**: Settlement result, now paired with `ClaimStateTransitioned` and `DeadlineReached`
-- `*ClaimCancelled**: Cancellation completed, now paired with `ClaimStateTransitioned`
+- `ClaimCreated`: Initial claim setup, now paired with `EscrowSeeded`
+- `ClaimChallenged`: Challenge acceptance, now paired with `EscrowSeeded` and `ClaimStateTransitioned`
+- `ClaimResolved`: Settlement result, now paired with `ClaimStateTransitioned` and `DeadlineReached`
+- `ClaimCancelled`: Cancellation completed, now paired with `ClaimStateTransitioned`
 
 ## mimir-squad Events
 
@@ -117,7 +154,7 @@ Emitted when a pool market's deadline passes and it becomes eligible for resolut
 **Fields:**
 - `market_id` (topic): Market ID
 - `deadline`: The deadline timestamp that was reached
-- `pool_a_total`: Side A pool total in atomic USDC
+- `pool_a_total`: Side A pool total in atomic USDC,
 - `pool_b_total`: Side B pool total in atomic USDC
 
 **Emitted by:**
@@ -318,24 +355,25 @@ Sum(EscrowSeeded.amount) =
 
 ### Event Trust
 
-- **On-chain source of truth**: Events reflect committed storage, not speculative state
+- `**On-chain source of truth**: Events reflect committed storage, not speculative state
 - **No front-running**: Events are emitted after auth checks and state validation
-- `*Idempotent resolution**: Duplicate `resolve_claim` calls with identical inputs do not re-emit events
+- `**Idempotent resolution**: Duplicate `resolve_claim` calls with identical inputs do not re-emit events
 
 ### Privacy
 
-- **No private data**: Invite key hashes are not exposed in events; only the hash is stored/emitted
-- `*Address exposure**: All events with funder/participant addresses are public; private claims remain identified only by on-chain activity
+- `**No private data**: Invite key hashes are not exposed in events; only the hash is stored/emitted
+- **Address exposure**: All events with funder/participant addresses are public; private claims remain identified only by on-chain activity
 
 ### Defensive Events
 
-- ``**CancellationRefused**: Emitted when `cancel_claim` detects counterparty exposure or insolvency; nothing is changed on-chain, event is the audit trail
-- ``**Conservation assertions**: Lifecycle events follow accounting conservation checks; if emitted, conservation holds
+- `**CancellationRefused**: Emitted when `cancel_claim` detects counterparty exposure or insolvency; nothing is changed on-chain, event is the audit trail
+- **Conservation assertions**: Lifecycle events follow accounting conservation checks; if emitted, conservation holds
 
 ## Testing
 
 See contract test files:
 - `mimir-market/src/test_lifecycle.rs`: State transition coverage
+- `mimir-market/src/test_ownership.rs`: Two-step ownership propose/accept/cancel coverage
 - `mimir-market/src/test_settlement.rs`: Resolution and payout event verification
 - `mimir-squad/src/test_lifecycle.rs`: Pool market lifecycle
 - `mimir-squad/src/test_payouts.rs`: Pool payout event ordering
