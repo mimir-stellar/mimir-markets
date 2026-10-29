@@ -329,3 +329,38 @@ test("regression: flattenKeys on real en.json produces no duplicate keys", () =>
     "flattenKeys produced duplicate keys on real en.json"
   );
 });
+
+// ── Regression: real es.json structure ───────────────────────────────────────
+
+const REAL_ES = JSON.parse(
+  readFileSync(join(process.cwd(), "messages", "es.json"), "utf8")
+) as Record<string, unknown>;
+
+test("regression: real messages/es.json is parseable and has expected namespaces", () => {
+  for (const ns of FUNDED_NAMESPACES) {
+    assert.ok(
+      ns in REAL_ES,
+      `real messages/es.json is missing funded namespace "${ns}"`
+    );
+  }
+
+  const keys = flattenKeys(REAL_ES);
+  assert.ok(
+    keys.length > 100,
+    `messages/es.json has suspiciously few keys (${keys.length})`
+  );
+});
+
+test("regression: real messages/es.json has complete parity with en.json", () => {
+  const result = checkLocale(REAL_EN, REAL_ES, "es");
+  assert.equal(
+    result.missing.length,
+    0,
+    `messages/es.json is missing keys: ${result.missing.join(", ")}`
+  );
+  assert.equal(
+    result.hasFundedViolation,
+    false,
+    `messages/es.json has funded violations: ${result.missingFunded.join(", ")}`
+  );
+});
