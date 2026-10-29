@@ -71,9 +71,9 @@ impl MimirSquad {
         pool::cancel_market(&env, market_id)
     }
 
-    /// Pull-based payout. The EVM version used `msg.sender`; Soroban has no
-    /// equivalent for a top-level call, so the claimant is an explicit argument
-    /// that must authorize. Returns the net amount transferred.
+    /// Pull-based payout. Soroban has no implicit caller for a top-level call,
+    /// so the claimant is an explicit argument that must authorize. Returns the
+    /// net amount transferred.
     pub fn claim(env: Env, participant: Address, market_id: u64, side: u32) -> Result<i128, Error> {
         pool::claim(&env, participant, market_id, side)
     }

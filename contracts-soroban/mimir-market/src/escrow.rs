@@ -1,4 +1,4 @@
-/// USDC custody: exact-amount pulls, and pushes that fall back to a pull.
+/// USDC custody: exact-amount pulls, and pushes that park on failure.
 
 use soroban_sdk::{token, Address, Env};
 
@@ -25,7 +25,7 @@ pub fn require_usdc_decimals(env: &Env, usdc: &Address) -> Result<(), Error> {
 ///
 /// Mimir accounts in exact atomic USDC units. Fee-on-transfer and rebasing
 /// assets would break escrow conservation, so reject them even if a
-/// misconfigured deployment points `usd` at such a token.
+/// misconfigured deployment points `usdc` at such a token.
 pub fn pull(env: &Env, usdc: &Address, from: &Address, amount: i128) -> Result<(), Error> {
     if amount <= 0 {
         return Err(Error::ZeroStake);
