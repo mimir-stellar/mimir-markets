@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "captures": [
+    {
+      "url": "https://example.com/btc-close",
+      "contentType": "text/html; charset=utf-8",
+      "body": "<html><body>BTC closed at 98,410 USD</body></html>",
+      "capturedAt": 1763000000000
+    },
+    {
+      "url": "https://example.com/old-btc-close",
+      "status": 301,
+      "location": "/btc-close"
+    },
+    {
+      "url": "https://bazaar.example.com/paid-quote",
+      "contentType": "application/json",
+      "body": "{}",
+      "paid": true
+    }
+  ]
+}
