@@ -1979,6 +1979,29 @@ export async function insertPayment(e: PaymentRow): Promise<void> {
   });
 }
 
+/** Read the settlement projections for a bounded set of claim ids (read-only). */
+export async function getMarketSettlementsByClaimIds(claimIds: readonly number[]): Promise<MarketSettlementRow[]> {
+  if (claimIds.length === 0) return [];
+  const pool = await getDb();
+  const ids = [...claimIds];
+  const result = await execute(pool, {
+    sql: `SELECT claim_id, gross_volume_atomic, payout_atomic, platform_fee_atomic,
+      agent_owner_fee_atomic, dust_atomic, transaction_hash, settled_at
+      FROM market_settlements WHERE claim_id IN (${makeListPlaceholders(ids)}) ORDER BY claim_id`,
+    args: ids,
+  });
+  return result.rows.map((row) => ({
+    claim_id: getNumber(row.claim_id),
+    gross_volume_atomic: getBigInt(row.gross_volume_atomic),
+    payout_atomic: getBigInt(row.payout_atomic),
+    platform_fee_atomic: getBigInt(row.platform_fee_atomic),
+    agent_owner_fee_atomic: getBigInt(row.agent_owner_fee_atomic),
+    dust_atomic: getBigInt(row.dust_atomic),
+    transaction_hash: getString(row.transaction_hash),
+    settled_at: getNumber(row.settled_at),
+  }));
+}
+
 /** Upsert one settlement projection rebuilt from MarketSettled + FeeAccrued logs. */
 export async function upsertMarketSettlement(e: MarketSettlementRow): Promise<void> {
   const pool = await getDb();

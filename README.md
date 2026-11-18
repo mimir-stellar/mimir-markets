@@ -172,6 +172,7 @@ The read-index is a cache, so its backup workflow is built to be verifiable offl
 
 npm run backup:read-index -- --out backups/read-index.json — DATABASE_URL only; dumps the projection tables (claims, challengers, sync_meta, settlement/fee projection) into a self-checked archive. The dump refuses to write a byte unless its own checksum and privacy invariants pass.
 npm run verify:cache-backup -- backups/read-index.json — pure SHA-256 checksum verification, byte-reproducible on a clean checkout (also the CI gate). Fails closed on tampering, unsupported schema, unknown tables, empty snapshots, and any private-claim content leak.
+npx tsx scripts/report-index-discrepancies.ts --capture <capture.json> --claims 1,2,3 — read-only, bounded (max 200 claims) comparison of selected claims and settlements against a captured chain range, classifying each difference as missing, stale or conflicting. See docs/INDEX_DISCREPANCY_REPORT.md.
 npm run restore:read-index -- backups/read-index.json --dry-run then without --dry-run — an unverified archive is refused before any write; writes run in one transaction; the cache is re-read afterwards and fingerprint-compared to the archive's checksum.
 Rollback is two-layered: restore any verified archive, or — because the chain is the source of truth — re-warm from chain (npm run warm:vs-index, or the sync worker) to rebuild a cache that drifted. Restoration never writes to the chain.
 
