@@ -8,6 +8,7 @@ import type { AgentTradeRow } from "@/lib/agents/performance";
 import type { AgentRecord } from "@/lib/agents/registry";
 import type { SpendPermissionRecord } from "@/lib/agents/spend-permissions";
 import type { CopyAuditRecord, CopyPermission } from "@/lib/copy-trading";
+import { MAX_SUPERSESSION_DEPTH, planSupersession, type SupersessionPlan } from "@/lib/proposal-supersession";
 
 /**
  * ADDRESS INVARIANT — read before touching any statement below.
@@ -608,6 +609,13 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_disposition ON market_proposals(disposition)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_review_status ON market_proposals(review_status)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_queued ON market_proposals(queued_at) WHERE review_status = 'queued'" },
+  // Supersession links (see lib/proposal-supersession.ts). A revision is a new
+  // row; only these link columns are written when it is linked, so the
+  // predecessor's approved intent, review and deadline are never edited.
+  { sql: "ALTER TABLE market_proposals ADD COLUMN IF NOT EXISTS supersedes_proposal_id TEXT" },
+  { sql: "ALTER TABLE market_proposals ADD COLUMN IF NOT EXISTS superseded_by_proposal_id TEXT" },
+  { sql: "ALTER TABLE market_proposals ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1" },
+  { sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_market_proposals_supersedes ON market_proposals(supersedes_proposal_id) WHERE supersedes_proposal_id IS NOT NULL" },
   { sql: `CREATE TABLE IF NOT EXISTS market_series (
     series_id TEXT PRIMARY KEY,
     schema_version SMALLINT NOT NULL DEFAULT 1,
@@ -1507,6 +1515,12 @@ export interface MarketProposalRow {
   reviewer: string | null;
   /** Reason for cancellation, staleness, or dependency failure. */
   failure_reason: string | null;
+  /** Proposal this revision replaces (set by `supersedeProposal`). */
+  supersedes_proposal_id?: string | null;
+  /** Revision that replaced this proposal (set by `supersedeProposal`). */
+  superseded_by_proposal_id?: string | null;
+  /** 1 for an original draft, predecessor + 1 for a revision. */
+  revision?: number;
 }
 
 /**
@@ -1678,6 +1692,80 @@ export async function markProposalDependencyFailed(proposalId: string, reason: s
     args: [Date.now(), reason, proposalId],
   });
   return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Link `successorId` as the revision of `predecessorId`.
+ *
+ * Runs in one transaction with both rows locked. Writes ONLY the link columns
+ * and the successor's revision number: the predecessor's intent, review
+ * outcome, review status and deadline are untouched, and the successor keeps
+ * its own queued review and its own deadline. Each UPDATE re-checks its guard,
+ * so a concurrent link loses cleanly instead of forking the history.
+ */
+export async function supersedeProposal(predecessorId: string, successorId: string): Promise<SupersessionPlan> {
+  const pool = await getDb();
+  const client = await pool.connect();
+  const q = async (sql: string, args: unknown[]) => {
+    const result = await client.query(toPg(sql), args);
+    return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount ?? 0 };
+  };
+  const toNode = (row: Record<string, unknown> | undefined) =>
+    row
+      ? {
+          proposal_id: getString(row.proposal_id),
+          review_status: getString(row.review_status),
+          supersedes_proposal_id: getNullableString(row.supersedes_proposal_id),
+          superseded_by_proposal_id: getNullableString(row.superseded_by_proposal_id),
+          revision: Number(row.revision ?? 1) || 1,
+        }
+      : null;
+  try {
+    await client.query("BEGIN");
+    const locked = await q(
+      `SELECT proposal_id, review_status, supersedes_proposal_id, superseded_by_proposal_id, revision
+       FROM market_proposals WHERE proposal_id IN (?, ?) FOR UPDATE`,
+      [predecessorId, successorId],
+    );
+    const predecessor = toNode(locked.rows.find((r) => getString(r.proposal_id) === predecessorId));
+    const successor = toNode(locked.rows.find((r) => getString(r.proposal_id) === successorId));
+
+    const ancestors: string[] = [];
+    let cursor = predecessor?.supersedes_proposal_id ?? null;
+    while (cursor && ancestors.length < MAX_SUPERSESSION_DEPTH && !ancestors.includes(cursor)) {
+      ancestors.push(cursor);
+      const next = await q("SELECT supersedes_proposal_id FROM market_proposals WHERE proposal_id = ?", [cursor]);
+      cursor = getNullableString(next.rows[0]?.supersedes_proposal_id);
+    }
+
+    const plan = planSupersession(predecessor, successor, ancestors);
+    if (!plan.ok) {
+      await client.query("ROLLBACK");
+      return plan;
+    }
+
+    const linkedSuccessor = await q(
+      `UPDATE market_proposals SET supersedes_proposal_id = ?, revision = ?
+       WHERE proposal_id = ? AND supersedes_proposal_id IS NULL AND review_status = 'queued'`,
+      [plan.predecessorId, plan.revision, plan.successorId],
+    );
+    const linkedPredecessor = await q(
+      `UPDATE market_proposals SET superseded_by_proposal_id = ?
+       WHERE proposal_id = ? AND superseded_by_proposal_id IS NULL`,
+      [plan.successorId, plan.predecessorId],
+    );
+    if (linkedSuccessor.rowCount === 0 || linkedPredecessor.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return { ok: false, code: "predecessor_already_superseded", message: "proposal was linked concurrently; retry" };
+    }
+    await client.query("COMMIT");
+    return plan;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /** Link a published claim back to the proposal that produced it. */

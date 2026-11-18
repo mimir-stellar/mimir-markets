@@ -12,12 +12,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api/policy";
 import { apiError } from "@/lib/api/errors";
 import { getDb, isDbConfigured } from "@/lib/db";
+import { supersessionErrorStatus } from "@/lib/proposal-supersession";
 import {
   claimProposalForReview,
   completeProposalReview,
   cancelProposal,
   markProposalDependencyFailed,
   markStaleProposals,
+  supersedeProposal,
   updateProposalReviewStatus,
   listProposalsForReview,
   REVIEW_STATUSES,
@@ -122,9 +124,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return errorResponse("Invalid JSON body", 400);
   }
 
-  const { action, proposalId, reviewer, approve, reason } = body as {
-    action: "claim" | "complete" | "cancel" | "mark_stale" | "mark_dependency_failed";
+  const { action, proposalId, reviewer, approve, reason, successorId } = body as {
+    action: "claim" | "complete" | "cancel" | "mark_stale" | "mark_dependency_failed" | "supersede";
     proposalId?: string;
+    /** For `supersede`: the queued revision that replaces `proposalId`. */
+    successorId?: string;
     reviewer?: string;
     approve?: boolean;
     reason?: string;
@@ -178,6 +182,26 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           return errorResponse("Proposal not in a state that can be marked as dependency_failed", 409);
         }
         return json({ success: true, proposalId, status: "dependency_failed" });
+      }
+
+      case "supersede": {
+        // Link a revised draft to its predecessor. Only link columns are
+        // written: the predecessor's approved intent, review and deadline are
+        // untouched, and the successor keeps its own queued review and expiry.
+        if (typeof proposalId !== "string" || !proposalId || typeof successorId !== "string" || !successorId) {
+          return errorResponse("supersede requires proposalId (predecessor) and successorId", 400);
+        }
+        const plan = await supersedeProposal(proposalId, successorId);
+        if (!plan.ok) {
+          return json({ error: { code: plan.code, message: plan.message } }, supersessionErrorStatus(plan.code));
+        }
+        return json({
+          success: true,
+          proposalId: plan.predecessorId,
+          successorId: plan.successorId,
+          revision: plan.revision,
+          status: "queued",
+        });
       }
 
       case "mark_stale": {
