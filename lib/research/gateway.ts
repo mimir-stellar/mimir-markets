@@ -16,6 +16,10 @@
  *
  * Redirects are followed MANUALLY (`redirect: "manual"`) — the whole point is to
  * re-validate each hop, which `fetch`'s automatic following makes impossible.
+ *
+ * Replay mode (./replay.ts) swaps only the transport and DNS for a fixture of
+ * captured responses, so tests and offline evaluation exercise this exact path
+ * with real network access and paid endpoints disabled.
  */
 
 import { lookup } from "node:dns/promises";
@@ -34,6 +38,15 @@ import {
   type SsrfReason,
 } from "./ssrf";
 import { recordAllowlistReject, recordSourceFailure } from "./telemetry";
+import {
+  ReplayRefusal,
+  checkReplayRequest,
+  lookupCapture,
+  replayFetch,
+  replayResolver,
+  replaySourceFromEnv,
+  type ReplaySource,
+} from "./replay";
 
 export const MAX_REDIRECTS = 3;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -64,7 +77,13 @@ export type FetchFailure =
   | { kind: "content_type"; detail: string }
   | { kind: "too_large"; detail: string }
   | { kind: "http_error"; status: number; detail: string }
-  | { kind: "transport"; detail: string };
+  | { kind: "transport"; detail: string }
+  /** Replay mode: no capture for the URL. Never falls through to the network. */
+  | { kind: "replay_miss"; detail: string }
+  /** Replay mode: the request or capture is a paid endpoint. */
+  | { kind: "replay_paid_endpoint"; detail: string }
+  /** Replay mode: the configured fixture could not be loaded; fails closed. */
+  | { kind: "replay_invalid_fixture"; detail: string };
 
 export interface FetchSuccess {
   url: string;
@@ -81,6 +100,8 @@ export interface FetchSuccess {
   redirects: number;
   /** Complete chain of URLs visited during this fetch. */
   redirectChain: string[];
+  /** True when served from a replay fixture rather than the network. */
+  replayed?: boolean;
 }
 
 export type FetchResult =
@@ -227,6 +248,13 @@ export interface GatewayFetchArgs {
   maxRedirects?: number;
   allowCrossDomainRedirects?: boolean;
   allowProtocolDowngrade?: boolean;
+  /**
+   * Serve this fetch from a replay fixture instead of the network. Defaults to
+   * the `RESEARCH_REPLAY_FIXTURE` source when that env var is set. While replay
+   * is active `resolve` and `fetchImpl` are ignored, so no real network access
+   * can happen, and paid endpoints are refused.
+   */
+  replay?: ReplaySource;
   /** Test seams. */
   resolve?: (host: string) => Promise<string[]>;
   fetchImpl?: typeof globalThis.fetch;
@@ -306,7 +334,12 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
     policy.disallowProtocolDowngrade = (policy.disallowProtocolDowngrade ?? true) || args.allowProtocolDowngrade === false;
   }
   const budget = args.budget ?? defaultAgentBudget();
-  const doFetch = args.fetchImpl ?? fetch;
+  const replay = args.replay ?? replaySourceFromEnv();
+  // In replay mode the transport and resolver come ONLY from the fixture. A
+  // caller-supplied fetchImpl/resolve is ignored so replay can never reach the
+  // real network, even by accident.
+  const doFetch = replay ? replayFetch(replay) : (args.fetchImpl ?? fetch);
+  const resolve = replay ? replayResolver(replay) : args.resolve;
 
   if (args.signal?.aborted) {
     return fail({ kind: "cancelled", detail: "request was cancelled" });
@@ -340,7 +373,14 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
     return fail({ kind: "paused", detail: `research is paused for agent '${args.agentId}'` });
   }
 
-  const cached = cacheGet(args.url, now);
+  if (replay) {
+    const refusal = checkReplayRequest(replay, args.headers);
+    if (refusal) return fail({ kind: refusal.kind, detail: refusal.message });
+  }
+
+  // Replay bypasses the shared cache in both directions: a live result must
+  // never answer a replay run, and a replayed body must never answer a live one.
+  const cached = replay ? null : cacheGet(args.url, now);
   if (cached) return { ok: true, ...cached, fromCache: true };
 
   // Budget is checked BEFORE the request, and charged whether or not the response
@@ -387,7 +427,7 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       return fail({ kind: "cancelled", detail: "request was cancelled" });
     }
 
-    const hop = await validateHop(current, policy, args.resolve);
+    const hop = await validateHop(current, policy, resolve);
     if (!hop.allowed) {
       if (hop.reason === "protocol_downgrade") {
         return fail({ kind: "protocol_downgrade", detail: hop.detail });
@@ -415,6 +455,9 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
         cache: "no-store",
       });
     } catch (err) {
+      if (err instanceof ReplayRefusal) {
+        return fail({ kind: err.kind, detail: err.message });
+      }
       if (args.signal?.aborted || (err instanceof Error && err.name === "AbortError" && args.signal?.aborted)) {
         return fail({ kind: "cancelled", detail: "request was cancelled" });
       }
@@ -491,13 +534,14 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       contentType,
       body: text,
       contentHash: sha256Hex(text),
-      capturedAt: now,
+      capturedAt: (replay ? lookupCapture(replay, current)?.capturedAt : undefined) ?? now,
       bytes,
       fromCache: false,
       redirects,
       redirectChain,
+      ...(replay ? { replayed: true } : {}),
     };
-    cacheSet(args.url, success, now);
+    if (!replay) cacheSet(args.url, success, now);
     return { ok: true, ...success };
   }
 }
