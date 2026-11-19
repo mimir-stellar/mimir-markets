@@ -73,3 +73,58 @@ export function setResearchBudgetUsage(agentId: string, used: number): void {
 export function resetResearchBudgets(): void {
   budgets.clear();
 }
+
+/**
+ * Trader position reconciliation after restart.
+ *
+ * Durable intents are compared against observed chain positions. Any intent
+ * whose outcome is uncertain (no observed position and no confirmed failure)
+ * is preserved as `uncertain` and is NOT re-issued automatically.
+ */
+export type TraderIntentStatus = "pending" | "submitted" | "confirmed" | "failed" | "uncertain";
+
+export interface TraderIntent {
+  intentId: string;
+  agentId: string;
+  /** Integer USDC amount (base units). */
+  amountUsdc: bigint;
+  status: TraderIntentStatus;
+}
+
+export interface ObservedPosition {
+  intentId: string;
+  /** Integer USDC amount (base units). */
+  amountUsdc: bigint;
+}
+
+export interface ReconciliationResult {
+  confirmed: string[];
+  uncertain: string[];
+  /** Intents that should be (re)issued. Uncertain intents are never included. */
+  reissuable: string[];
+}
+
+export function reconcileTraderPositions(
+  intents: TraderIntent[],
+  observed: ObservedPosition[],
+): ReconciliationResult {
+  const observedIds = new Set(observed.map((p) => p.intentId));
+  const confirmed: string[] = [];
+  const uncertain: string[] = [];
+  const reissuable: string[] = [];
+
+  for (const intent of intents) {
+    if (observedIds.has(intent.intentId)) {
+      confirmed.push(intent.intentId);
+      continue;
+    }
+    if (intent.status === "failed") {
+      reissuable.push(intent.intentId);
+      continue;
+    }
+    // pending / submitted / uncertain with no observed position: preserve, do not re-issue.
+    uncertain.push(intent.intentId);
+  }
+
+  return { confirmed, uncertain, reissuable };
+}

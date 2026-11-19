@@ -18,18 +18,21 @@ export interface JoinableClaimCandidate {
  * - Must not be created by the trader
  * - Must have public visibility
  * - Must not already have a position by this trader
+ * - Must not be blocked by restart reconciliation (uncertain outcomes)
  */
 export function filterJoinableClaims<T extends JoinableClaimCandidate>(
   claims: readonly T[],
   challengersById: Map<number, { address: string }[]>,
   myAddress: string,
   nowSeconds: number,
+  blockedClaimIds: ReadonlySet<number> = new Set(),
 ): T[] {
   const joinable: T[] = [];
   for (const claim of claims) {
     if (claim.deadline <= nowSeconds + 300) continue; // too close to settle into
     if (claim.creator === myAddress) continue; // never challenge yourself
     if (claim.visibility !== "public") continue;
+    if (blockedClaimIds.has(claim.id)) continue; // uncertain prior outcome
     const challengers = challengersById.get(claim.id) ?? [];
     if (challengers.some((c) => c.address === myAddress)) continue; // one position each
     joinable.push(claim);
