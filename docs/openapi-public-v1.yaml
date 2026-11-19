@@ -4,6 +4,10 @@
 # parameter, cache header, rate-limit rule, and example below is derived from
 # the live route dependencies (lib/ops/public-api-openapi.ts) and verified
 # against lib/ops/json-schema-subset.ts in tests/node/public-api-openapi.test.ts.
+#
+# Filter arrays (categories, states) are bounded before read-index queries are
+# constructed: at most 10 entries each, and at most 512 total bytes across all
+# entries. Violations return 400 `invalid_request` before any database work.
 
 openapi: "3.1.0"
 info:
@@ -43,6 +47,35 @@ paths:
           schema:
             type: integer
             minimum: 1
+        - name: categories
+          in: query
+          required: false
+          description: "Comma-separated category filter. At most 10 entries and 512 total bytes; exceeding either bound is rejected with 400 `invalid_request` before any read-index query."
+          schema:
+            type: array
+            maxItems: 10
+            items:
+              type: string
+              enum:
+                - sports
+                - weather
+                - crypto
+                - culture
+                - custom
+        - name: states
+          in: query
+          required: false
+          description: "Comma-separated lifecycle state filter. At most 10 entries and 512 total bytes; exceeding either bound is rejected with 400 `invalid_request` before any read-index query."
+          schema:
+            type: array
+            maxItems: 10
+            items:
+              type: string
+              enum:
+                - open
+                - accepted
+                - resolved
+                - cancelled
         - name: limit
           in: query
           required: false
