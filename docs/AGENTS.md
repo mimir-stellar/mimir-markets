@@ -398,10 +398,12 @@ property testable on a clean checkout and in CI.
   `BACKUP_MISSING_TABLE`, `BACKUP_UNKNOWN_TABLE`, `BACKUP_EMPTY`,
   `BACKUP_CHECKSUM_MISMATCH`, `BACKUP_PRIVATE_CONTENT_LEAK`. A private claim's
   scrubbed content fields must stay `null` in the archive.
-- **Restore** (`npm run restore:read-index -- <file> [--dry-run]`) requires
+- **Restore** (`npm run restore:read-index -- <file> [--dry-run] [--batch-size <n>]`) requires
   `DATABASE_URL`. An unverified archive is refused before any write; writes run
-  in one transaction so a failure rolls back; afterwards the cache is re-read
-  and its fingerprint is compared against the archive's checksum.
+  in checkpointed transactions (or a single transaction when `--batch-size` is unset);
+  afterwards the cache is re-read and its fingerprint is compared against the
+  archive's checksum. Replay after interrupted batches is idempotent and does not
+  double-apply settlement or fee events.
 - **Rollback**: restore any verified archive, or — because contract state is
   the source of truth — re-warm from chain (`npm run warm:vs-index` / `npm run
   sync`). Restoring never writes to the chain.

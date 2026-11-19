@@ -221,6 +221,12 @@ export interface BasketExposurePreview {
   policy: BasketPolicy;
 }
 
+/**
+ * A member's contribution to the basket NAV.
+ */
+export interface NavMember {
+  agentId: string;
+  weightBps: number;
   /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
   returns: number[];
 }
