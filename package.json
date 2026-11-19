@@ -6,7 +6,8 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "test:node": "node scripts/run-node-tests.mjs"
+    "test:node": "node scripts/run-node-tests.mjs",
+    "validate:package": "node scripts/validate-package-targets.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",

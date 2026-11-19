@@ -166,6 +166,29 @@ export function scopesForPaths(paths: ReadonlyArray<string>): Scope {
   return { kind: "scoped", tiers };
 }
 
+/**
+ * Validate that a package export or script target is a safe, in-checkout path.
+ *
+ * Rejects absolute paths, path traversal (`..` segments), and paths that
+ * resolve outside the checkout root. Callers must still verify existence
+ * before packaging; this function is purely lexical.
+ */
+export function validateCheckoutPath(
+  target: string,
+): { ok: true; path: string } | { ok: false; reason: string } {
+  if (target.length === 0) return { ok: false, reason: "empty path" };
+  if (target.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(target) || target.startsWith("\\")) {
+    return { ok: false, reason: `absolute path not allowed: ${target}` };
+  }
+  const segments = target.split(/[\\/]+/);
+  if (segments.includes("..")) {
+    return { ok: false, reason: `path traversal not allowed: ${target}` };
+  }
+  const normalized = segments.filter((s) => s !== "" && s !== ".").join("/");
+  if (normalized.length === 0) return { ok: false, reason: "empty path" };
+  return { ok: true, path: normalized };
+}
+
 /** Every known tier — used by the fallback and by default-on matrices. */
 export function allTiers(): readonly Tier[] {
   return [...ALL_TIERS];
