@@ -24,8 +24,27 @@ use crate::escrow;
 use crate::events;
 use crate::fees;
 use crate::storage;
-use crate::types::{Challenger, Claim, ClaimState, Error, PayoutQuote, Verdict, WinnerSide};
+use crate::types::{
+    Challenger, Claim, ClaimState, Error, PayoutQuote, ResolutionExpirationPolicy, Verdict,
+    WinnerSide, CHALLENGE_LOCK_SECONDS, MAX_CONFIDENCE, ORACLE_TIMELOCK_SECONDS,
+    RESOLUTION_EXPIRY_SECONDS, VERDICT_VERSION_V1,
+};
 use crate::util;
+
+/// Return the currently approved oracle resolution and claim expiration policy
+/// descriptor enforced by `claims` and `resolve`.
+pub fn resolution_expiration_policy() -> ResolutionExpirationPolicy {
+    ResolutionExpirationPolicy {
+        oracle_only_resolution: true,
+        challenge_lock_seconds: CHALLENGE_LOCK_SECONDS,
+        oracle_timelock_seconds: ORACLE_TIMELOCK_SECONDS,
+        resolution_expiry_seconds: RESOLUTION_EXPIRY_SECONDS,
+        open_claim_expiry_cancels: true,
+        active_claim_auto_expires: false,
+        verdict_version: VERDICT_VERSION_V1,
+        max_confidence: MAX_CONFIDENCE,
+    }
+}
 
 pub fn resolve_claim(
     env: &Env,
@@ -91,7 +110,7 @@ pub fn resolve_claim_versioned(
     }
     .publish(env);
 
-    if confidence > 100 {
+    if confidence > MAX_CONFIDENCE {
         return Err(Error::InvalidConfidence);
     }
     // Bound the summary before any state is written. A claim created under the

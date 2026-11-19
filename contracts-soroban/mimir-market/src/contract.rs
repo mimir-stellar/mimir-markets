@@ -10,7 +10,8 @@ use crate::resolve;
 use crate::storage;
 use crate::types::{
     Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeePolicy,
-    MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict,
+    MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats,
+    ResolutionExpirationPolicy, Verdict,
     WinnerSide, MAX_BATCH_SIZE,
 };
 
@@ -387,5 +388,14 @@ impl MimirMarket {
 
     pub fn get_accrued_fees(env: Env, who: Address) -> i128 {
         storage::accrued_fees(&env, &who)
+    }
+
+    /// Read-only descriptor of the currently approved oracle resolution and
+    /// claim expiration policy enforced by `claims` and `resolve`.
+    ///
+    /// Pure read: requires no auth, touches no storage, moves no USDC, and
+    /// preserves oracle-only resolution and existing withdrawal rights.
+    pub fn get_resolution_expiration_policy(_env: Env) -> ResolutionExpirationPolicy {
+        resolve::resolution_expiration_policy()
     }
 }
