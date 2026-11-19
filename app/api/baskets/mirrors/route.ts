@@ -35,13 +35,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(err.body, { status: err.status });
   }
 
-  const [mirrors, subscriptions] = await Promise.all([
-    pendingMirrorsFor(subscriber).catch(() => []),
+  const [queue, subscriptions] = await Promise.all([
+    pendingMirrorsFor(subscriber).catch(() => ({ pending: [], ineligible: [] })),
     listBasketSubscriptions(subscriber).catch(() => []),
   ]);
 
   return NextResponse.json(
-    { mirrors, following: subscriptions },
+    { mirrors: queue.pending, ineligible: queue.ineligible, following: subscriptions },
     { headers: { "cache-control": "no-store" } },
   );
 }
