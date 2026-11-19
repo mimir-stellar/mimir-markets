@@ -37,7 +37,8 @@ export function basketMessage(args: {
  * signed. Matches TRANSFER_EXPIRY_MS so the clock-skew budget is the same
  * across all signed mutations.
  */
-export const BASKET_EXPIRY_MS = 5 * 60_000; // 5 minutes
+export const BASKET_CREATION_EXPIRY_MS = 5 * 60_000; // 5 minutes
+export const BASKET_EXPIRY_MS = BASKET_CREATION_EXPIRY_MS;
 
 /**
  * How long a transfer authorisation is valid from the moment it is signed.
@@ -164,7 +165,12 @@ export function parsePerMarketUsdc(raw: string): PerMarketParseResult {
  *
  * This list must stay in sync with BASKT
  */
-export const CURATED_BASKET_IDS: readonly string[] = [];
+export const CURATED_BASKET_IDS: readonly string[] = [
+  "council-core",
+  "philosopher-spread",
+  "byoa-traders",
+  "house-and-street",
+];
 
 /**
  * A single point on a basket's NAV series.
@@ -182,16 +188,38 @@ export interface NavPoint {
 export interface NavMember {
   agentId: string;
   weightBps: number;
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
+}
+
+export interface BasketAgentWeight {
+  agentId: string;
+  weightBps: number;
   category: string;
   mode: string;
   paused?: boolean;
   stale?: boolean;
 }
-export interface BasketReturnPoint { timestamp: number; returnsBps: Record<string, number> }
-export interface BasketPolicy { maxSingleAgentBps: number; maxCategoryBps: number; staleSignalAction: "skip" | "pause"; failedCopyAction: "keep_idle" | "pause" }
-export interface BasketSnapshot { timestamp: number; navAtomic: bigint; drawdownBps: number }
 
-export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n ;
+export interface BasketReturnPoint {
+  timestamp: number;
+  returnsBps: Record<string, number>;
+}
+
+export interface BasketPolicy {
+  maxSingleAgentBps: number;
+  maxCategoryBps: number;
+  staleSignalAction: "skip" | "pause";
+  failedCopyAction: "keep_idle" | "pause";
+}
+
+export interface BasketSnapshot {
+  timestamp: number;
+  navAtomic: bigint;
+  drawdownBps: number;
+}
+
+export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n;
 
 export const DEFAULT_BASKET_POLICY: BasketPolicy = {
   maxSingleAgentBps: 4_000,
@@ -221,8 +249,310 @@ export interface BasketExposurePreview {
   policy: BasketPolicy;
 }
 
-  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
-  returns: number[];
+export function validateBasket(weights: BasketAgentWeight[], policy: BasketPolicy): string[] {
+  const errors: string[] = [];
+  if (weights.some((item) => !Number.isInteger(item.weightBps))) errors.push("weights_must_be_integers");
+  if (weights.reduce((sum, item) => sum + item.weightBps, 0) !== 10_000) errors.push("weights_must_total_10000_bps");
+  if (new Set(weights.map((item) => item.agentId)).size !== weights.length) errors.push("duplicate_agent");
+  if (weights.some((item) => item.weightBps <= 0 || item.weightBps > policy.maxSingleAgentBps)) errors.push("single_agent_exposure");
+  const categories = new Map<string, number>();
+  for (const item of weights) categories.set(item.category, (categories.get(item.category) ?? 0) + item.weightBps);
+  if ([...categories.values()].some((value) => value > policy.maxCategoryBps)) errors.push("category_exposure");
+  return errors;
+}
+
+/** Read-only backtest. Missing, paused and stale signals remain idle USDC (0% return). */
+export function simulateVirtualBasket(weights: BasketAgentWeight[], points: BasketReturnPoint[], initialNavAtomic = VIRTUAL_BASKET_INITIAL_NAV_ATOMIC): BasketSnapshot[] {
+  let nav = initialNavAtomic;
+  let high = nav;
+  return [...points].sort((a, b) => a.timestamp - b.timestamp).map((point) => {
+    let weightedReturn = 0n;
+    for (const agent of weights) {
+      if (agent.paused || agent.stale) continue;
+      weightedReturn += BigInt(point.returnsBps[agent.agentId] ?? 0) * BigInt(agent.weightBps);
+    }
+    nav = nav + (nav * weightedReturn) / 100_000_000n;
+    if (nav > high) high = nav;
+    const drawdownBps = high === 0n ? 0 : Number(((high - nav) * 10_000n) / high);
+    return { timestamp: point.timestamp, navAtomic: nav, drawdownBps };
+  });
+}
+
+export function basketExposure(weights: BasketAgentWeight[]) {
+  const categories: Record<string, number> = {};
+  const modes: Record<string, number> = {};
+  for (const item of weights) {
+    categories[item.category] = (categories[item.category] ?? 0) + item.weightBps;
+    modes[item.mode] = (modes[item.mode] ?? 0) + item.weightBps;
+  }
+  return { categories, modes };
+}
+
+function barsFromRecord(
+  record: Record<string, number>,
+  limitBps: number | null,
+): BasketExposureBar[] {
+  return Object.entries(record)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([key, bps]) => ({
+      key,
+      bps,
+      overLimit: limitBps !== null && bps > limitBps,
+    }));
+}
+
+/**
+ * Preview category / mode / agent concentration before a basket is created.
+ *
+ * - empty: no positive weights
+ * - incomplete: weights present but do not total 10_000 bps (still shows bars)
+ * - invalid: totals 10_000 but fails policy (or has duplicates / non-positive)
+ * - ready: passes `validateBasket`
+ */
+export function previewBasketExposureBeforeCreate(
+  weights: BasketAgentWeight[],
+  policy: BasketPolicy = DEFAULT_BASKET_POLICY,
+): BasketExposurePreview {
+  const active = weights.filter((item) => item.weightBps > 0);
+  const exposure = basketExposure(active);
+  const totalBps = active.reduce((sum, item) => sum + item.weightBps, 0);
+  const errors = active.length === 0 ? [] : validateBasket(active, policy);
+
+  let status: BasketExposurePreviewStatus;
+  if (active.length === 0) status = "empty";
+  else if (totalBps !== 10_000) status = "incomplete";
+  else if (errors.length > 0) status = "invalid";
+  else status = "ready";
+
+  const agentRecord: Record<string, number> = {};
+  for (const item of active) {
+    agentRecord[item.agentId] = (agentRecord[item.agentId] ?? 0) + item.weightBps;
+  }
+
+  return {
+    status,
+    totalBps,
+    categories: exposure.categories,
+    modes: exposure.modes,
+    categoryBars: barsFromRecord(exposure.categories, policy.maxCategoryBps),
+    modeBars: barsFromRecord(exposure.modes, null),
+    agentBars: barsFromRecord(agentRecord, policy.maxSingleAgentBps),
+    errors,
+    policy,
+  };
+}
+
+/**
+ * An existing or prospective position taken by a follower.
+ *
+ * Values are denominated in integer/display USDC.
+ */
+export interface FollowerPosition {
+  claimId: number;
+  agentId: string;
+  category: string;
+  mode: string;
+  amountUsdc: number;
+}
+
+/**
+ * Portfolio-level exposure breakdown across categories, modes, and agents.
+ */
+export interface PortfolioExposureBreakdown {
+  totalUsdc: number;
+  categories: Record<string, number>;
+  modes: Record<string, number>;
+  agents: Record<string, number>;
+  categoryBps: Record<string, number>;
+  modeBps: Record<string, number>;
+  agentBps: Record<string, number>;
+  categoryBars: BasketExposureBar[];
+  modeBars: BasketExposureBar[];
+  agentBars: BasketExposureBar[];
+}
+
+/**
+ * Candidate position under evaluation for mirroring.
+ */
+export interface MirrorCandidatePosition {
+  claimId: number;
+  agentId: string;
+  category?: string;
+  mode?: string;
+  mirrorUsdc: number;
+}
+
+export type FollowerMirrorPreviewStatus =
+  | "ready"
+  | "policy_breach"
+  | "insufficient_budget"
+  | "already_mirrored"
+  | "invalid";
+
+/**
+ * Detailed preview of taking a mirror position, showing remaining configured budget,
+ * before-and-after portfolio exposure, and explicit non-custodial assertions.
+ */
+export interface FollowerMirrorPreview {
+  status: FollowerMirrorPreviewStatus;
+  newPosition: FollowerPosition;
+  configuredBudgetUsdc: number;
+  remainingBudgetUsdc: number;
+  requiresUserSignature: true;
+  delegatedAuthority: false;
+  currentExposure: PortfolioExposureBreakdown;
+  projectedExposure: PortfolioExposureBreakdown;
+  policyViolations: string[];
+  policy: BasketPolicy;
+}
+
+/**
+ * Compute portfolio exposure breakdown across categories, modes, and agents.
+ */
+export function computePortfolioExposure(
+  positions: readonly FollowerPosition[],
+  policy: BasketPolicy = DEFAULT_BASKET_POLICY,
+): PortfolioExposureBreakdown {
+  const categories: Record<string, number> = {};
+  const modes: Record<string, number> = {};
+  const agents: Record<string, number> = {};
+  let totalUsdc = 0;
+
+  for (const pos of positions) {
+    if (pos.amountUsdc <= 0) continue;
+    totalUsdc += pos.amountUsdc;
+    const cat = pos.category || "general";
+    const mode = pos.mode || "pool";
+    categories[cat] = (categories[cat] ?? 0) + pos.amountUsdc;
+    modes[mode] = (modes[mode] ?? 0) + pos.amountUsdc;
+    agents[pos.agentId] = (agents[pos.agentId] ?? 0) + pos.amountUsdc;
+  }
+
+  const categoryBps: Record<string, number> = {};
+  const modeBps: Record<string, number> = {};
+  const agentBps: Record<string, number> = {};
+
+  if (totalUsdc > 0) {
+    for (const [k, v] of Object.entries(categories)) {
+      categoryBps[k] = Math.round((v / totalUsdc) * 10_000);
+    }
+    for (const [k, v] of Object.entries(modes)) {
+      modeBps[k] = Math.round((v / totalUsdc) * 10_000);
+    }
+    for (const [k, v] of Object.entries(agents)) {
+      agentBps[k] = Math.round((v / totalUsdc) * 10_000);
+    }
+  }
+
+  return {
+    totalUsdc: Math.round(totalUsdc * 100) / 100,
+    categories,
+    modes,
+    agents,
+    categoryBps,
+    modeBps,
+    agentBps,
+    categoryBars: barsFromRecord(categoryBps, policy.maxCategoryBps),
+    modeBars: barsFromRecord(modeBps, null),
+    agentBars: barsFromRecord(agentBps, policy.maxSingleAgentBps),
+  };
+}
+
+/**
+ * Preview how taking a mirror candidate affects the follower's overall portfolio exposure,
+ * checking remaining budget, category caps, and single-agent concentration limits.
+ */
+export function previewFollowerMirrorExposure(args: {
+  currentPositions: readonly FollowerPosition[];
+  pendingMirror: MirrorCandidatePosition;
+  configuredBudgetUsdc: number;
+  policy?: BasketPolicy;
+}): FollowerMirrorPreview {
+  const policy = args.policy ?? DEFAULT_BASKET_POLICY;
+  const { currentPositions, pendingMirror, configuredBudgetUsdc } = args;
+
+  const violations: string[] = [];
+  const mirrorUsdc = pendingMirror.mirrorUsdc;
+
+  if (
+    typeof mirrorUsdc !== "number" ||
+    !Number.isFinite(mirrorUsdc) ||
+    mirrorUsdc <= 0 ||
+    typeof configuredBudgetUsdc !== "number" ||
+    !Number.isFinite(configuredBudgetUsdc) ||
+    configuredBudgetUsdc < 0
+  ) {
+    violations.push("invalid_input");
+  }
+
+  const alreadyMirrored = currentPositions.some(
+    (p) => p.claimId === pendingMirror.claimId,
+  );
+  if (alreadyMirrored) {
+    violations.push("already_mirrored");
+  }
+
+  const roundedMirrorUsdc = Math.round((mirrorUsdc || 0) * 100) / 100;
+  const remainingBudgetUsdc = Math.max(
+    0,
+    Math.round(((configuredBudgetUsdc || 0) - roundedMirrorUsdc) * 100) / 100,
+  );
+
+  if (roundedMirrorUsdc > configuredBudgetUsdc) {
+    violations.push("insufficient_budget");
+  }
+
+  const newPosition: FollowerPosition = {
+    claimId: pendingMirror.claimId,
+    agentId: pendingMirror.agentId,
+    category: pendingMirror.category || "general",
+    mode: pendingMirror.mode || "pool",
+    amountUsdc: roundedMirrorUsdc,
+  };
+
+  const currentExposure = computePortfolioExposure(currentPositions, policy);
+  const projectedPositions = alreadyMirrored
+    ? [...currentPositions]
+    : [...currentPositions, newPosition];
+  const projectedExposure = computePortfolioExposure(projectedPositions, policy);
+
+  for (const bar of projectedExposure.categoryBars) {
+    if (bar.overLimit) {
+      violations.push(`category_exposure_exceeded:${bar.key}`);
+    }
+  }
+
+  for (const bar of projectedExposure.agentBars) {
+    if (bar.overLimit) {
+      violations.push(`single_agent_exposure_exceeded:${bar.key}`);
+    }
+  }
+
+  let status: FollowerMirrorPreviewStatus;
+  if (violations.includes("invalid_input")) {
+    status = "invalid";
+  } else if (violations.includes("already_mirrored")) {
+    status = "already_mirrored";
+  } else if (violations.includes("insufficient_budget")) {
+    status = "insufficient_budget";
+  } else if (violations.length > 0) {
+    status = "policy_breach";
+  } else {
+    status = "ready";
+  }
+
+  return {
+    status,
+    newPosition,
+    configuredBudgetUsdc: Math.round(configuredBudgetUsdc * 100) / 100,
+    remainingBudgetUsdc,
+    requiresUserSignature: true as const,
+    delegatedAuthority: false as const,
+    currentExposure,
+    projectedExposure,
+    policyViolations: violations,
+    policy,
+  };
 }
 
 /**
