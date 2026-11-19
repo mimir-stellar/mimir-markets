@@ -19,6 +19,11 @@
  * The card renders even at zero, with "nothing parked" rather than nothing at
  * all: someone who was told a payout failed needs to be able to come here and
  * see that it is now zero because they already pulled it.
+ *
+ * Preflight preview: before a pull is signed, the card shows the fee and reserve
+ * readiness and the exact USDC exposure from the current simulation. This is a
+ * read-only estimate; nothing is submitted until the user confirms the action,
+ * and the preview is clearly labelled as not an executed transaction.
  */
 
 import { useCallback, useEffect, useState } from "react";

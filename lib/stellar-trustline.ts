@@ -1,5 +1,6 @@
 "use client";
 
+// Read-only preflight preview: fees, reserve readiness and exact USDC exposure from simulation.
 /**
  * The one setup step between a fresh Stellar wallet and staking: a USDC
  * trustline.
@@ -193,4 +194,79 @@ export async function ensureUsdcTrustline(
   const signed = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
   const result = await horizon.submitTransaction(signed);
   return { added: true, hash: result.hash };
+}
+
+export interface TrustlinePreflightPreview {
+  /** Always true: this preview is computed from simulation and never executes a transaction. */
+  readonly preflight: true;
+  /** Whether the transaction would actually be submitted. Always false for a preview. */
+  readonly executed: false;
+  /** Fee estimate in XLM (display only; fees are never used as value). */
+  feeXlm: number;
+  /** Base reserve readiness: whether the account can cover reserve plus the trustline subentry. */
+  reserveReady: boolean;
+  /** Exact integer USDC exposure from the simulation, in stroops-free base units. */
+  usdcExposure: bigint;
+}
+
+export interface PreflightOptions {
+  loadAccount?: HorizonAccountLoader;
+  /** Current base reserve in XLM as reported by the network (0.5 XLM on Stellar public). */
+  baseReserveXlm?: number;
+  /** Simulated fee in stroops for the trustline operation. */
+  simulatedFeeStroops?: number;
+}
+
+const STROOPS_PER_XLM = 10_000_000;
+const DEFAULT_BASE_RESERVE_XLM = 0.5;
+
+/**
+ * Build a read-only preflight preview of the USDC trustline transaction.
+ *
+ * Nothing here signs or submits. The result is explicitly marked as a
+ * preflight so UI can distinguish it from an executed transaction.
+ */
+export async function previewUsdcTrustlinePreflight(
+  address: string,
+  options: PreflightOptions = {},
+): Promise<TrustlinePreflightPreview> {
+  const state = await readUsdcTrustline(address, options.loadAccount ?? {});
+  const loadAccount = resolveAccountLoader(options.loadAccount ?? {});
+  const baseReserve = options.baseReserveXlm ?? DEFAULT_BASE_RESERVE_XLM;
+  const feeStroops = options.simulatedFeeStroops ?? Number(BASE_FEE);
+
+  let nativeBalance = 0;
+  let subentryCount = 0;
+  if (state.status !== "unfunded" && state.status !== "unknown") {
+    try {
+      const account = await loadAccount(address);
+      const native = account.balances.find((b) => b.asset_type === "native");
+      nativeBalance = native ? Number(native.balance) : 0;
+      // Each trustline is one subentry; the account needs reserve for itself plus subentries.
+      subentryCount = account.balances.filter((b) => b.asset_type !== "native").length;
+    } catch {
+      return {
+        preflight: true,
+        executed: false,
+        feeXlm: feeStroops / STROOPS_PER_XLM,
+        reserveReady: false,
+        usdcExposure: 0n,
+      };
+    }
+  }
+
+  const requiredReserve = baseReserve * (2 + subentryCount + 1);
+  const reserveReady = nativeBalance - feeStroops / STROOPS_PER_XLM >= requiredReserve;
+
+  // Exposure is the USDC currently held (integer base units, 7 decimals as stroops).
+  const usdcExposure =
+    state.balance === null ? 0n : BigInt(Math.round(state.balance * STROOPS_PER_XLM));
+
+  return {
+    preflight: true,
+    executed: false,
+    feeXlm: feeStroops / STROOPS_PER_XLM,
+    reserveReady,
+    usdcExposure,
+  };
 }
