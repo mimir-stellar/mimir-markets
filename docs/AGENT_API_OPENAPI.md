@@ -114,6 +114,19 @@ Two properties are deliberate:
   operator is told where to reach during an incident — a name, not a value.
 - **Network**: none. No RPC, no database, no LLM.
 
+## Source rejection reasons
+
+The research gateway reports why a remote source was rejected using stable reason codes that
+are distinct per failure class:
+
+- `UNSUPPORTED_MEDIA` — the remote content type is not on the accepted media allowlist.
+- `CONTENT_TOO_LARGE` — the remote payload exceeds the configured size bound.
+- `INVALID_SOURCE_SCHEMA` — the payload does not satisfy the source schema.
+
+Rejection diagnostics never include the full remote payload. Any diagnostic excerpt is
+truncated to a fixed bound before redaction, so a hostile or oversized response cannot
+flood logs or responses. Existing accepted-source behavior is unchanged.
+
 ## Changing the API
 
 1. Change the code that enforces it — the route, the registry, the error catalogue.
