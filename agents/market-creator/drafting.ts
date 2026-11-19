@@ -14,12 +14,27 @@ export interface ClaimCandidate {
   deadline: string;
   category?: string;
   threshold?: number;
+  /** Source snapshot identity the candidate was drafted from. */
+  sourceId?: string;
+  /** Capture version of the source snapshot the candidate was drafted from. */
+  captureVersion?: string;
   [key: string]: unknown;
 }
 
 export interface DraftingContext {
   /** Source material the LLM should read from. */
   sourceText: string;
+  /**
+   * Identity of the source snapshot the draft was generated from (e.g. URL or
+   * document id). Bound onto every candidate so that identical questions drawn
+   * from different sources are not collapsed during deduplication.
+   */
+  sourceId?: string;
+  /**
+   * Version / capture timestamp of the source snapshot. Changes to the source
+   * content over time produce distinct drafts.
+   */
+  captureVersion?: string;
   /** Optional existing questions to avoid duplicating. */
   existingQuestions?: readonly string[];
   /** Maximum number of candidates to request. */
@@ -115,7 +130,11 @@ export async function draftClaimCandidates(
 ): Promise<ClaimCandidate[]> {
   const prompt = buildDraftingPrompt(context);
   const raw = await completer(prompt);
-  const parsed = parseDraftedCandidates(raw);
+  const parsed = parseDraftedCandidates(raw).map((candidate) => ({
+    ...candidate,
+    sourceId: context.sourceId,
+    captureVersion: context.captureVersion,
+  }));
   return filterUnsafeCryptoThresholds(parsed);
 }
 
