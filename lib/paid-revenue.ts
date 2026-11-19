@@ -6,8 +6,14 @@
  * conversion happens in the API/UI layer only — never in the ledger, never in
  * the SUMs. Durable in Neon (payments_v2); falls back to an in-memory ring
  * buffer (last 1000 events) when DATABASE_URL is unset, so serving never breaks.
+ *
+ * Each settled payment is bound to a canonical digest of the purchased
+ * resource request (method, path, query, and the request body digest). The
+ * digest is stored alongside the payment so a proof settled for one resource
+ * cannot be replayed to consume a different one.
  */
 
+import { createHash } from "node:crypto";
 import {
   getMarketRevenueSummary,
   insertPayment,
@@ -19,6 +25,12 @@ import { USDC_DECIMALS, USDC_SYMBOL, unitsToUsdc } from "./usdc";
 export interface PaymentEvent {
   /** Which endpoint earned it (e.g. /api/premium/price). */
   resource: string;
+  /**
+   * Canonical digest of the purchased request (see `canonicalResourceDigest`).
+   * Included in the durable consumption record so a payment is consumed
+   * against exactly one request identity.
+   */
+  resourceDigest: string;
   scheme: string;
   /**
    * CAIP-2, e.g. `stellar:testnet` — the value `X02_NETWORK` resolves to in
@@ -36,6 +48,34 @@ export interface PaymentEvent {
   paymentIdentifier: string;
   facilitator: string;
   settledAt: number;
+}
+
+export interface ResourceDigestInput {
+  method: string;
+  url: string;
+  /** Raw request body bytes, if any. */
+  body?: string | Uint8Array | null;
+}
+
+/**
+ * Deterministic digest of a purchased resource request. Method is upper-cased,
+ * the URL is normalized (origin-less path + sorted query params), and the body
+ * is hashed separately so large bodies do not bloat the identity string.
+ */
+export function canonicalResourceDigest(input: ResourceDigestInput): string {
+  const method = input.method.toUpperCase();
+  const u = new URL(input.url, "http://localhost");
+  const params = [...u.searchParams.entries()].sort(([a, av], [b, bv]) =>
+    a === b ? (av < bv ? -1 : av > bv ? 1 : 0) : a < b ? -1 : 1,
+  );
+  const query = new URLSearchParams(params).toString();
+  const path = u.pathname + (query ? `?${query}` : "");
+  const bodyHash = createHash("sha256")
+    .update(input.body == null ? new Uint8Array(0) : input.body)
+    .digest("hex");
+  return createHash("sha256")
+    .update(`${method}\n${path}\n${bodyHash}`)
+    .digest("hex");
 }
 
 const MAX = 1000;
@@ -61,6 +101,7 @@ export function recordPayment(e: PaymentEvent): Promise<void> {
   // unique (network, payment_identifier) index makes a retry idempotent.
   return insertPayment({
     resource: e.resource,
+    resource_digest: e.resourceDigest,
     scheme: e.scheme,
     network: e.network,
     asset_address: e.assetAddress,
@@ -77,6 +118,15 @@ export function recordPayment(e: PaymentEvent): Promise<void> {
   }).catch((err) => {
     console.warn("[payments] durable write failed:", err instanceof Error ? err.message : err);
   });
+}
+
+/**
+ * True when a previously settled payment was bound to a different resource
+ * digest than the one now being requested. Used to reject cross-resource reuse.
+ */
+export function isCrossResourceReuse(paymentIdentifier: string, resourceDigest: string): boolean {
+  const prior = events.find((x) => x.paymentIdentifier === paymentIdentifier);
+  return prior !== undefined && prior.resourceDigest !== resourceDigest;
 }
 
 /** One recent payment, decimals applied for display. */
@@ -179,10 +229,10 @@ function inMemorySummary(limit: number, offset: number): RevenueSummary {
   const bySeller = new Map<string, { calls: number; atomic: bigint }>();
   const payers = new Set<string>();
   const sellers = new Set<string>();
-  let totalAlomic = 0n;
+  let totalAtomic = 0n;
   for (const e of events) {
     totalAtomic += e.amountAtomic;
-    // Grouped on the exact strker. Folding case here did not merely mis-key the
+    // Grouped on the exact string. Folding case here did not merely mis-key the
     // map: `bySeller` is keyed by this value and the key is what /revenue renders,
     // so a lowercased `G…` was surfaced to the UI as the seller's address.
     if (e.payer) payers.add(e.payer);

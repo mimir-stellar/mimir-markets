@@ -477,6 +477,8 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_resource ON payments_v2(resource)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_seller ON payments_v2(seller)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_tx ON payments_v2(network, transaction_hash, resource)" },
+  { sql: "ALTER TABLE payments_v2 ADD COLUMN IF NOT EXISTS resource_digest TEXT" },
+  { sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_v2_digest ON payments_v2(network, payment_identifier, resource_digest)" },
   // The oracle's classic USDC bonus transfer is outside Soroban settlement.
   // Reserve once before submission; an ambiguous failure stays held for manual
   // reconciliation rather than risking a second transfer after a restart.
