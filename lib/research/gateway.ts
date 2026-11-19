@@ -35,6 +35,7 @@ import {
 } from "./ssrf";
 import { recordAllowlistReject, recordSourceFailure } from "./telemetry";
 
+export const MAX_DIAGNOSTIC_CHARS = 512;
 export const MAX_REDIRECTS = 3;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -51,6 +52,23 @@ const ALLOWED_CONTENT_TYPES = [
   "application/ld+json",
 ];
 
+/**
+ * Stable, machine-readable rejection reasons for source content. Callers branch
+ * on these codes; the human `detail` is informational only.
+ */
+export type SourceRejectionCode =
+  | "unsupported_media"
+  | "oversized_content"
+  | "invalid_source_schema";
+
+/** Bound and sanitize a diagnostic string before it leaves the gateway. */
+export function boundDiagnostic(raw: string): string {
+  const singleLine = raw.replace(/[\r\n\t]+/g, " ").trim();
+  return singleLine.length > MAX_DIAGNOSTIC_CHARS
+    ? `${singleLine.slice(0, MAX_DIAGNOSTIC_CHARS - 1)}…`
+    : singleLine;
+}
+
 export type FetchFailure =
   | { kind: "paused"; detail: string }
   | { kind: "blocked"; reason: SsrfReason; detail: string }
@@ -62,7 +80,7 @@ export type FetchFailure =
   | { kind: "cancelled"; detail: string }
   | { kind: "dependency_failure"; detail: string }
   | { kind: "content_type"; detail: string }
-  | { kind: "too_large"; detail: string }
+  | { kind: "too_large"; code: "oversized_content"; detail: string }
   | { kind: "http_error"; status: number; detail: string }
   | { kind: "transport"; detail: string };
 
@@ -290,7 +308,7 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
   const now = args.now ?? Date.now();
   const fail = <T extends FetchFailure>(failure: T): { ok: false } & T => {
     recordSourceFailure(failure.kind);
-    return { ok: false, ...failure };
+    return { ok: false, ...failure, detail: boundDiagnostic(failure.detail) };
   };
   const envPolicy = domainPolicyFromEnv();
   const policyDiagnostics = domainPolicyDiagnostics();
@@ -473,7 +491,10 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
 
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentTypeAllowed(contentType)) {
-      return fail({ kind: "content_type", detail: `unsupported content-type '${contentType}'` });
+      return fail({
+        kind: "content_type",
+        detail: `unsupported media type '${boundDiagnostic(contentType)}'`,
+      });
     }
 
     const { text, bytes, truncated } = await readBounded(response, MAX_RESPONSE_BYTES);
@@ -481,7 +502,11 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
     if (truncated) {
       // A truncated source is a silent correctness hazard for settlement, so it
       // is a refusal rather than a partial success.
-      return fail({ kind: "too_large", detail: `response exceeds ${MAX_RESPONSE_BYTES} bytes` });
+      return fail({
+        kind: "too_large",
+        code: "oversized_content",
+        detail: `response exceeds ${MAX_RESPONSE_BYTES} bytes`,
+      });
     }
 
     const success: FetchSuccess = {

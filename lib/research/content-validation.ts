@@ -209,6 +209,12 @@ const USDC_AMOUNT_RE = /(?<![\w/])\d{9,}(?!\w)/;
 // ── Privacy scanner ───────────────────────────────────────────────────────────
 
 /**
+ * Maximum number of characters of diagnostic output retained before redaction.
+ * Keeps rejection telemetry bounded regardless of how large a remote payload is.
+ */
+const MAX_DIAGNOSTIC_CHARS = 256;
+
+/**
  * Scan a body string for privacy-sensitive content.
  * Returns an array of findings, empty when none are detected.
  * The body is never logged or re-emitted by this function.
