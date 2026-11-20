@@ -63,3 +63,26 @@ test("rejects malformed freshness and settlement counts", () => {
     false,
   );
 });
+
+test("rejects localized display strings to ensure presentation is never parsed into arithmetic", () => {
+  const invalidLocalizedPoints = [
+    { timestamp: 1_800_000_000_000, value: "$1,234.56" },
+    { timestamp: 1_800_000_000_000, value: "1,234.56" },
+    { timestamp: 1_800_000_000_000, value: "1.234,56" },
+    { timestamp: 1_800_000_000_000, value: "12.50 USDC" },
+    { timestamp: 1_800_000_000_000, value: null },
+    { timestamp: 1_800_000_000_000, value: undefined },
+  ];
+
+  for (const point of invalidLocalizedPoints) {
+    assert.equal(
+      isPortfolioPerformanceResponse({
+        points: [point as unknown as { timestamp: number; value: number }],
+        settled: 1,
+        cache: CACHE,
+      }),
+      false,
+      `expected point with value ${JSON.stringify(point.value)} to be rejected`,
+    );
+  }
+});
