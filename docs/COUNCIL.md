@@ -20,6 +20,8 @@ The point isn't to find a single "best" trader. It's the opposite: by giving ten
 - [Production deploy](#production-deploy)
 - [Configuration reference](#configuration-reference)
 - [Where the council shows up in the UI](#where-the-council-shows-up-in-the-ui)
+- [Council independence assumptions & operator report](#council-independence-assumptions--operator-report)
+- [A note on bias](#a-note-on-bias)
 
 ---
 
@@ -289,6 +291,45 @@ LLM credentials (`GEMINI_API_KEY` / `ANTHROPIC_API_KEY` / etc.) are shared with 
 | `/vs/[id]` | A `Council verdict` card under the settlement explanation. Data from `/api/vs/[id]/council` (pure on-chain read). |
 
 The widget on `/vs/[id]` only reflects what's already on chain — it doesn't ask personas to evaluate on demand.
+
+---
+
+## Council independence assumptions & operator report
+
+While council quorum voting aggregates agent viewpoints to inform settlement, **council personas are correlated internal agents, NOT independently verified institutions or decentralized third-party oracles**.
+
+### Correlation and shared dependencies
+
+1. **Shared Foundation Model Provider:** All LLM-biased personas (and philosophers) query the same underlying model provider (e.g., Gemini). Upstream provider outages, safety filters, or prompt biases affect all LLM jurors simultaneously.
+2. **Shared Evidence Cache:** Personas evaluate the identical per-cycle cached HTTP text from the claim's resolution URL. They do not corroborate from independent primary web sources.
+3. **Peer-Reasoning Cascades:** When `COUNCIL_PEER_READS=1`, buyer personas purchase public takes from seller personas prior to voting, creating information dependencies and cascade risk.
+4. **Operational Custody:** All persona keypairs (`COUNCIL_<SLUG>_SECRET`) run within the same local Node worker process on Stellar.
+
+> **CRITICAL OPERATOR NOTICE:** Operators, UIs, and external protocols must **never** present or advertise council quorum or majority tally as an independently verified consortium or decentralized institutional consensus.
+
+### Generating the operator report
+
+Operators can audit the public configuration, provider groupings, evidence-source groupings, and correlation clusters using the operator CLI tool:
+
+```bash
+# Print formatted operator audit report to terminal
+npm run report:council-independence
+
+# Output raw JSON for automated monitoring or pipeline gates
+npm run report:council-independence -- --json
+
+# Generate Markdown report for pull requests or release notes
+npm run report:council-independence -- --markdown
+
+# Strict verification gate: exit code 1 if high correlation risk detected
+npm run report:council-independence -- --strict
+```
+
+### Module and API interfaces
+
+- **Core Module (`lib/council/independence.ts`):** Exports `buildCouncilIndependenceReport`, `evaluateQuorumIndependence`, and `formatCouncilIndependenceReport`.
+- **Quorum Gate (`lib/council/quorum.ts`):** `evaluateQuorum(ballot, quorum, { checkIndependence: true })` attaches independence evaluations to settlement ballots.
+- **Peer Reasoning (`agents/council/shared/peer-reasoning.ts`):** Exports `getPeerReasoningGroupings` and `describePeerReasoningCorrelation`.
 
 ---
 

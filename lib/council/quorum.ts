@@ -14,6 +14,26 @@
  */
 
 import { isVerdict, type Verdict } from "../verdict";
+import {
+  evaluateQuorumIndependence,
+  type QuorumIndependenceEvaluation,
+  type QuorumIndependenceConfig,
+} from "./independence";
+
+export {
+  buildCouncilIndependenceReport,
+  evaluateQuorumIndependence,
+  formatCouncilIndependenceReport,
+  INSTITUTIONAL_INDEPENDENCE_DISCLAIMER,
+  type CouncilIndependenceReport,
+  type CouncilIndependenceSummary,
+  type IndependenceGroupings,
+  type CorrelationCluster,
+  type IndependenceAssumption,
+  type PersonaIndependenceProfile,
+  type QuorumIndependenceEvaluation,
+  type QuorumIndependenceConfig,
+} from "./independence";
 
 /** Claim lifecycle states the quorum gate cares about. */
 export type ClaimSettleState = "open" | "active" | "resolved" | "cancelled" | "paused";
@@ -112,6 +132,8 @@ export interface QuorumEvaluation {
   acceptedSlugs: string[];
   /** Valid votes in ballot order (duplicates / rejects excluded). */
   ballot: ClassifiedVote[];
+  /** Optional operator independence assessment of the decisive ballot. */
+  independence?: QuorumIndependenceEvaluation;
 }
 
 const EMPTY_DISPOSITIONS = (): Record<VoteDisposition, number> => ({
@@ -125,7 +147,7 @@ const EMPTY_DISPOSITIONS = (): Record<VoteDisposition, number> => ({
 });
 
 export function isDecisiveVerdict(verdict: Verdict): boolean {
-  return verdict === "CREATOR_WINS" || verdict === "CHALLENGERS_WINS";
+  return verdict === "CREATOR_WINS" || verdict === "CHALLENGERS_WIN";
 }
 
 /**
@@ -342,6 +364,8 @@ export function evaluateQuorum(
   opts?: {
     claimState?: ClaimSettleState;
     strictConfig?: boolean;
+    checkIndependence?: boolean;
+    independenceConfig?: QuorumIndependenceConfig;
   },
 ): QuorumEvaluation {
   const claimState = opts?.claimState;
@@ -404,6 +428,9 @@ export function evaluateQuorum(
   const dispositions = countDispositions(all);
   const decisiveCount = ballot.filter((v) => v.decisive).length;
   const acceptedSlugs = ballot.map((v) => v.slug);
+  const independence = opts?.checkIndependence
+    ? evaluateQuorumIndependence(ballot, undefined, { quorum, ...opts.independenceConfig })
+    : undefined;
 
   if (decisiveCount >= quorum) {
     return {
@@ -412,11 +439,24 @@ export function evaluateQuorum(
       decisiveCount,
       acceptedCount: ballot.length,
       dispositions,
-      reason: `council quorum met (${decisiveCount}/${quorum} decisive votes)`,
+      reason: `quorum met: ${decisiveCount} decisive ≥ ${quorum}`,
       acceptedSlugs,
       ballot,
+      ...(independence ? { independence } : {}),
     };
   }
+
+  const dep = dispositions.dependency_failure;
+  const paused = dispositions.paused;
+  const reasonParts = [
+    `below quorum: ${decisiveCount} decisive < ${quorum}`,
+    dispositions.invalid ? `${dispositions.invalid} invalid` : null,
+    dispositions.stale ? `${dispositions.stale} stale` : null,
+    dispositions.duplicated ? `${dispositions.duplicated} duplicated` : null,
+    dispositions.cancelled ? `${dispositions.cancelled} cancelled` : null,
+    paused ? `${paused} paused` : null,
+    dep ? `${dep} dependency_failure` : null,
+  ].filter(Boolean);
 
   return {
     action: "fallback_solo",
@@ -424,10 +464,21 @@ export function evaluateQuorum(
     decisiveCount,
     acceptedCount: ballot.length,
     dispositions,
-    reason: `council quorum not met (${decisiveCount}/${quorum} decisive votes) — falling back to solo oracle`,
+    reason: reasonParts.join("; "),
     acceptedSlugs,
     ballot,
+    ...(independence ? { independence } : {}),
   };
+}
+
+/** True when the oracle should settle with its own evidence (not abort). */
+export function shouldFallbackSolo(evaluation: QuorumEvaluation): boolean {
+  return evaluation.action === "fallback_solo";
+}
+
+/** True when council tally is authoritative for this settlement. */
+export function shouldUseCouncil(evaluation: QuorumEvaluation): boolean {
+  return evaluation.action === "use_council";
 }
 
 /** Minimal shape of a claim as read from chain for joinability selection. */

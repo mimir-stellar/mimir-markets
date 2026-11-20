@@ -122,3 +122,51 @@ export async function buyPeerReasoning(args: {
 
   return reads;
 }
+
+/**
+ * Deterministically compute peer reasoning dependencies across the active roster.
+ *
+ * For each buyer persona, lists the seller personas it buys reasoning from.
+ * Pure: uses `selectPeerSellers` so operator reporting and runtime execution stay identical.
+ */
+export function getPeerReasoningGroupings(
+  personas: readonly PersonaSpec[],
+  readsPerPersona: number = Number(process.env.COUNCIL_PEER_READS_PER_PERSONA ?? 2),
+  claimId: number = 1,
+): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  if (readsPerPersona <= 0 || personas.length <= 1) {
+    for (const p of personas) result[p.slug] = [];
+    return result;
+  }
+  const personaList = [...personas];
+  for (const buyer of personaList) {
+    const sellers = selectPeerSellers(buyer, personaList, claimId, readsPerPersona);
+    result[buyer.slug] = sellers.map((s) => s.slug);
+  }
+  return result;
+}
+
+/**
+ * Summary of peer reasoning correlation mechanism and affected personas.
+ */
+export function describePeerReasoningCorrelation(
+  peerReadsEnabled: boolean = process.env.COUNCIL_PEER_READS === "1",
+  groupings?: Record<string, string[]>,
+): {
+  peerReadsEnabled: boolean;
+  correlationMechanism: string;
+  affectedPersonas: string[];
+} {
+  const map = groupings ?? {};
+  const affected = peerReadsEnabled
+    ? Object.keys(map).filter((k) => (map[k]?.length ?? 0) > 0)
+    : [];
+  return {
+    peerReadsEnabled,
+    correlationMechanism: peerReadsEnabled
+      ? "HTTP 402 peer reasoning buys create information cascade dependencies between buyer and seller personas"
+      : "Peer reasoning reads disabled; personas evaluate without direct peer-to-peer reasoning transfer",
+    affectedPersonas: affected,
+  };
+}

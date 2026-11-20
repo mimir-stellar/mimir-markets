@@ -6,7 +6,8 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "test:node": "node scripts/run-node-tests.mjs"
+    "test:node": "node scripts/run-node-tests.mjs",
+    "report:council-independence": "tsx scripts/report-council-independence.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
