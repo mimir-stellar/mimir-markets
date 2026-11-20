@@ -1,4 +1,4 @@
-#no_std
+#![no_std]
 /// Mimir market — oracle-settled prediction market on Soroban.
 ///
 /// Port of `contracts/MimirV2.sol`. Stakes are held in a USDC Stellar Asset
@@ -8,49 +8,45 @@
 ///
 /// Deliberate deviations from the Solidity original are marked
 /// `DEVIATION FROM SOLIDITY` at the point they occur.
-
 mod admin;
 mod claims;
+pub mod contract;
 mod escrow;
-mod fees;
 pub mod events;
+mod fees;
 mod resolve;
 mod storage;
 mod types;
 mod util;
 
 pub use contract::{MimirMarket, MimirMarketClient};
-pub use types:*;
+pub use types::*;
 
-#[config(test)]
+#[cfg(test)]
+mod test_batch_get_claims;
+#[cfg(test)]
+mod test_batch_read;
+#[cfg(test)]
 mod test_challenge_lock;
-#[config(test)]
+#[cfg(test)]
 mod test_common;
-#[config(test)]
+#[cfg(test)]
 mod test_decimals;
 #[cfg(test)]
 mod test_dust_isolation;
-#[config(test)]
+#[cfg(test)]
 mod test_fee_rounding;
-#[config(test)]
+#[cfg(test)]
 mod test_fees;
-#[config(test)]
+#[cfg(test)]
 mod test_lifecycle;
-#[config(test)]
+#[cfg(test)]
 mod test_pagination;
-#[config(test)]
-mod test_settlement;
-#[config(test)]
-mod test_verdict;
-#[config(test)]
-mod test_batch_read;
-#[config(test)]
-mod test_batch_get_claims;
-#[config(test)]
+#[cfg(test)]
 mod test_rematch_status;
-#[config(test)]
-mod test_budgets;
-#[config(test)]
-mod test_oracle_timelock;
-#[config(test)]
-mod test_creator_index;
+#[cfg(test)]
+mod test_rounding_policy;
+#[cfg(test)]
+mod test_settlement;
+#[cfg(test)]
+mod test_verdict;

@@ -22,6 +22,7 @@
  */
 
 import { unitsToUsdc, usdcToUnits } from "./usdc";
+import { ROUNDING_POLICY_VERSION, requireRoundingPolicyVersion } from "./rounding-policy";
 import {
   MAX_TOTAL_FEE_BPS,
   snapshotFeePolicy,
@@ -502,6 +503,7 @@ export function principalSafePayout(args: {
  * fee) would invent a number, but it must be labelled.
  */
 export interface PrincipalSafePayoutPreview {
+  roundingPolicyVersion: number;
   /** Gross, pre-fee display numbers — the same ones `previewChallengerPayout` returns. */
   gross: PayoutDisplay;
   feeStatus: PayoutFeeStatus;
@@ -542,6 +544,7 @@ export function toPrincipalSafePreview(payout: PrincipalSafePayout): PrincipalSa
   };
   return {
     gross: toPayoutDisplay(payout.gross),
+    roundingPolicyVersion: ROUNDING_POLICY_VERSION,
     feeStatus: payout.feeState.status,
     principal,
     platformFee: unitsToUsdc(payout.split.platformFeeUnits),
@@ -576,7 +579,10 @@ export function previewChallengerPayoutSafe(args: {
   challengerPayoutBps?: number;
   /** Defaults to `unavailable`, which previews the gross and says so. */
   fees?: PayoutFeeState;
+  requiredRoundingPolicyVersion?: number;
 }): PrincipalSafePayoutPreview {
+  requireRoundingPolicyVersion(args.requiredRoundingPolicyVersion === undefined
+    ? ROUNDING_POLICY_VERSION : args.requiredRoundingPolicyVersion);
   return toPrincipalSafePreview(
     principalSafePayout({
       gross: challengerPayoutUnits(args),

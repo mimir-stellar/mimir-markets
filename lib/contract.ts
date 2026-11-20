@@ -74,6 +74,8 @@ import {
 } from "./contract-errors";
 import { availableCreatorLiquidityUnits } from "./payout";
 import { decodeHash32Hex } from "./content-hash";
+import { requireRoundingPolicyVersion } from "./rounding-policy";
+import { wrapStellarTransactionError } from "./settlement-retry";
 import { getDemoSecret } from "./demo-signers";
 import type { VSCacheFreshness } from "./vs-freshness";
 
@@ -1059,6 +1061,28 @@ export async function quoteChallengerPayout(
   };
 }
 
+/** Read a payout quote only under an explicitly supported rounding policy.
+ * Requires a deployment with the versioned methods; no legacy fallback guesses. */
+export async function quoteChallengerPayoutVersioned(
+  claimId: number,
+  challenger: string,
+  requiredVersion: number,
+): Promise<{ roundingPolicyVersion: number; gross: number; fee: number; net: number; claimed: boolean } | null> {
+  requireRoundingPolicyVersion(requiredVersion);
+  if (!isMarketConfigured()) return null;
+  const tx = await marketReader().quote_payout_versioned({
+    claim_id: BigInt(claimId), challenger, required_version: requiredVersion,
+  });
+  const result = unwrapOrNull<MimirMarket.VersionedPayoutQuote>(tx.result);
+  if (!result) return null;
+  requireRoundingPolicyVersion(result.rounding_policy_version);
+  return {
+    roundingPolicyVersion: result.rounding_policy_version,
+    gross: unitsToUsdc(result.quote.gross), fee: unitsToUsdc(result.quote.fee),
+    net: unitsToUsdc(result.quote.net), claimed: result.quote.claimed,
+  };
+}
+
 // ── Fast feed (browser uses /api/vs, server reads directly) ──────────────────
 export async function getAllVSFast(): Promise<VSFeedSnapshot> {
   if (typeof window !== "undefined") {
@@ -1375,6 +1399,24 @@ export async function claimChallengerPayout(
     await marketWriter(signer).claim_challenger_payout({
       challenger: signer.publicKey,
       claim_id: BigInt(claimId),
+    }),
+  );
+  return { ...write, claimId, netPayout: unitsToUsdc(value) };
+}
+
+/** Pull with the policy required by a versioned quote. Validate locally before
+ * requesting a signer, then let Soroban enforce the same version and auth. */
+export async function claimChallengerPayoutVersioned(
+  wallet: WalletArg,
+  claimId: number,
+  requiredVersion: number,
+): Promise<ClaimWriteResult & { netPayout: number }> {
+  requireRoundingPolicyVersion(requiredVersion);
+  const signer = requireSigner(wallet, "collect this payout");
+  const { value, write } = await sendCall<bigint>(
+    "claim_payout_versioned",
+    await marketWriter(signer).claim_payout_versioned({
+      challenger: signer.publicKey, claim_id: BigInt(claimId), required_version: requiredVersion,
     }),
   );
   return { ...write, claimId, netPayout: unitsToUsdc(value) };

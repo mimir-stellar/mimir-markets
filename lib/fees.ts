@@ -29,6 +29,8 @@
  *    contract that reverts would take the whole settlement down with it.
  */
 
+import { ROUNDING_POLICY_VERSION, requireRoundingPolicyVersion } from "./rounding-policy";
+
 export const BPS_DIVISOR = 10_000n;
 
 /**
@@ -187,7 +189,10 @@ export function splitFees(args: {
   grossPayoutUnits: bigint;
   snapshot: FeeSnapshot;
   outcome: SettlementOutcome;
+  requiredRoundingPolicyVersion?: number;
 }): FeeSplit {
+  requireRoundingPolicyVersion(args.requiredRoundingPolicyVersion === undefined
+    ? ROUNDING_POLICY_VERSION : args.requiredRoundingPolicyVersion);
   const { principalUnits, grossPayoutUnits, snapshot, outcome } = args;
 
   // A refund is returned whole. There is no profit to charge, and taking a cut of
@@ -274,7 +279,10 @@ export function settleMarket(args: {
   participants: Participant[];
   snapshot: FeeSnapshot;
   outcome: SettlementOutcome;
+  requiredRoundingPolicyVersion?: number;
 }): MarketSettlement {
+  requireRoundingPolicyVersion(args.requiredRoundingPolicyVersion === undefined
+    ? ROUNDING_POLICY_VERSION : args.requiredRoundingPolicyVersion);
   const { participants, snapshot, outcome } = args;
 
   const escrowInflowUnits = participants.reduce((sum, p) => sum + p.stakeUnits, 0n);
@@ -290,6 +298,7 @@ export function settleMarket(args: {
       grossPayoutUnits: participant.grossPayoutUnits,
       snapshot,
       outcome,
+      requiredRoundingPolicyVersion: args.requiredRoundingPolicyVersion,
     });
     if (split.payoutUnits > 0n) {
       payouts.push({ address: participant.address, amountUnits: split.payoutUnits });

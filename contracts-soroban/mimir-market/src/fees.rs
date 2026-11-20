@@ -6,6 +6,18 @@ use crate::events;
 use crate::storage;
 use crate::types::{Error, FeeSnapshot, BPS_DIVISOR};
 
+/// Version 1: truncate gross pool/fixed-odds payouts and each profit-fee leg;
+/// leave fee remainders with the participant and pool dust with the last puller.
+pub const ROUNDING_POLICY_VERSION: u32 = 1;
+
+pub fn require_rounding_policy_version(required: u32) -> Result<(), Error> {
+    if required == ROUNDING_POLICY_VERSION {
+        Ok(())
+    } else {
+        Err(Error::UnsupportedRoundingPolicyVersion)
+    }
+}
+
 /// `stake * bps / BPS_DIVISOR`, truncating. Checked multiplication so an
 /// absurd stake errors instead of wrapping, matching Solidity 0.8 revert-on-
 /// overflow semantics.
@@ -39,6 +51,18 @@ pub fn pool_share(
 /// this unreachable for the platform fee; keeping it here means a malformed
 /// snapshot can never mint an unclaimable balance.
 pub fn quote_fees(principal: i128, gross: i128, fees: &FeeSnapshot) -> Result<(i128, i128), Error> {
+    quote_fees_versioned(principal, gross, fees, ROUNDING_POLICY_VERSION)
+}
+
+/// Use the same policy gate for previews and settlement. Reject unknown versions
+/// before calculating fees, including zero-fee and refund paths.
+pub fn quote_fees_versioned(
+    principal: i128,
+    gross: i128,
+    fees: &FeeSnapshot,
+    required_version: u32,
+) -> Result<(i128, i128), Error> {
+    require_rounding_policy_version(required_version)?;
     if gross <= principal {
         return Ok((gross, 0));
     }

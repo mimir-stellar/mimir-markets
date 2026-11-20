@@ -6,12 +6,13 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 use crate::admin;
 use crate::claims;
 use crate::escrow;
+use crate::fees;
 use crate::resolve;
 use crate::storage;
 use crate::types::{
     Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeePolicy,
     MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict,
-    WinnerSide, MAX_BATCH_SIZE,
+    WinnerSide, VersionedPayoutQuote, MAX_BATCH_SIZE,
 };
 
 #[contract]
@@ -199,7 +200,7 @@ impl MimirMarket {
         if !storage::is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
-        Ok(storage::creator_claims_page(&env, &creator, offset, limit))
+        Ok(claims::get_creator_claims(&env, creator, offset, limit))
     }
 
     /// The claim's verdict with its explicit encoding version.
@@ -344,6 +345,39 @@ impl MimirMarket {
         challenger: Address,
     ) -> Result<PayoutQuote, Error> {
         resolve::quote_challenger_payout(&env, claim_id, &challenger)
+    }
+
+    /// Read the current arithmetic policy without reading any claim or wallet.
+    pub fn rounding_policy_version(env: Env) -> u32 {
+        let _ = env;
+        fees::ROUNDING_POLICY_VERSION
+    }
+
+    /// Preview a payout only under the caller's explicitly required policy.
+    /// Unsupported versions are refused before reading the claim or roster.
+    pub fn quote_payout_versioned(
+        env: Env,
+        claim_id: u64,
+        challenger: Address,
+        required_version: u32,
+    ) -> Result<VersionedPayoutQuote, Error> {
+        fees::require_rounding_policy_version(required_version)?;
+        Ok(VersionedPayoutQuote {
+            rounding_policy_version: fees::ROUNDING_POLICY_VERSION,
+            quote: resolve::quote_challenger_payout(&env, claim_id, &challenger)?,
+        })
+    }
+
+    /// Pull once using the same policy as a versioned preview. This retains the
+    /// legacy payout's authorization, fee accrual, dust and frozen-token fallback.
+    pub fn claim_payout_versioned(
+        env: Env,
+        challenger: Address,
+        claim_id: u64,
+        required_version: u32,
+    ) -> Result<i128, Error> {
+        fees::require_rounding_policy_version(required_version)?;
+        resolve::claim_challenger_payout(&env, challenger, claim_id)
     }
 
     pub fn get_platform_stats(env: Env) -> Result<PlatformStats, Error> {

@@ -1,0 +1,21 @@
+{
+  "roundingPolicyVersion": 1,
+  "usdcDecimals": 7,
+  "bpsDivisor": "10000",
+  "feeVectors": [
+    { "name": "independent_fee_legs", "principal": "20130000", "gross": "20132013", "platformBps": 700, "ownerBps": 300, "net": "20131813", "fee": "200" },
+    { "name": "one_atomic_profit", "principal": "20000000", "gross": "20000001", "platformBps": 700, "ownerBps": 300, "net": "20000001", "fee": "0" },
+    { "name": "refund", "principal": "20000000", "gross": "20000000", "platformBps": 700, "ownerBps": 300, "net": "20000000", "fee": "0" },
+    { "name": "zero_payout", "principal": "20000000", "gross": "0", "platformBps": 700, "ownerBps": 300, "net": "0", "fee": "0" },
+    { "name": "first_platform_fee_unit", "principal": "20000000", "gross": "20000015", "platformBps": 700, "ownerBps": 300, "net": "20000014", "fee": "1" },
+    { "name": "large_exact_atomic_amount", "principal": "9007199254740993", "gross": "18014398509481986", "platformBps": 700, "ownerBps": 300, "net": "17113678584007888", "fee": "900719925474098" }
+  ],
+  "poolVector": {
+    "creatorStake": "100000000",
+    "challengerStake": "30000000",
+    "totalChallengerStake": "90000000",
+    "formulaGross": "63333333",
+    "finalGross": "63333334",
+    "dust": "1"
+  }
+}

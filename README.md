@@ -1268,6 +1268,8 @@ Update this section in the same PR if you:
 
 ---
 
+Payout previews can explicitly require [rounding policy version 1](docs/PAYOUT_ROUNDING_POLICY.md), matching settlement arithmetic while preserving the existing payout methods.
+
 ## License
 
 AGPL-3.0: see [`LICENSE`](./LICENSE).

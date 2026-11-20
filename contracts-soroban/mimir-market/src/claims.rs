@@ -16,7 +16,7 @@ use crate::util;
 /// single persistent entry written by `create_claim`.
 const CREATOR_INDEX_PAGE_SIZE: u32 = 100;
 
-fn creator_index_page_key(env: &Env, creator: &Address, page: u32) {
+fn creator_index_page_key(_env: &Env, creator: &Address, page: u32) -> (soroban_sdk::Symbol, Address, u32) {
     (
         soroban_sdk::symbol_short!("cclm_pg"),
         creator.clone(),
@@ -24,7 +24,7 @@ fn creator_index_page_key(env: &Env, creator: &Address, page: u32) {
     )
 }
 
-fn creator_index_count_key(env: &Env, creator: &Address) {
+fn creator_index_count_key(_env: &Env, creator: &Address) -> (soroban_sdk::Symbol, Address) {
     (soroban_sdk::symbol_short!("cclm_ct"), creator.clone())
 }
 
@@ -71,14 +71,14 @@ pub fn get_creator_claims(
         }
     }
     // TTL extension like other reads.
-    env.storage().persistent().extend_ttl(&count_key, 30, env.ledger().max_ttl() / 2);
+    env.storage().persistent().extend_ttl(&count_key, 30, env.storage().max_ttl() / 2);
     if out.len() > 0 {
         let first_page = offset / CREATOR_INDEX_PAGE_SIZE;
         let last_page = (index - 1) / CREATOR_INDEX_PAGE_SIZE;
         let mut p = first_page;
         while p <= last_page {
             let key = creator_index_page_key(env, &creator, p);
-            env.storage().persistent().extend_ttl(&key, 30, env.ledger().max_ttl() / 2);
+            env.storage().persistent().extend_ttl(&key, 30, env.storage().max_ttl() / 2);
             p += 1;
         }
     }

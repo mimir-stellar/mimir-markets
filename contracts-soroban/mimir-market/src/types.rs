@@ -328,6 +328,14 @@ pub struct PayoutQuote {
     pub claimed: bool,
 }
 
+/// Versioned preview envelope. The legacy PayoutQuote encoding stays unchanged.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionedPayoutQuote {
+    pub rounding_policy_version: u32,
+    pub quote: PayoutQuote,
+}
+
 /// A paginated window into a claim's challenger roster.
 ///
 /// `items` holds up to `limit` entries starting at `offset`.  
@@ -431,4 +439,9 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    /// The required payout rounding policy is unsupported. Use a supported
+    /// preview version before submitting a pull; no funds or state are changed.
+    UnsupportedRoundingPolicyVersion = 48,
+    /// Ownership transfer was blocked by the existing withdrawal pause guard.
+    Paused = 49,
 }
