@@ -664,6 +664,11 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
       points: { type: "array", items: PnlPointSchema },
       settled: { type: "integer", minimum: 0, description: "Total number of settled markets for this address." },
       cache: VSCacheFreshness,
+      state: {
+        type: "string",
+        enum: ["available", "unavailable", "insufficient-history"],
+        description: "Explicit performance state without inventing zero returns: available when settled history exists, insufficient-history when no settled samples exist, unavailable when data could not be validated.",
+      },
     },
   };
 
@@ -1121,6 +1126,7 @@ export function buildPublicEndpointExamples(): PublicEndpointExample[] {
     points: cumulativePnlPoints(results),
     settled: performance.settled,
     cache: exampleFreshness("index", 300_000),
+    state: "available",
   };
   const performanceOk: PublicEndpointExample = {
     path: "/api/performance/{address}",

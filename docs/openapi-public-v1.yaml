@@ -2720,6 +2720,13 @@ paths:
                         type: integer
                         minimum: 1
                         description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+                  state:
+                    type: string
+                    enum:
+                      - available
+                      - unavailable
+                      - insufficient-history
+                    description: "Explicit performance state without inventing zero returns: available when settled history exists, insufficient-history when no settled samples exist, unavailable when data could not be validated."
               examples:
                 portfolioPerformance:
                   summary: "Cumulative realised P&L series computed from settled markets."
@@ -2738,6 +2745,7 @@ paths:
                       lastUpdatedAt: "2025-08-14T19:33:20.000Z"
                       ageMs: 0
                       freshnessWindowMs: 300000
+                    state: available
         "400":
           description: Invalid path or query parameter.
           x-mimir-error-codes:
@@ -5096,6 +5104,13 @@ components:
               type: integer
               minimum: 1
               description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+        state:
+          type: string
+          enum:
+            - available
+            - unavailable
+            - insufficient-history
+          description: "Explicit performance state without inventing zero returns: available when settled history exists, insufficient-history when no settled samples exist, unavailable when data could not be validated."
     StoredBasket:
       type: object
       description: "A user-composed agent basket (`lib/db.ts::StoredBasket`)."

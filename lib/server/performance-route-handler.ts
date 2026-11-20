@@ -18,7 +18,10 @@ import { computeAgentPerformance, cumulativePnlPoints } from "@/lib/agents/perfo
 import { apiError } from "@/lib/api/errors";
 import { authorizeRequest } from "@/lib/api/policy";
 import { getAgentTradeRows, getSyncMeta } from "@/lib/db";
-import type { PortfolioPerformanceResponse } from "@/lib/portfolio-performance";
+import {
+  resolvePerformanceState,
+  type PortfolioPerformanceResponse,
+} from "@/lib/portfolio-performance";
 import { parseAddressParam } from "@/lib/server/api-validation";
 import { cachedFor } from "@/lib/server/ttl-cache";
 import { buildVSCacheFreshness } from "@/lib/vs-freshness";
@@ -59,8 +62,11 @@ export const readIndexPerformance: PerformanceCalculator = async (address) => {
   const { performance, results } = computeAgentPerformance(rows);
   const updatedAtMs = Number(lastSettlementSync ?? "0");
 
+  const points = cumulativePnlPoints(results);
+  const state = resolvePerformanceState(points, performance.settled);
+
   return {
-    points: cumulativePnlPoints(results),
+    points,
     settled: performance.settled,
     cache: buildVSCacheFreshness({
       updatedAtMs:
@@ -68,6 +74,7 @@ export const readIndexPerformance: PerformanceCalculator = async (address) => {
       freshnessWindowMs: performanceFreshnessWindowMs(),
       source: "index",
     }),
+    state,
   };
 };
 
