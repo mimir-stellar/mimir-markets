@@ -176,6 +176,23 @@ export function checkPermission(
   return { ok: true };
 }
 
+/**
+ * Owner-readable copy execution timeline entry.
+ *
+ * References only: signal, policy, reservation and chain outcome identifiers.
+ * Signing seeds and private agent reasoning are never included.
+ */
+export interface CopyExecutionTimelineEntry {
+  at: number;
+  stage: "signal" | "policy" | "reservation" | "chain";
+  status: "ok" | "rejected" | "pending" | "failed";
+  signalRef?: string;
+  policyRef?: string;
+  reservationRef?: string;
+  chainRef?: string;
+  reason?: string;
+}
+
 export interface SpendDecision {
   allowed: boolean;
   reason?: PermissionRejection;
@@ -211,6 +228,38 @@ export function evaluateSpend(args: {
     return { allowed: false, reason: "allowance_exhausted", remainingAtomic: remainingBefore, periodStart, periodEndsAt };
   }
   return { allowed: true, remainingAtomic: remainingBefore - amountAtomic, periodStart, periodEndsAt };
+}
+
+/**
+ * Build an owner-readable timeline from already-recorded execution events.
+ *
+ * Only reference identifiers and status are copied through; any sensitive
+ * field (seeds, reasoning) on the input is dropped by construction.
+ */
+export function buildCopyExecutionTimeline(
+  events: Array<{
+    at: number;
+    stage: CopyExecutionTimelineEntry["stage"];
+    status: CopyExecutionTimelineEntry["status"];
+    signalRef?: string;
+    policyRef?: string;
+    reservationRef?: string;
+    chainRef?: string;
+    reason?: string;
+  }>,
+): CopyExecutionTimelineEntry[] {
+  return events
+    .map((e) => ({
+      at: e.at,
+      stage: e.stage,
+      status: e.status,
+      ...(e.signalRef ? { signalRef: e.signalRef } : {}),
+      ...(e.policyRef ? { policyRef: e.policyRef } : {}),
+      ...(e.reservationRef ? { reservationRef: e.reservationRef } : {}),
+      ...(e.chainRef ? { chainRef: e.chainRef } : {}),
+      ...(e.reason ? { reason: e.reason } : {}),
+    }))
+    .sort((a, b) => a.at - b.at);
 }
 
 /** Shape accepted from the browser after the owner signs, before we trust any of it. */

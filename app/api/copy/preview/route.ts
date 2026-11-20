@@ -16,6 +16,31 @@ const numbers = (value: unknown, limit: number): value is number[] =>
   Array.isArray(value) && value.length <= limit && value.every((item) => Number.isSafeInteger(item) && item >= 0);
 const amount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
+// Timeline entries reference identifiers only. Signing seeds, agent reasoning
+// and other private fields are never copied into the response.
+export type CopyTimelineEntry = {
+  step: "signal" | "policy" | "reservation" | "chain";
+  reference: string;
+  status: string;
+};
+
+function buildTimeline(
+  permission: CopyPermission,
+  signal: CopySignal,
+  result: ReturnType<typeof buildCopyExecutionDryRun>,
+): CopyTimelineEntry[] {
+  const r = result as unknown as Record<string, unknown>;
+  const reservation = typeof r.reservationId === "string" ? r.reservationId : "none";
+  const chainRef = typeof r.chainReference === "string" ? r.chainReference : "none";
+  const decision = typeof r.decision === "string" ? r.decision : "unknown";
+  return [
+    { step: "signal", reference: signal.sourcePositionId, status: "observed" },
+    { step: "policy", reference: permission.permissionId, status: decision },
+    { step: "reservation", reference: reservation, status: reservation === "none" ? "not_reserved" : "reserved" },
+    { step: "chain", reference: chainRef, status: chainRef === "none" ? "not_submitted" : "referenced" },
+  ];
+}
+
 function parsePreviewInput(value: unknown, now: number): {
   permission: CopyPermission; signal: CopySignal; context: CopyDryRunContext;
 } | null {
@@ -98,5 +123,9 @@ export async function POST(req: Request): Promise<Response> {
   } catch { return Response.json({ error: "invalid JSON" }, { status: 400 }); }
   const parsed = parsePreviewInput(input, Date.now());
   if (!parsed) return Response.json({ error: "invalid copy preview input" }, { status: 400 });
-  return Response.json(buildCopyExecutionDryRun(parsed), { headers: { "cache-control": "no-store" } });
+  const result = buildCopyExecutionDryRun(parsed);
+  return Response.json(
+    { ...result, timeline: buildTimeline(parsed.permission, parsed.signal, result) },
+    { headers: { "cache-control": "no-store" } },
+  );
 }

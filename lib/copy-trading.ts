@@ -1,6 +1,7 @@
 /**
  * Copy trading policy and deterministic execution gate.
  *
+ *
  * Every USDC figure that crosses a boundary here is atomic at **7 decimals**
  * (`lib/usdc.ts`), not the 6 the EVM-era ERC-20 used. `maxRealizedLossAtomic` and
  * `realizedLossAtomic` are the two fields where that matters, because they are the
@@ -547,4 +548,58 @@ export function explainCopySkipReason(reason: CopySkipReason): string {
     default:
       return "Unknown skip reason.";
   }
+}
+
+/** One owner-visible step in a copy execution timeline. */
+export interface CopyExecutionTimelineEntry {
+  executionId: string;
+  createdAt: number;
+  status: CopyAuditRecord["status"];
+  sourcePositionId: string;
+  signalAgentId: string;
+  sourceAttributionId: string;
+  stakeUsdc: number;
+  /** Ledger sequence the pre-flight simulation ran against. */
+  simulationLedger: string;
+  /** Chain outcome reference; absent when no transaction was submitted. */
+  txHash?: string;
+  skipReason?: CopySkipReason;
+  summary: string;
+}
+
+/**
+ * Builds an owner-readable timeline of copy executions for one permission,
+ * newest first. Only references (ids, hashes, ledgers) and outcome text are
+ * emitted; no signing material or agent reasoning is included.
+ */
+export function explainCopyExecutionTimeline(
+  records: readonly CopyAuditRecord[],
+  permissionId: string,
+): CopyExecutionTimelineEntry[] {
+  return records
+    .filter((record) => record.permissionId === permissionId)
+    .slice()
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((record) => {
+      const stakeUsdc = atomicToDisplayUsdc(record.stakeAtomic);
+      const summary =
+        record.status === "executed"
+          ? `Copied ${stakeUsdc} USDC from ${record.sourceAttributionId}.`
+          : record.status === "skipped" && record.skipReason
+            ? explainCopySkipReason(record.skipReason)
+            : `Execution ${record.status}.`;
+      return {
+        executionId: record.executionId,
+        createdAt: record.createdAt,
+        status: record.status,
+        sourcePositionId: record.sourcePositionId,
+        signalAgentId: record.signalAgentId,
+        sourceAttributionId: record.sourceAttributionId,
+        stakeUsdc,
+        simulationLedger: record.simulationBlock.toString(),
+        txHash: record.txHash,
+        skipReason: record.skipReason,
+        summary,
+      };
+    });
 }
