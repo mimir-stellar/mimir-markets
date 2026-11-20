@@ -360,6 +360,28 @@ npm run workers
 | `TRADER_QUANT_PUBLIC` | _(derived)_ | Stellar public key (`G…`) for the Quant Thresholder persona. Derived from secret key by wallet tooling. |
 | `GROQ_API_KEY` | _(none)_ | Groq API key used for trader LLM inference (`agents/traders/index.ts` sets `LLM_PROVIDER = "groq"`). |
 
+## Market Creator
+
+The autonomous market-creator agent ([`agents/market-creator/`](../agents/market-creator)) continuously drafts verifiable questions from trusted sources (CoinGecko, ESPN, StockAnalysis, Open-Meteo, Launch Library) and publishes them on-chain.
+
+### Durable Creation Intents & Deduplication
+
+- **Deterministic Deduplication Identity**: Every market candidate is assigned a deterministic 32-byte hex identity computed from canonical normalized statement fields (`questionKey`, `resolutionUrlKey`, `deadlineKey`, `categoryKey`).
+- **Reviewed Statement Digest**: Before signing any transaction with the creator's local Stellar keypair, the agent persists a cryptographic content digest of the reviewed statement (`computeStatementDigest`).
+- **Durable Intent Store**: Intents are persisted across cycles using a local state directory (`MARKET_CREATOR_STATE_DIR`), defaulting to `.cache/market-creator`.
+- **Ambiguous Submission Reconciliation**: Near-duplicate or ambiguous candidate submissions (such as capitalization, diacritics, stop-word differences, currency notation variations, or matching on-chain active claims) are reconciled into the canonical intent rather than generating duplicate markets.
+
+### Environment variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `MARKET_CREATOR_STATE_DIR` | `.cache/market-creator` | Directory where durable market creation intents and statement digests are persisted across worker cycles. |
+| `MARKET_CREATOR_AUTONOMOUS` | `""` (disabled) | When set to `"1"`, enables autonomous on-chain market publication. Defaults to proposal-only shadow mode. |
+| `CREATOR_STAKE_USDC` | `2` | Initial USDC stake pledged by the creator per opened market. |
+| `MAX_CLAIMS_PER_RUN` | `5` | Maximum number of candidate markets created per execution cycle. |
+| `MAX_ACTIVE_CLAIMS` | `30` | Maximum unresolved joinable claims allowed before skipping new market creation. |
+| `MARKET_CREATE_DELAY_MS` | `600000` (10m) | Pacing cooldown between consecutive market creation transactions. |
+
 ## Demo seed claims
 
 Preview the fixed demo claim set without a signer, contract id, or network access:

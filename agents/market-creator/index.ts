@@ -52,7 +52,18 @@ import { INJECTION_GUARD, fenceUntrusted } from "../../lib/prompt-safety";
 import { fetchLaunchEvents, fetchWeatherEvents, type LaunchEvent, type WeatherEvent } from "./sources";
 import { fetchCryptoEvents, fetchSportsEvents, fetchStockEvents, type CryptoEvent, type SportEvent, type StockEvent } from "./sources";
 import { extractUsdThresholds, cryptoThresholdReason, formatUsd } from "./thresholds";
-import { filterDuplicateCandidates, buildCandidateSignature, normalizeComparableText, normalizeResolutionUrl, type ExistingClaimSignature } from "./dedupe";
+import {
+  filterDuplicateCandidates,
+  buildCandidateSignature,
+  buildDeduplicationIdentity,
+  computeStatementDigest,
+  DurableIntentStore,
+  normalizeComparableText,
+  normalizeResolutionUrl,
+  reconcileSubmission,
+  type ExistingClaimSignature,
+  type MarketCreationIntent,
+} from "./dedupe";
 import { draftClaimCandidates } from "./drafting";
 import {
   cancelClaim,
@@ -235,6 +246,9 @@ requireAnyLLMKey();
 const CREATOR        = getCreatorWallet();
 const CREATOR_ADDR   = CREATOR.address;
 const CREATOR_PAYER  = payingWalletFor(CREATOR);
+const INTENT_STORE   = new DurableIntentStore({
+  stateDir: process.env.MARKET_CREATOR_STATE_DIR,
+});
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 function formatUsd(value: number): string {
@@ -760,10 +774,19 @@ Return a JSON array of ${MAX_CLAIMS_PER_RUN} candidates. Output JSON only.`;
  * mode was first enabled because shadow mode never reached the call — is now a
  * compile error instead of a runtime rejection.
  */
-async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
+async function createClaim(
+  candidate: ClaimCandidate,
+  statementDigest?: string,
+): Promise<string | null> {
   // Floor the WHOLE expression: sports candidates get kickoff-pinned
   // fractional deadlineHours, and the contract takes whole seconds.
   const deadline = Math.floor(Date.now() / 1000 + candidate.deadlineHours * 3600);
+
+  const id = buildDeduplicationIdentity(candidate);
+  const digest = statementDigest ?? computeStatementDigest(candidate);
+
+  // Ensure reviewed statement digest is persisted before signing
+  INTENT_STORE.prepareForSigning(id, digest);
 
   const params: CreateClaimParams = {
     question:              candidate.question,
@@ -820,6 +843,7 @@ async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
     const result = rawResult as { claimId: number; txHash: string; explorerUrl?: string } | undefined;
     if (!result) return null;
     console.log(`[market-creator]   claim id #${result.claimId}`);
+    INTENT_STORE.markCreated(id, result.claimId, result.txHash);
     return result.explorerUrl ?? result.txHash;
   } catch (err) {
     if (err instanceof BackoffError) {
@@ -963,6 +987,7 @@ async function sweepAndCount(): Promise<{ cancelled: number; joinable: number; j
 async function recordProposal(
   candidate: ClaimCandidate,
   disposition: "create" | "shadow",
+  statementDigest?: string,
 ): Promise<string | null> {
   const deadline = Math.floor(Date.now() / 1000) + Math.round(candidate.deadlineHours * 3600);
   const mode = toCanonicalMode({
@@ -970,13 +995,8 @@ async function recordProposal(
     oddsMode: "pool",
     maxChallengers: DEFAULT_MAX_CHALLENGERS,
   });
-  // Deterministic id from the market's identity, so a retried run inserts nothing
-  // new — shadow precision must not be measured against duplicates.
-  const proposalId = sha256Hex(
-    [candidate.question, candidate.resolutionUrl, String(deadline), candidate.category].join(
-      UNIT_SEPARATOR,
-    ),
-  );
+  // Deterministic deduplication identity from canonical statement terms
+  const proposalId = buildDeduplicationIdentity(candidate);
 
   try {
     await insertMarketProposal({
@@ -998,7 +1018,7 @@ async function recordProposal(
         maxChallengers: DEFAULT_MAX_CHALLENGERS,
         challengerPayoutBps: 0,
       },
-      context_pack_hash: null,
+      context_pack_hash: statementDigest ?? computeStatementDigest(candidate),
       resolution_url: candidate.resolutionUrl,
       settlement_rule: candidate.settlementRule,
       deadline,
@@ -1203,9 +1223,23 @@ async function run(): Promise<void> {
       continue;
     }
 
+    // Reconcile ambiguous submissions before proceeding to create
+    const reconciliation = INTENT_STORE.reconcile(candidate, joinableClaims);
+    if (reconciliation.action === "reconcile" || reconciliation.action === "duplicate") {
+      console.log(
+        `[market-creator] Reconciled ambiguous submission (${reconciliation.matchedBy ?? "duplicate"}): ` +
+          `"${candidate.question.slice(0, 60)}..." -> intent ${reconciliation.intentId}`,
+      );
+      continue;
+    }
+
+    // Persist the reviewed statement digest before signing
+    const statementDigest = computeStatementDigest(candidate);
+    const intent = INTENT_STORE.persistReviewedDigest(candidate, statementDigest);
+
     // Record the decision in the canonical schema BEFORE acting on it (§10.4), so
     // a run that dies mid-create still leaves the proposal it was acting on.
-    const proposalId = await recordProposal(candidate, SHADOW_MODE ? "shadow" : "create");
+    const proposalId = await recordProposal(candidate, SHADOW_MODE ? "shadow" : "create", statementDigest);
 
     if (SHADOW_MODE) {
       // The roadmap's gate: proposal-only until shadow precision is measured
@@ -1218,7 +1252,7 @@ async function run(): Promise<void> {
     }
 
     console.log(`\n[market-creator] Creating: "${candidate.question.slice(0, 60)}..."`);
-    const link = await createClaim(candidate);
+    const link = await createClaim(candidate, statementDigest);
     if (link) {
       console.log(`[market-creator] ✓ Created — ${link}`);
       created++;

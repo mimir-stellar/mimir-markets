@@ -7,6 +7,13 @@
  */
 
 import { extractUsdThresholds, cryptoThresholdReason } from "./thresholds.js";
+import {
+  computeStatementDigest,
+  buildDeduplicationIdentity,
+  reconcileSubmission,
+  type MarketCreationIntent,
+  type ReconciliationResult,
+} from "./dedupe.js";
 
 export interface ClaimCandidate {
   question: string;
@@ -14,6 +21,12 @@ export interface ClaimCandidate {
   deadline: string;
   category?: string;
   threshold?: number;
+  statementDigest?: string;
+  deduplicationId?: string;
+  creatorPosition?: string;
+  counterPosition?: string;
+  settlementRule?: string;
+  qualityScore?: number;
   [key: string]: unknown;
 }
 
@@ -81,13 +94,20 @@ export function parseDraftedCandidates(raw: string): ClaimCandidate[] {
     const resolutionUrl = typeof rec.resolutionUrl === "string" ? rec.resolutionUrl.trim() : "";
     const deadline = typeof rec.deadline === "string" ? rec.deadline.trim() : "";
     if (!question || !resolutionUrl || !deadline) continue;
-    out.push({
+    const candidate: ClaimCandidate = {
       question,
       resolutionUrl,
       deadline,
       category: typeof rec.category === "string" ? rec.category : undefined,
       threshold: typeof rec.threshold === "number" ? rec.threshold : undefined,
-    });
+      creatorPosition: typeof rec.creatorPosition === "string" ? rec.creatorPosition : undefined,
+      counterPosition: typeof rec.counterPosition === "string" ? rec.counterPosition : undefined,
+      settlementRule: typeof rec.settlementRule === "string" ? rec.settlementRule : undefined,
+      qualityScore: typeof rec.qualityScore === "number" ? rec.qualityScore : undefined,
+    };
+    candidate.statementDigest = computeStatementDigest(candidate);
+    candidate.deduplicationId = buildDeduplicationIdentity(candidate);
+    out.push(candidate);
   }
   return out;
 }
@@ -103,6 +123,33 @@ export function filterUnsafeCryptoThresholds(
     if (candidate.threshold === undefined) return true;
     return cryptoThresholdReason(candidate.threshold) === null;
   });
+}
+
+/**
+ * Create a durable market creation intent from a drafted candidate.
+ */
+export function createMarketCreationIntent(
+  candidate: ClaimCandidate,
+  options?: { qualityScore?: number; status?: MarketCreationIntent["status"] },
+): MarketCreationIntent {
+  const statementDigest = computeStatementDigest(candidate);
+  const id = buildDeduplicationIdentity(candidate);
+  const now = Date.now();
+  return {
+    id,
+    statementDigest,
+    question: candidate.question,
+    resolutionUrl: candidate.resolutionUrl,
+    deadline: candidate.deadline,
+    category: candidate.category,
+    creatorPosition: candidate.creatorPosition,
+    counterPosition: candidate.counterPosition,
+    settlementRule: candidate.settlementRule,
+    qualityScore: options?.qualityScore ?? candidate.qualityScore,
+    status: options?.status ?? "draft",
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 /**
@@ -123,4 +170,12 @@ export async function draftClaimCandidates(
  * Exported for tests and for callers that want to inspect threshold
  * mentions in a drafted question without running the full filter.
  */
-export { extractUsdThresholds, cryptoThresholdReason };
+export {
+  extractUsdThresholds,
+  cryptoThresholdReason,
+  computeStatementDigest,
+  buildDeduplicationIdentity,
+  reconcileSubmission,
+  type MarketCreationIntent,
+  type ReconciliationResult,
+};
