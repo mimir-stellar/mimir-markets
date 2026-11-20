@@ -18,6 +18,43 @@ import { isValidBps } from "./money";
  * This means a captured basket-creation signature cannot be replayed to
  * insert duplicate baskets.
  */
+/**
+ * Deterministic composition revision (#892).
+ *
+ * A stable hash over the canonicalized member set (agentId ascending,
+ * tie-broken by weightBps). Two baskets with the same members in different
+ * input orders yield the same revision; any change to membership or weights
+ * yields a different revision. Uses DJB2 over the canonical string — small,
+ * dependency-free, and stable across hosts. Not a cryptographic hash: this
+ * is an equality check on an in-process value, not a security primitive.
+ */
+export function compositionRevision(
+  members: readonly { agentId: string; weightBps: number }[],
+): string {
+  const canonical = canonicalizeMembers(members);
+  let hash = 5381;
+  for (const member of canonical) {
+    const chunk = `${member.agentId}:${member.weightBps};`;
+    for (let i = 0; i < chunk.length; i++) {
+      hash = ((hash * 33) ^ chunk.charCodeAt(i)) >>> 0;
+    }
+  }
+  return `c${hash.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * True when a suggestion was built from a different composition than the
+ * one currently in force. Callers use this to reject a stale reviewed action
+ * before applying it, so new weights never silently override old consent.
+ */
+export function isSuggestionStale(
+  suggestion: { compositionRevision?: string },
+  currentMembers: readonly { agentId: string; weightBps: number }[],
+): boolean {
+  if (!suggestion.compositionRevision) return false;
+  return suggestion.compositionRevision !== compositionRevision(currentMembers);
+}
+
 export function basketMessage(args: {
   name: string; creator: string; members: Array<{ agentId: string; weightBps: number }>;
   nonce: string; expiresAt: number;
