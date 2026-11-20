@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import { AGENT_API_ACTIONS, AGENT_FUNDED_ACTIONS } from "../../lib/agents/api";
 import { apiErrorCatalogue } from "../../lib/api/errors";
+import { API_RECOVERY_ACTIONS } from "../../lib/api/schema";
 import {
   buildAgentApiJsonSchema,
   buildAgentOpenApiDocument,
@@ -147,6 +148,32 @@ test("every live error code has an example at its own status", () => {
     assert.equal(published.get(spec.code), String(spec.status), `${spec.code} status`);
   }
   assert.equal(published.size, apiErrorCatalogue().length);
+});
+
+test("agent error guidance is optional, bounded and matches every catalogue entry", () => {
+  const doc = clone(buildAgentOpenApiDocument()) as Record<string, unknown>;
+  const schemas = (doc.components as Example).schemas as Record<string, Example>;
+  const error = ((schemas.AgentError!.properties as Example).error as Example);
+  assert.ok(!(error.required as string[]).includes("recoveryAction"));
+  assert.deepEqual(((error.properties as Example).recoveryAction as Example).enum, [...API_RECOVERY_ACTIONS]);
+  for (const spec of apiErrorCatalogue()) {
+    const body = responseExamplesOf(doc, String(spec.status))[spec.code]!.value as Example;
+    assert.equal((body.error as Example).recoveryAction, spec.recoveryAction, spec.code);
+  }
+});
+
+test("missing, mismatched or unknown agent recovery advice fails without echoing the advice", () => {
+  for (const advice of [undefined, "refresh_request", "private-example-instruction"]) {
+    const audit = auditWith((doc) => {
+      const error = (responseExamplesOf(doc, "429").rate_limited!.value as Example).error as Example;
+      if (advice === undefined) delete error.recoveryAction;
+      else error.recoveryAction = advice;
+    });
+    assert.equal(audit.ok, false);
+    const findings = audit.findings.filter((item) => item.code === "ERROR_RECOVERY_ACTION_DRIFT");
+    assert.equal(findings.length, 1);
+    assert.ok(!JSON.stringify(findings).includes("private-example-instruction"));
+  }
 });
 
 test("nonce replay is published as 401, because that is what the server sends", () => {

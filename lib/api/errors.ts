@@ -16,6 +16,7 @@ import { TRACE_HEADER } from "../ops/trace-http";
 import { currentTraceId } from "../ops/trace";
 import { isTraceId } from "../ops/trace-id";
 import { createApiError, type ApiErrorShape } from "../server/api-validation";
+import type { ApiRecoveryAction } from "./schema";
 
 export type ApiErrorCode =
   // ── 400: the caller must change the request ──
@@ -48,13 +49,14 @@ interface ErrorSpec {
   retryable: boolean;
   /** Suggested wait before a retry, seconds. Only meaningful when retryable. */
   retryAfterSeconds?: number;
+  recoveryAction?: ApiRecoveryAction;
 }
 
 const SPECS: Record<ApiErrorCode, ErrorSpec> = {
   // A malformed or unauthorised request is not a transient condition. Marking
   // these retryable is how a fleet of agents turns one bug into a DoS.
   invalid_request: { status: 400, retryable: false },
-  invalid_signature: { status: 400, retryable: false },
+  invalid_signature: { status: 400, retryable: false, recoveryAction: "reconnect_wallet" },
   unsupported_version: { status: 400, retryable: false },
   // Oversized signed payloads are not transient — shrink the body and resend.
   payload_too_large: { status: 413, retryable: false },
@@ -65,28 +67,30 @@ const SPECS: Record<ApiErrorCode, ErrorSpec> = {
   unauthenticated: { status: 401, retryable: false },
   nonce_reused: { status: 401, retryable: false },
   // A fresh request WOULD work, so this one is retryable — with a new timestamp.
-  request_expired: { status: 401, retryable: true, retryAfterSeconds: 0 },
+  request_expired: { status: 401, retryable: true, retryAfterSeconds: 0, recoveryAction: "refresh_request" },
   forbidden: { status: 403, retryable: false },
   capability_missing: { status: 403, retryable: false },
   agent_revoked: { status: 403, retryable: false },
   // Paused is an operator action that can be undone, unlike revoked.
-  agent_paused: { status: 403, retryable: true, retryAfterSeconds: 300 },
+  agent_paused: { status: 403, retryable: true, retryAfterSeconds: 300, recoveryAction: "retry_later" },
 
   not_found: { status: 404, retryable: false },
   conflict: { status: 409, retryable: false },
 
-  rate_limited: { status: 429, retryable: true, retryAfterSeconds: 60 },
+  rate_limited: { status: 429, retryable: true, retryAfterSeconds: 60, recoveryAction: "retry_later" },
   // A budget refills on a window boundary, so it is retryable but not soon.
-  budget_exhausted: { status: 429, retryable: true, retryAfterSeconds: 3_600 },
+  budget_exhausted: { status: 429, retryable: true, retryAfterSeconds: 3_600, recoveryAction: "retry_later" },
 
-  upstream_unavailable: { status: 503, retryable: true, retryAfterSeconds: 30 },
-  internal_error: { status: 500, retryable: true, retryAfterSeconds: 5 },
+  upstream_unavailable: { status: 503, retryable: true, retryAfterSeconds: 30, recoveryAction: "retry_later" },
+  internal_error: { status: 500, retryable: true, retryAfterSeconds: 5, recoveryAction: "retry_later" },
 };
 
 export interface ApiError extends ApiErrorShape {
   error: ApiErrorShape["error"] & {
     retryable: boolean;
     retryAfterSeconds?: number;
+    /** Optional advice. Does not authorize retries, reconnect wallets, or sign. */
+    recoveryAction?: ApiRecoveryAction;
     /** Field that caused a validation failure, when there is one. */
     field?: string;
     /**
@@ -127,6 +131,7 @@ export function apiError(
       ...base.error,
       retryable: spec.retryable,
       ...(retryAfter !== undefined ? { retryAfterSeconds: retryAfter } : {}),
+      ...(spec.recoveryAction !== undefined ? { recoveryAction: spec.recoveryAction } : {}),
       ...(opts.field ? { field: opts.field } : {}),
       ...(opts.requestId ? { requestId: opts.requestId } : {}),
     },
@@ -174,6 +179,7 @@ export interface ApiErrorSpec {
   status: number;
   retryable: boolean;
   retryAfterSeconds?: number;
+  recoveryAction?: ApiRecoveryAction;
 }
 
 /**
@@ -194,6 +200,7 @@ export function apiErrorCatalogue(): ApiErrorSpec[] {
       status: spec.status,
       retryable: spec.retryable,
       ...(spec.retryAfterSeconds !== undefined ? { retryAfterSeconds: spec.retryAfterSeconds } : {}),
+      ...(spec.recoveryAction !== undefined ? { recoveryAction: spec.recoveryAction } : {}),
     };
   });
 }

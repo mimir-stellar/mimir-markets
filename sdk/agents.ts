@@ -30,6 +30,7 @@
  * straight through.
  */
 import { agentRequestMessage, type AgentApiAction, type SignedAgentRequest } from "../lib/agents/api";
+import { isApiRecoveryAction, type ApiRecoveryAction } from "../lib/api/schema";
 
 export interface MimirAgentSdkOptions {
   baseUrl: string;
@@ -51,6 +52,7 @@ export interface MimirAgentErrorOptions {
   message?: string;
   retryable: boolean;
   retryAfterSeconds?: number;
+  recoveryAction?: ApiRecoveryAction;
   field?: string;
   traceId?: string;
 }
@@ -60,6 +62,7 @@ export class MimirAgentError extends Error {
   readonly code: string;
   readonly retryable: boolean;
   readonly retryAfterSeconds?: number;
+  readonly recoveryAction?: ApiRecoveryAction;
   readonly field?: string;
   readonly traceId?: string;
 
@@ -73,6 +76,7 @@ export class MimirAgentError extends Error {
           code: options?.code ?? "internal_error",
           retryable: options?.retryable ?? false,
           retryAfterSeconds: options?.retryAfterSeconds,
+          recoveryAction: options?.recoveryAction,
           field: options?.field,
           traceId: options?.traceId,
           message: messageOrOptions,
@@ -85,6 +89,7 @@ export class MimirAgentError extends Error {
     this.code = opts.code;
     this.retryable = opts.retryable;
     this.retryAfterSeconds = opts.retryAfterSeconds;
+    this.recoveryAction = isApiRecoveryAction(opts.recoveryAction) ? opts.recoveryAction : undefined;
     this.field = opts.field;
     this.traceId = opts.traceId;
     Object.setPrototypeOf(this, new.target.prototype);
@@ -201,6 +206,8 @@ export class MimirAgentClient {
           ? errorObj.retryAfterSeconds
           : undefined;
         const retryAfterSeconds = headerRetryAfter ?? payloadRetryAfter;
+        const recoveryAction = isApiRecoveryAction(errorObj?.recoveryAction)
+          ? errorObj.recoveryAction : undefined;
 
         const retryable = typeof errorObj?.retryable === "boolean"
           ? errorObj.retryable
@@ -220,6 +227,7 @@ export class MimirAgentClient {
           code,
           retryable,
           retryAfterSeconds,
+          recoveryAction,
           field,
           traceId,
           message,

@@ -484,6 +484,8 @@ Two paths in. The browser flow at /agents/new walks one wallet through both requ
 
 Two paths in. The browser flow at `/agents/new` walks one wallet through both required signatures and hands back an API key. The programmatic path below is the same protocol: one signed envelope format for everything, posted to `/api/agents/v1/{action}`. The wire contract is published as OpenAPI in [`docs/openapi-agent-v1.yaml`](docs/openapi-agent-v1.yaml), with the request schema in [`schemas/agent-api-v1.schema.json`](schemas/agent-api-v1.schema.json). Both files are generated from the modules that enforce them, so they cannot drift: `npm run check:openapi` fails if they do, and `npm run check:openapi -- --write` regenerates them. See [`docs/AGENT_API_OPENAPI.md`](docs/AGENT_API_OPENAPI.md).
 
+API errors can include optional bounded [recovery actions](docs/API_RECOVERY_ACTIONS.md) for refreshing a request, reconnecting a wallet or retrying later. Existing error codes and retryability remain unchanged.
+
 jsonc
 
 {

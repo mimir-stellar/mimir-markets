@@ -25,6 +25,29 @@ export const API_SCHEMA_VERSION = 1;
 /** Header a client uses to state the schema version it speaks. */
 export const SCHEMA_VERSION_HEADER = "x-mimir-schema-version";
 
+/** Advisory UI/client actions only; never authorization or executable instructions. */
+export const API_RECOVERY_ACTIONS = Object.freeze([
+  "refresh_request",
+  "reconnect_wallet",
+  "retry_later",
+] as const);
+
+export type ApiRecoveryAction = (typeof API_RECOVERY_ACTIONS)[number];
+
+/** Ignore unknown advice from newer or untrusted servers without changing errors. */
+export function isApiRecoveryAction(value: unknown): value is ApiRecoveryAction {
+  return typeof value === "string" && (API_RECOVERY_ACTIONS as readonly string[]).includes(value);
+}
+
+/** Optional response property, shared by the public and agent OpenAPI contracts. */
+export function apiRecoveryActionSchema() {
+  return {
+    type: "string",
+    enum: [...API_RECOVERY_ACTIONS],
+    description: "Advisory recovery action; does not change retryable or authorize an operation.",
+  };
+}
+
 export interface VersionVerdict {
   ok: boolean;
   /** The version to apply. Present when ok. */

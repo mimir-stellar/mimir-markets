@@ -67,6 +67,7 @@ import {
   type AuthorityLevel,
 } from "@/lib/agents/registry";
 import { apiError, apiErrorCatalogue, type ApiErrorCode, type ApiErrorSpec } from "@/lib/api/errors";
+import { apiRecoveryActionSchema } from "@/lib/api/schema";
 import { PAUSABLE, pauseEnvKey, type Pausable } from "@/lib/ops/flags";
 import { isContractAddress } from "@/lib/stellar";
 import { isStellarAccount } from "@/lib/stellar-message";
@@ -176,6 +177,7 @@ export type OpenApiFindingCode =
   | "ERROR_CODE_UNKNOWN"
   | "ERROR_STATUS_DRIFT"
   | "ERROR_RETRYABLE_DRIFT"
+  | "ERROR_RECOVERY_ACTION_DRIFT"
   // examples
   | "EXAMPLE_ENVELOPE_REJECTED"
   | "EXAMPLE_SCHEMA_REJECTED"
@@ -948,6 +950,7 @@ export function buildAgentOpenApiDocument(): YamlValue {
                 },
                 message: { type: "string", description: "Human-readable detail. Not a stable interface." },
                 retryable: { type: "boolean", description: "False when repeating the identical request can never succeed." },
+                recoveryAction: apiRecoveryActionSchema(),
                 retryAfterSeconds: { type: "number", description: "Present only when waiting can help." },
                 field: { type: "string", description: "Field that caused a validation failure, when there is one." },
                 capability: { type: "string", enum: [...PAUSABLE], description: "agent_paused only: the switch that stopped this action." },
@@ -1483,6 +1486,9 @@ export function auditAgentApiDocument(input: {
       }
       if (error.retryable !== spec.retryable) {
         findings.push(finding("ERROR_RETRYABLE_DRIFT", "error", `$.paths./api/agents/v1/{action}.post.responses.${statusKey}.${name}`, `code "${code}" is published with retryable=${String(error.retryable)} but the server sends ${String(spec.retryable)}`));
+      }
+      if (error.recoveryAction !== spec.recoveryAction) {
+        findings.push(finding("ERROR_RECOVERY_ACTION_DRIFT", "error", `$.paths./api/agents/v1/{action}.post.responses.${statusKey}.${name}`, "Published recovery action disagrees with the error catalogue"));
       }
     }
   }

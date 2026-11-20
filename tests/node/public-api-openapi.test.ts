@@ -24,6 +24,7 @@ import {
   validateAgainstSchema,
 } from "../../lib/ops/json-schema-subset";
 import { SYNTHETIC_WALLETS } from "../../lib/ops/agent-api-openapi";
+import { API_RECOVERY_ACTIONS } from "../../lib/api/schema";
 import {
   PUBLIC_ENDPOINT_METADATA,
   PUBLIC_OPENAPI_RELATIVE,
@@ -81,6 +82,31 @@ function responseExamplesOf(
 }
 
 // ── 1. OpenAPI 3.1 validation & committed artifact drift check ───────────────
+
+test("public error recovery guidance is optional with the shared closed vocabulary", () => {
+  const schemas = buildPublicApiSchemas();
+  const error = ((schemas.ApiError!.properties as Record<string, unknown>).error as Record<string, unknown>);
+  assert.ok(!(error.required as string[]).includes("recoveryAction"));
+  const properties = error.properties as Record<string, Record<string, unknown>>;
+  assert.deepEqual(properties.recoveryAction!.enum, [...API_RECOVERY_ACTIONS]);
+  const doc = buildPublicOpenApiDocument() as Record<string, unknown>;
+  const example = responseExamplesOf(doc, "/api/vs", "429").rateLimited!.value as Record<string, Record<string, unknown>>;
+  assert.equal(example.error!.recoveryAction, "retry_later");
+});
+
+test("missing, mismatched or unknown public recovery advice fails the catalogue audit", () => {
+  for (const advice of [undefined, "refresh_request", "private-example-instruction"]) {
+    const audit = auditWith((doc) => {
+      const example = responseExamplesOf(doc, "/api/vs", "429").rateLimited!.value as Record<string, Record<string, unknown>>;
+      if (advice === undefined) delete example.error!.recoveryAction;
+      else example.error!.recoveryAction = advice;
+    });
+    assert.equal(audit.ok, false);
+    const findings = audit.findings.filter((item) => item.code === "ERROR_RECOVERY_ACTION_DRIFT");
+    assert.equal(findings.length, 1);
+    assert.ok(!JSON.stringify(findings).includes("private-example-instruction"));
+  }
+});
 
 test("the generated public OpenAPI document validates as OpenAPI 3.1 and audits clean", () => {
   const doc = buildPublicOpenApiDocument() as Record<string, unknown>;

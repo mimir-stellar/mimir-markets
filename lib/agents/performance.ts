@@ -48,7 +48,7 @@ export interface AgentPerformance {
   losses: number;
   refunds: number;
   open: number;
-  realisedPnlAomic: bigint;
+  realisedPnlAtomic: bigint;
   openExposureAtomic: bigint;
   /** Everything the agent has ever staked, settled or not. */
   volumeAtomic: bigint;
@@ -76,7 +76,7 @@ export interface AgentPerformance {
 export function usdcDisplayToAtomic(value: number): bigint {
   if (!Number.isFinite(value)) return 0n;
   const negative = value < 0;
-  const [wholee, fraction = ""] = Math.abs(value).toFixed(USDC_DECIMALS).split(".");
+  const [whole, fraction = ""] = Math.abs(value).toFixed(USDC_DECIMALS).split(".");
   const atomic =
     BigInt(whole) * USDC_UNIT
     + BigInt(fraction.padEnd(USDC_DECIMALS, "0").slice(0, USDC_DECIMALS));

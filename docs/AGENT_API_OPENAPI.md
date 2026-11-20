@@ -28,7 +28,7 @@ working would fail the suite.
 |---|---|
 | Action list, envelope fields, signing message, funded actions | `lib/agents/api.ts` |
 | Which credential each action takes | `lib/agents/authenticate.ts` (`requiresOwnerSignature`) |
-| Error code, HTTP status, retryable, `Retry-After` | `lib/api/errors.ts` (`apiErrorCatalogue`) |
+| Error code, HTTP status, retryable, `Retry-After`, recovery action | `lib/api/errors.ts` (`apiErrorCatalogue`) |
 | Capability and minimum authority level | `lib/agents/registry.ts` (`authorizeAction`, probed per level) |
 | Feature flag behind a funded action | `lib/ops/flags.ts` / `AGENT_FUNDED_FEATURE` |
 | Incident switch and the env var that re-enables it | `lib/ops/flags.ts` (`AGENT_ACTION_PAUSE`, `pauseEnvKey`) |
@@ -37,6 +37,12 @@ working would fail the suite.
 Nothing in the document is typed by hand. Even the error examples are produced by
 calling `apiError()` with the live catalogue, so a status that changes in
 `lib/api/errors.ts` shows up in the document on the next write.
+
+The optional `recoveryAction` uses the shared closed vocabulary from
+`lib/api/schema.ts`. See [API error recovery actions](API_RECOVERY_ACTIONS.md)
+for the mapping, compatibility rules and rendered examples. Both public and
+agent document audits report `ERROR_RECOVERY_ACTION_DRIFT` if an example's
+guidance disagrees with the catalogue, without echoing the supplied value.
 
 The minimum authority level is the one fact that cannot simply be read: the
 registry decides it with a private table. Rather than copy the table, the

@@ -46,10 +46,11 @@ import {
   statusFor,
   type ApiErrorCode,
 } from "@/lib/api/errors";
+import { apiRecoveryActionSchema } from "@/lib/api/schema";
 import { TIER_POLICIES } from "@/lib/api/policy";
 import { DEFAULT_RULES } from "@/lib/api/rate-limit";
 import { DEFAULT_BASKET_POLICY } from "@/lib/baskets";
-import { getSeedChallengeOpportunities } from "@/lib/challengeOpportunitySeeds";
+import { getChallengeOpportunitySeeds } from "@/lib/challengeOpportunitySeeds";
 import {
   CLAIM_DRAFT_CATEGORY_IDS,
   CLAIM_DRAFT_SOURCE_TYPES,
@@ -236,6 +237,7 @@ export type PublicOpenApiFindingCode =
   | "DOC_PARAMETER_DRIFT"
   | "ERROR_STATUS_DRIFT"
   | "ERROR_RETRYABLE_DRIFT"
+  | "ERROR_RECOVERY_ACTION_DRIFT"
   | "EXAMPLE_MISSING"
   | "EXAMPLE_SCHEMA_REJECTED"
   | "EXAMPLE_VALIDATION_DRIFT"
@@ -453,6 +455,7 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
             type: "boolean",
             description: "Whether repeating the request after waiting or fixing freshness can succeed.",
           },
+          recoveryAction: apiRecoveryActionSchema(),
           retryAfterSeconds: {
             type: "number",
             minimum: 0,
@@ -737,6 +740,10 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
         additionalProperties: { type: ["integer", "null"], minimum: 0 },
       },
       workerTraceIds: {
+        type: "object",
+        additionalProperties: { type: ["string", "null"] },
+      },
+      workerDetails: {
         type: "object",
         additionalProperties: { type: ["string", "null"] },
       },
@@ -1050,7 +1057,7 @@ export function buildPublicEndpointExamples(): PublicEndpointExample[] {
   };
 
   // 5. /api/challenge-opportunities
-  const seed = getSeedChallengeOpportunities("en")[0]!;
+  const seed = getChallengeOpportunitySeeds("en")[0]!;
   const seedQuality = computeClaimQuality(
     {
       question: seed.candidate.claimText,
@@ -2093,6 +2100,9 @@ export function auditPublicApiDocument(input: {
                   `error code "${codeToCheck}" has retryable=${String(errObj?.retryable)}, expected ${String(spec.retryable)}`,
                 ),
               );
+            }
+            if (errObj && errObj.recoveryAction !== spec.recoveryAction) {
+              findings.push(finding("ERROR_RECOVERY_ACTION_DRIFT", "error", `$.paths.${pathKey}.get.responses.${statusKey}.examples.${expectedEx.name}`, "Published recovery action disagrees with the error catalogue"));
             }
           }
         }

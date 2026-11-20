@@ -430,6 +430,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -502,6 +509,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -527,6 +541,7 @@ paths:
                       message: "ip limit exceeded; retry in 60s"
                       retryable: true
                       retryAfterSeconds: 60
+                      recoveryAction: retry_later
         "500":
           description: Internal server error.
           x-mimir-error-codes:
@@ -576,6 +591,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -601,6 +623,7 @@ paths:
                       message: Unable to load VS feed
                       retryable: true
                       retryAfterSeconds: 5
+                      recoveryAction: retry_later
   "/api/vs/{id}":
     get:
       operationId: getVsById
@@ -1045,6 +1068,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -1117,6 +1147,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -1188,6 +1225,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -1213,6 +1257,7 @@ paths:
                       message: "ip limit exceeded; retry in 60s"
                       retryable: true
                       retryAfterSeconds: 60
+                      recoveryAction: retry_later
         "500":
           description: Internal server error.
           x-mimir-error-codes:
@@ -1262,6 +1307,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -1287,6 +1339,7 @@ paths:
                       message: Unable to load VS
                       retryable: true
                       retryAfterSeconds: 5
+                      recoveryAction: retry_later
   "/api/vs/{id}/reasoning":
     get:
       operationId: getVsReasoningTimeline
@@ -2068,6 +2121,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -2140,6 +2200,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -2165,6 +2232,7 @@ paths:
                       message: Unable to load user VS
                       retryable: true
                       retryAfterSeconds: 5
+                      recoveryAction: retry_later
   "/api/challenge-opportunities":
     get:
       operationId: listChallengeOpportunities
@@ -2390,6 +2458,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -2462,6 +2537,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -2533,6 +2615,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -2558,6 +2647,7 @@ paths:
                       message: Unable to load challenge opportunities
                       retryable: true
                       retryAfterSeconds: 5
+                      recoveryAction: retry_later
         "503":
           description: Upstream dependency or database is temporarily unavailable.
           x-mimir-error-codes:
@@ -2607,6 +2697,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -2632,6 +2729,7 @@ paths:
                       message: Draft generator is not configured
                       retryable: true
                       retryAfterSeconds: 30
+                      recoveryAction: retry_later
   "/api/performance/{address}":
     get:
       operationId: getPortfolioPerformance
@@ -2787,6 +2885,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -2861,6 +2966,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -2887,6 +2999,7 @@ paths:
                       message: Unable to load portfolio performance
                       retryable: true
                       retryAfterSeconds: 30
+                      recoveryAction: retry_later
   "/api/baskets":
     get:
       operationId: listBaskets
@@ -3010,6 +3123,13 @@ paths:
                       retryable:
                         type: boolean
                         description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      recoveryAction:
+                        type: string
+                        enum:
+                          - refresh_request
+                          - reconnect_wallet
+                          - retry_later
+                        description: "Advisory recovery action; does not change retryable or authorize an operation."
                       retryAfterSeconds:
                         type: number
                         minimum: 0
@@ -3035,6 +3155,7 @@ paths:
                       message: "ip limit exceeded; retry in 60s"
                       retryable: true
                       retryAfterSeconds: 60
+                      recoveryAction: retry_later
   "/api/health":
     get:
       operationId: getHealthProbe
@@ -3151,6 +3272,12 @@ paths:
                           type:
                             - string
                             - "null"
+                      workerDetails:
+                        type: object
+                        additionalProperties:
+                          type:
+                            - string
+                            - "null"
                       agentBalancesUsdc:
                         type: object
                         additionalProperties:
@@ -3191,6 +3318,12 @@ paths:
                       agentBalancesUsdc:
                         oracle: 125.5
                         market_creator: 84
+                      workerDetails:
+                        oracle: null
+                        market_creator: null
+                        council: null
+                        sync: null
+                        traders: null
                     operationalStatusUrl: "/api/health/status"
         "503":
           description: "One or more critical health alarms are active (or `DATABASE_URL` is unconfigured)."
@@ -3301,6 +3434,12 @@ paths:
                           type:
                             - string
                             - "null"
+                      workerDetails:
+                        type: object
+                        additionalProperties:
+                          type:
+                            - string
+                            - "null"
                       agentBalancesUsdc:
                         type: object
                         additionalProperties:
@@ -3367,6 +3506,13 @@ components:
             retryable:
               type: boolean
               description: Whether repeating the request after waiting or fixing freshness can succeed.
+            recoveryAction:
+              type: string
+              enum:
+                - refresh_request
+                - reconnect_wallet
+                - retry_later
+              description: "Advisory recovery action; does not change retryable or authorize an operation."
             retryAfterSeconds:
               type: number
               minimum: 0
@@ -5269,6 +5415,12 @@ components:
             type:
               - string
               - "null"
+        workerDetails:
+          type: object
+          additionalProperties:
+            type:
+              - string
+              - "null"
         agentBalancesUsdc:
           type: object
           additionalProperties:
@@ -5375,6 +5527,12 @@ components:
                   - "null"
                 minimum: 0
             workerTraceIds:
+              type: object
+              additionalProperties:
+                type:
+                  - string
+                  - "null"
+            workerDetails:
               type: object
               additionalProperties:
                 type:
