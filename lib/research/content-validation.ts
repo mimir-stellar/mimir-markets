@@ -70,6 +70,16 @@
 import { sha256Hex } from "@/lib/content-hash";
 import type { FetchSuccess } from "./gateway";
 
+// ── Validation revision ──────────────────────────────────────────────────────
+
+/**
+ * Revision of the validation rules in this module. Bump it whenever a check is
+ * added, removed or tightened, so a result can say which rules it was judged by.
+ * The gateway stamps it on every capture; a cache hit keeps the revision of its
+ * original capture rather than claiming it was re-checked under the current one.
+ */
+export const CONTENT_VALIDATION_REVISION = 1;
+
 // ── Validity states ───────────────────────────────────────────────────────────
 
 /**
@@ -133,6 +143,8 @@ export interface ContentValidationResult {
    * state, and on `valid` if any non-advisory privacy finding was detected.
    */
   usable: boolean;
+  /** The `CONTENT_VALIDATION_REVISION` this result was produced under. */
+  validationRevision: number;
 }
 
 // ── Validation options ────────────────────────────────────────────────────────
@@ -281,7 +293,7 @@ export function validateResearchContent(
 ): ContentValidationResult {
   // Emergency escape hatch: skip all validation if explicitly disabled.
   if (process.env.RESEARCH_CONTENT_VALIDATION_DISABLED === "1") {
-    return { state: "valid", reason: "", privacyFindings: [], usable: true };
+    return result("valid", "", [], true);
   }
 
   const strict =
@@ -416,7 +428,7 @@ function result(
   privacyFindings: PrivacyFinding[],
   usable: boolean,
 ): ContentValidationResult {
-  return { state, reason, privacyFindings, usable };
+  return { state, reason, privacyFindings, usable, validationRevision: CONTENT_VALIDATION_REVISION };
 }
 
 /**

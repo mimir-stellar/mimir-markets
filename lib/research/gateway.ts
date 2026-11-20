@@ -33,6 +33,7 @@ import {
   type DomainPolicy,
   type SsrfReason,
 } from "./ssrf";
+import { CONTENT_VALIDATION_REVISION } from "./content-validation";
 import { recordAllowlistReject, recordSourceFailure } from "./telemetry";
 
 export const MAX_REDIRECTS = 3;
@@ -75,8 +76,19 @@ export interface FetchSuccess {
   body: string;
   /** SHA-256 of the body, bare hex, so a reader can verify the capture later. */
   contentHash: string;
+  /**
+   * When the source was actually fetched. A cache hit keeps the original
+   * capture time; it is never replaced with the time the cache was read.
+   */
   capturedAt: number;
+  /** When this result was handed to the caller. Equals `capturedAt` on a fresh fetch. */
+  servedAt: number;
+  /** `fetched` for a new network fetch, `cache` for a replay of an earlier capture. */
+  acquisition: "fetched" | "cache";
+  /** Content-validation revision in force when the source was captured. */
+  validationRevision: number;
   bytes: number;
+  /** Same as `acquisition === "cache"`; kept for existing callers. */
   fromCache: boolean;
   redirects: number;
   /** Complete chain of URLs visited during this fetch. */
@@ -341,7 +353,18 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
   }
 
   const cached = cacheGet(args.url, now);
-  if (cached) return { ok: true, ...cached, fromCache: true };
+  if (cached) {
+    // Replay, not a new acquisition: keep the original capturedAt and revision,
+    // and report the replay time separately as servedAt.
+    return {
+      ok: true,
+      ...cached,
+      redirectChain: [...cached.redirectChain],
+      servedAt: now,
+      acquisition: "cache",
+      fromCache: true,
+    };
+  }
 
   // Budget is checked BEFORE the request, and charged whether or not the response
   // is useful — a refused-after-connect request still cost the source a hit.
@@ -492,12 +515,15 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       body: text,
       contentHash: sha256Hex(text),
       capturedAt: now,
+      servedAt: now,
+      acquisition: "fetched",
+      validationRevision: CONTENT_VALIDATION_REVISION,
       bytes,
       fromCache: false,
       redirects,
       redirectChain,
     };
-    cacheSet(args.url, success, now);
+    cacheSet(args.url, { ...success, redirectChain: [...redirectChain] }, now);
     return { ok: true, ...success };
   }
 }

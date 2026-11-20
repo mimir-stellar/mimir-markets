@@ -59,6 +59,7 @@ import {
   scanPrivacyFindings,
   summariseValidation,
   validateResearchContent,
+  CONTENT_VALIDATION_REVISION,
   type ContentValidationResult,
   type PrivacyFindingKind,
 } from "../../lib/research/content-validation";
@@ -105,6 +106,9 @@ function makeSuccess(
     body,
     contentHash,
     capturedAt: overrides.capturedAt ?? Date.now(),
+    servedAt: overrides.capturedAt ?? Date.now(),
+    acquisition: (overrides.fromCache ? "cache" : "fetched") as "cache" | "fetched",
+    validationRevision: 1,
     bytes: Buffer.byteLength(body),
     fromCache: overrides.fromCache ?? false,
     redirects: overrides.redirects ?? 0,
@@ -466,7 +470,7 @@ test("privacy finding details never include the matched value", () => {
 // ── summariseValidation ────────────────────────────────────────────────────────
 
 test("summariseValidation on a clean valid result returns 'valid'", () => {
-  const r: ContentValidationResult = { state: "valid", reason: "", privacyFindings: [], usable: true };
+  const r: ContentValidationResult = { state: "valid", reason: "", privacyFindings: [], usable: true, validationRevision: 1 };
   assert.equal(summariseValidation(r), "valid");
 });
 
@@ -482,6 +486,7 @@ test("summariseValidation on a valid result with advisory findings mentions them
       },
     ],
     usable: true,
+    validationRevision: 1,
   };
   const s = summariseValidation(r);
   assert.match(s, /advisory/i);
@@ -494,6 +499,7 @@ test("summariseValidation on a non-usable result includes state and reason", () 
     reason: "content is 500s old; limit is 300s",
     privacyFindings: [],
     usable: false,
+    validationRevision: 1,
   };
   const s = summariseValidation(r);
   assert.match(s, /stale/);
@@ -659,4 +665,27 @@ test("unknown and discovered adapters fail closed (regression)", async () => {
   assert.equal(result.ok, false);
   assert.match("detail" in result ? result.detail : "", /admission/);
   assert.equal(researchAdapter(" OFFICIAL-WEB-V1 ")?.capability, "official_web");
+});
+
+// ── Validation revision (#864) ────────────────────────────────────────────────
+
+test("every validation result carries the validation revision, on success and failure", () => {
+  assert.equal(CONTENT_VALIDATION_REVISION, 1);
+  const ok = validateResearchContent(makeSuccess("<p>BTC closed at 64,000</p>"));
+  assert.equal(ok.usable, true);
+  assert.equal(ok.validationRevision, CONTENT_VALIDATION_REVISION);
+
+  const bad = validateResearchContent(makeSuccess("   "));
+  assert.equal(bad.state, "invalid");
+  assert.equal(bad.validationRevision, CONTENT_VALIDATION_REVISION);
+});
+
+test("a cached capture is judged stale by its original capture time, not the replay time", () => {
+  const capturedTwoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+  const r = validateResearchContent(
+    makeSuccess("<p>BTC closed at 64,000</p>", { capturedAt: capturedTwoHoursAgo, fromCache: true }),
+    { maxAgeSeconds: 3_600 },
+  );
+  assert.equal(r.state, "stale");
+  assert.equal(r.validationRevision, 1);
 });

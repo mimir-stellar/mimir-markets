@@ -6,6 +6,10 @@ why, the commit history records the what.
 
 ## [Unreleased]
 
+### Added
+
+- **Research gateway results say whether they came from cache** ([#864](https://github.com/mimir-stellar/mimir-markets/issues/864)). `FetchSuccess` now has `acquisition` (`"fetched"` or `"cache"`), `servedAt` and `validationRevision`. A cache hit keeps the original `capturedAt` and revision, and the replay time goes in `servedAt`, so a replay is never shown as a new acquisition. `ContentValidationResult` also carries `validationRevision` (`CONTENT_VALIDATION_REVISION`). `fromCache` is unchanged for existing callers.
+
 ### Fixed
 
 - **The Oracle Reasoning Trace disclosure now announces its state** ([#522](https://github.com/mimir-stellar/mimir-markets/issues/522)). The `EvidenceInspector` toggle button carried no `aria-expanded` and no `aria-controls`, the expanded panel had no id and no label, and the chevron icons were read out as content — so screen-reader users could not tell whether the panel was open, nor which region the button controlled. The button now exposes `aria-expanded` / `aria-controls` (paired through `useId`), the panel is a labelled `region`, the chevrons are `aria-hidden`, and the toggle keeps a visible focus ring.

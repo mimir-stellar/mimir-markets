@@ -10,6 +10,7 @@ import {
   resetResearchCache,
   validateHop,
 } from "../../lib/research/gateway";
+import { CONTENT_VALIDATION_REVISION } from "../../lib/research/content-validation";
 
 const PUBLIC_POLICY = { allow: [], deny: [] };
 const publicDns = async () => ["93.184.216.34"];
@@ -660,4 +661,93 @@ test("resetBudgets clears every agent's window", async () => {
   assert.equal((await gatewayFetch(make("two", 3))).ok, true);
   const remaining = budgetRemaining("one", budget, now);
   assert.equal(remaining.requests, 0);
+});
+
+// ── Cache provenance (#864) ───────────────────────────────────────────────────
+
+test("a fresh fetch reports itself as fetched, with capture time and validation revision", async () => {
+  fresh();
+  const t0 = 7_000_000;
+  const result = await gatewayFetch({
+    url: "https://example.com/provenance-fresh",
+    agentId: "provenance",
+    policy: PUBLIC_POLICY,
+    now: t0,
+    resolve: publicDns,
+    fetchImpl: async () => htmlResponse("fresh body"),
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.acquisition, "fetched");
+  assert.equal(result.fromCache, false);
+  assert.equal(result.capturedAt, t0);
+  assert.equal(result.servedAt, t0);
+  assert.equal(result.validationRevision, CONTENT_VALIDATION_REVISION);
+});
+
+test("a cache hit keeps the original capture time instead of the replay time", async () => {
+  fresh();
+  const t0 = 8_000_000;
+  const args = {
+    url: "https://example.com/provenance-cached",
+    agentId: "provenance",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: async () => htmlResponse("cached body"),
+  };
+  const first = await gatewayFetch({ ...args, now: t0 });
+  const replay = await gatewayFetch({ ...args, now: t0 + 30_000 });
+  assert.equal(first.ok && replay.ok, true);
+  if (!first.ok || !replay.ok) return;
+  assert.equal(replay.acquisition, "cache");
+  assert.equal(replay.fromCache, true);
+  assert.equal(replay.capturedAt, t0, "replay time must not be presented as acquisition time");
+  assert.equal(replay.servedAt, t0 + 30_000);
+  assert.equal(replay.validationRevision, first.validationRevision);
+  assert.equal(replay.contentHash, first.contentHash);
+});
+
+test("serving a cache hit does not rewrite the cached entry", async () => {
+  fresh();
+  const t0 = 9_000_000;
+  const args = {
+    url: "https://example.com/provenance-repeat",
+    agentId: "provenance",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: async () => htmlResponse("body"),
+  };
+  await gatewayFetch({ ...args, now: t0 });
+  const hit1 = await gatewayFetch({ ...args, now: t0 + 1_000 });
+  if (hit1.ok) hit1.redirectChain.push("https://tampered.example/");
+  const hit2 = await gatewayFetch({ ...args, now: t0 + 2_000 });
+  assert.equal(hit2.ok, true);
+  if (!hit2.ok) return;
+  assert.equal(hit2.capturedAt, t0);
+  assert.equal(hit2.servedAt, t0 + 2_000);
+  assert.deepEqual(hit2.redirectChain, ["https://example.com/provenance-repeat"]);
+});
+
+test("once the cache entry expires the next request is a new fetch with a new capture time", async () => {
+  fresh();
+  const t0 = 10_000_000;
+  let calls = 0;
+  const args = {
+    url: "https://example.com/provenance-expired",
+    agentId: "provenance",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: async () => {
+      calls += 1;
+      return htmlResponse(`body ${calls}`);
+    },
+  };
+  await gatewayFetch({ ...args, now: t0 });
+  const later = t0 + 24 * 60 * 60 * 1000;
+  const refetch = await gatewayFetch({ ...args, now: later });
+  assert.equal(calls, 2);
+  assert.equal(refetch.ok, true);
+  if (!refetch.ok) return;
+  assert.equal(refetch.acquisition, "fetched");
+  assert.equal(refetch.capturedAt, later);
 });
