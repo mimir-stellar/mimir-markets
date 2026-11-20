@@ -179,9 +179,9 @@ test("runner publishes a successful coverage report and creates a compile cache"
   const cacheRoot = path.join(root, "cache");
   const coverageDir = path.join(root, "coverage");
   try {
-    let invocation: { args: string[]; options: { env: Record<string, string> } } | undefined;
-    const spawn: SpawnLike = (_command: string, args: string[], options) => {
-      invocation = { args, options };
+    let invocation: { command: string; args: string[]; options: { env: Record<string, string> } } | undefined;
+    const spawn: SpawnLike = (command: string, args: string[], options) => {
+      invocation = { command, args, options };
       const destination = args.find((arg) => arg.startsWith("--test-reporter-destination=") && arg !== "--test-reporter-destination=stdout");
       assert.ok(destination);
       writeFileSync(destination.slice("--test-reporter-destination=".length), "TN:\nSF:lib/example.ts\n");
@@ -195,6 +195,7 @@ test("runner publishes a successful coverage report and creates a compile cache"
     });
     assert.equal(status, 0);
     assert.ok(invocation);
+    assert.equal(invocation.command, process.execPath);
     assert.equal(readFileSync(path.join(coverageDir, "node-tests.lcov"), "utf8"), "TN:\nSF:lib/example.ts\n");
     assert.equal(invocation.options.env.NODE_ENV, "test");
     assert.equal(invocation.options.env.NODE_COMPILE_CACHE.startsWith(cacheRoot), true);

@@ -13,7 +13,7 @@ export type OptimisticPendingMessage = {
   sentAt: Date;
   /** ID devuelto por `sendText` tras enviar (dedupe con `DecodedMessage.id`). */
   serverMessageId?: string;
-  status: "sending" | "sent";
+  status: "sending" | "accepted";
 };
 
 export type ThreadDisplayRow =

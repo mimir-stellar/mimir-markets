@@ -21,6 +21,8 @@ import {
   markThreadRead,
 } from "@/lib/xmtp/read-state";
 import { getVSTotalPot } from "@/lib/contract";
+import { useXmtp } from "@/lib/xmtp/XmtpProvider";
+import { getMessagesHubConnectionState } from "@/lib/xmtp/messages-hub-state";
 import PageTransition, { AnimatedItem } from "@/components/PageTransition";
 import { Button, GlassCard } from "@/components/ui";
 import MessagesWalletGate from "@/components/xmtp/MessagesWalletGate";
@@ -74,9 +76,21 @@ function ChannelListSkeleton({ ariaLabel }: { ariaLabel: string }) {
 }
 
 export default function MessagesHub() {
-  const { address, isConnected, isConnecting, connect } = useWallet();
+  const {
+    address,
+    isConnected,
+    isConnecting,
+    connect,
+    canSignMessages,
+  } = useWallet();
+  const { status: xmtpStatus, failure: xmtpFailure } = useXmtp();
   const t = useTranslations("messagesHub");
   const featureOn = useMemo(() => isXmtpFeatureEnabled(), []);
+  const connectionState = getMessagesHubConnectionState({
+    canSignMessages,
+    status: xmtpStatus,
+    failureKind: xmtpFailure?.kind,
+  });
 
   const [duels, setDuels] = useState<VSData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -241,6 +255,59 @@ export default function MessagesHub() {
         <AnimatedItem>
           <MessagesPageHero className="pt-2 sm:pt-4" />
         </AnimatedItem>
+
+        <div className="mt-6 grid gap-3 sm:mt-8 sm:grid-cols-2">
+          <GlassCard className="border border-pv-ink/[0.1]">
+            <div className="flex items-start gap-3">
+              <AlertCircle
+                className={connectionState.signingSupported ? "text-pv-emerald" : "text-pv-danger"}
+                size={18}
+                aria-hidden
+              />
+              <div className="min-w-0">
+                <h2 className="font-display text-[10px] font-bold uppercase tracking-[0.14em] text-pv-text">
+                  {t("signingTitle")}
+                </h2>
+                <p className="mt-1.5 text-xs leading-relaxed text-pv-muted">
+                  {connectionState.signingSupported
+                    ? t("signingSupported")
+                    : t("signingUnsupported")}
+                </p>
+              </div>
+            </div>
+          </GlassCard>
+
+          <GlassCard className="border border-pv-ink/[0.1]">
+            <div className="flex items-start gap-3">
+              <Radio
+                className={connectionState.transport === "ready" ? "text-pv-emerald" : "text-pv-muted"}
+                size={18}
+                aria-hidden
+              />
+              <div className="min-w-0">
+                <h2 className="font-display text-[10px] font-bold uppercase tracking-[0.14em] text-pv-text">
+                  {t("transportTitle")}
+                </h2>
+                <p className="mt-1.5 text-xs leading-relaxed text-pv-muted">
+                  {connectionState.transport === "not_started"
+                    ? t("transportNotStarted")
+                    : connectionState.transport === "connecting"
+                      ? t("transportConnecting")
+                      : connectionState.transport === "ready"
+                        ? t("transportReady")
+                        : t("transportUnavailable")}
+                </p>
+              </div>
+            </div>
+          </GlassCard>
+
+          <div className="flex items-start gap-2.5 border-l-2 border-pv-emerald/35 px-3 py-1.5 sm:col-span-2">
+            <Lock className="mt-0.5 shrink-0 text-pv-muted" size={14} aria-hidden />
+            <p className="text-[11px] leading-relaxed text-pv-muted">
+              {t("privacyBoundary")}
+            </p>
+          </div>
+        </div>
 
         <div className={showHubSplit ? "mt-6 sm:mt-8" : CONTENT_DIVIDER}>
           {loading && (

@@ -30,6 +30,7 @@ import { nextXmtpFailure, type XmtpFailure } from "@/lib/xmtp/failure-state";imp
   normalizeXmtpMessageId,
   type OptimisticPendingMessage,
 } from "@/lib/xmtp/optimistic-send";
+import { sendXmtpTextWithAck } from "@/lib/xmtp/send-message";
 import { GlassCard } from "@/components/ui";
 
 const XMTP_PANEL_TITLE_FALLBACK: Record<string, string> = {
@@ -272,27 +273,32 @@ export default function VsXmtpPanel({ vs, embedded = false }: VsXmtpPanelProps) 
       { clientTempId, text, sentAt, status: "sending" },
     ]);
     try {
-      const rawId = await dm.sendText(text, true);
-      const serverMessageId =
-        rawId == null ? undefined : String(rawId);
-      setPendingSends((prev) =>
-        prev.map((p) =>
-          p.clientTempId === clientTempId
-            ? { ...p, serverMessageId, status: "sent" as const }
-            : p
-        )
-      );
-    } catch (e) {
-      setPendingSends((prev) =>
-        prev.filter((p) => p.clientTempId !== clientTempId)
-      );
-      const technical = e instanceof Error ? e.message : String(e);
-      // El texto vuelve al draft solo si el usuario no ha escrito otra cosa: un
-      // envío fallido nunca debe perder lo que la persona escribió.
-      setDraft((prev) => (prev.trim() ? prev : text));
-      setSendFailure((prev) =>
-        nextXmtpFailure(prev, "send_failed", technical)
-      );
+      const result = await sendXmtpTextWithAck(dm, text);
+      if (result.status === "accepted") {
+        setPendingSends((prev) =>
+          prev.map((p) =>
+            p.clientTempId === clientTempId
+              ? {
+                  ...p,
+                  serverMessageId: result.serverMessageId,
+                  status: "accepted" as const,
+                }
+              : p
+          )
+        );
+      } else {
+        setPendingSends((prev) =>
+          prev.filter((p) => p.clientTempId !== clientTempId)
+        );
+        const technical =
+          result.error instanceof Error ? result.error.message : String(result.error);
+        // El texto vuelve al draft solo si el usuario no ha escrito otra cosa: un
+        // envío fallido nunca debe perder lo que la persona escribió.
+        setDraft((prev) => (prev.trim() ? prev : text));
+        setSendFailure((prev) =>
+          nextXmtpFailure(prev, "send_failed", technical)
+        );
+      }
     } finally {
       setIsSending(false);
     }
@@ -726,7 +732,7 @@ export default function VsXmtpPanel({ vs, embedded = false }: VsXmtpPanelProps) 
                           <p className="mt-1.5 text-[10px] text-pv-muted/75">
                             {pending.status === "sending"
                               ? t("sendingMessage")
-                              : t("messageQueued")}
+                              : t("messageAccepted")}
                           </p>
                         </div>
                       </div>
