@@ -151,7 +151,7 @@ sequenceDiagram
 ## Detailed Pipeline Stages
 
 ### 1. Poll & Claim Classification
-The worker loop in `agents/oracle/index.ts:830` polls every `ORACLE_POLL_INTERVAL_MS` (default `60000` ms).
+The worker loop in `agents/oracle/index.ts:830` polls every `ORACLE_POLL_INTERVAL_MS` (default `60000` ms), with jitter configured by `ORACLE_POLL_JITTER_MS` (default ±10%).
 - **Claim Batching:** Fetches total claim count via `getClaimCount()` and batches RPC reads in chunks of 50 via `readClaimsBatch(ids)`.
 - **Classification:** `classifyClaimsForOracle` filters claims into `expiredActive` (`state === "active"` and `deadline <= now`) and `challengeable` (`state === "open"`).
 - **Pre-Settlement Pause Check:** If `isPaused("oracle_settlement")` (`MIMIR_PAUSE_ORACLE_SETTLEMENT=1` or `MIMIR_PAUSE_ALL=1`), the loop clears the `expiredActive` queue immediately. No LLM queries, evidence purchases, or transactions occur.
@@ -180,9 +180,16 @@ Sports markets close betting at match kickoff, meaning the claim deadline is in 
 - **Grace Window Calculation:**
   $$\text{Grace Period} = \max(1, \text{SPORTS\_SETTLE\_GRACE\_HOURS} \times 3600)$$
   Defaults to 12 hours (`SPORTS_SETTLE_GRACE_HOURS`).
-- **Finality Check:** While $\text{now} \le \text{deadline} + \text{grace}$, the oracle queries the LLM via `isSportsEventFinal(claim, evidence.text)`:
-  - If the match is not definitively finished (`final: false`), settlement is deferred to a future poll.
-  - If $\text{now} > \text{deadline} + \text{grace}$, the grace window has expired. The oracle proceeds with settlement to prevent permanently locked funds during extended data outages.
+- **Policy Version & Identity:**
+  - Policy identity: `SPORTS_FINALITY_POLICY_ID` (`"sports-finality"`).
+  - Version binding: Each decision binds the policy version to the reviewed evidence timestamp (`evidence.fetchedAt`), formatted as `sports-finality:v1@<timestamp>` (or `sports-finality:v1:g<hours>h@<timestamp>` when customized).
+  - Policy identity remains visible and stable across configuration changes.
+- **Finality Check & Decision Recording:**
+  - The oracle evaluates finality heuristics via `evaluateSportsFinality(claim, evidence.text, now, { evidenceTimestamp })` (or `isSportsEventFinal`):
+    - Records the applied sports finality policy version with each decision.
+    - Emits a typed `SportsFinalityDecision` recording `policyVersion`, `policyId`, `evidenceTimestamp`, `final`, `reason`, and `graceSecs`.
+    - If the match is not definitively finished (`final: false`), settlement is deferred to a future poll.
+    - If $\text{now} > \text{deadline} + \text{grace}$, the grace window has expired (`reason: "grace_window_expired"`). The oracle proceeds with settlement to prevent permanently locked funds during extended data outages.
 
 ### 5. Verdict Generation (Solo vs. Council)
 Depending on `COUNCIL_SETTLEMENT`:
