@@ -54,6 +54,10 @@ const POST_WRITE_REFRESH_DELAY_MS = 1_500;
 const BACKGROUND_REFRESH_COOLDOWN_MS = 30_000;
 
 export const CLAIM_EVENTS_CURSOR_KEY = "claim_events_cursor_ledger";
+export const ACTIVE_GENERATION_META_KEY = "read_index_active_generation";
+export const ACTIVE_GENERATION_FINGERPRINT_META_KEY = "read_index_active_fingerprint";
+export const ACTIVE_GENERATION_LEDGER_META_KEY = "read_index_active_ledger";
+export const ACTIVE_GENERATION_CUTOVER_AT_META_KEY = "read_index_active_cutover_at";
 const CLAIM_EVENTS_MAX_PAGES_PER_PASS = 30;
 const RANGE_RECONCILE_INTERVAL_RUNS = 10;
 let reconcileRunCount = 0;
@@ -1160,4 +1164,46 @@ export async function triggerPostWriteRefresh(options: {
     attempts: POST_WRITE_REFRESH_ATTEMPTS,
     attemptDelayMs: POST_WRITE_REFRESH_DELAY_MS,
   });
+}
+
+export type ActiveReadIndexGeneration = {
+  generationId: string | null;
+  fingerprint: string | null;
+  ledger: number | null;
+  cutoverAt: number | null;
+};
+
+/**
+ * Read the currently active read-index generation metadata from `sync_meta`.
+ * Returns null fields when no generation cutover has been recorded yet so
+ * existing callers remain fully backwards-compatible.
+ */
+export async function getActiveReadIndexGeneration(): Promise<ActiveReadIndexGeneration> {
+  const [generationId, fingerprint, ledgerRaw, cursorRaw, cutoverAtRaw] =
+    await Promise.all([
+      getSyncMeta(ACTIVE_GENERATION_META_KEY),
+      getSyncMeta(ACTIVE_GENERATION_FINGERPRINT_META_KEY),
+      getSyncMeta(ACTIVE_GENERATION_LEDGER_META_KEY),
+      getSyncMeta(CLAIM_EVENTS_CURSOR_KEY),
+      getSyncMeta(ACTIVE_GENERATION_CUTOVER_AT_META_KEY),
+    ]);
+
+  const ledger =
+    validateCursorValue(ledgerRaw, ACTIVE_GENERATION_LEDGER_META_KEY, "vs-index") ??
+    validateCursorValue(cursorRaw, CLAIM_EVENTS_CURSOR_KEY, "vs-index");
+
+  const cutoverAtParsed =
+    cutoverAtRaw !== null && /^\d+$/.test(cutoverAtRaw.trim())
+      ? Number(cutoverAtRaw.trim())
+      : null;
+
+  return {
+    generationId: generationId ?? null,
+    fingerprint: fingerprint ?? null,
+    ledger,
+    cutoverAt:
+      cutoverAtParsed !== null && Number.isSafeInteger(cutoverAtParsed)
+        ? cutoverAtParsed
+        : null,
+  };
 }

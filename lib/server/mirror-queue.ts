@@ -40,6 +40,99 @@ export interface PendingMirror {
   deadline: number;
 }
 
+export type MirrorQueueSource =
+  | "subscriptions"
+  | "definitions"
+  | "agents"
+  | "open_claims"
+  | "challengers";
+
+export type MirrorQueueStatus =
+  | "invalid_subscriber"
+  | "no_subscriptions"
+  | "complete"
+  | "incomplete";
+
+export interface MirrorQueueSourceFailure {
+  source: MirrorQueueSource;
+  /** Present when a per-claim challenger lookup failed. */
+  claimId?: number;
+  /** Bounded, single-line error message. */
+  message: string;
+}
+
+export interface MirrorQueueFailureSummary {
+  /** Total number of source failures encountered (may exceed failures.length). */
+  totalFailures: number;
+  /** Distinct unavailable sources in deterministic order. */
+  unavailableSources: MirrorQueueSource[];
+  /** Bounded list of failure details (capped at MAX_MIRROR_QUEUE_FAILURES). */
+  failures: MirrorQueueSourceFailure[];
+  /** True when additional failures were omitted to keep the summary bounded. */
+  truncated: boolean;
+  /** Short actionable summary suitable for API responses, UI, and logs. */
+  summary: string;
+}
+
+export interface MirrorQueueResult {
+  status: MirrorQueueStatus;
+  /** True when all required sources succeeded. */
+  complete: boolean;
+  mirrors: PendingMirror[];
+  /** Basket IDs the subscriber follows (empty when unavailable or none). */
+  following: string[];
+  /** Bounded failure summary when status === "incomplete"; null otherwise. */
+  failureSummary: MirrorQueueFailureSummary | null;
+}
+
+export const MAX_MIRROR_QUEUE_FAILURES = 10;
+export const MAX_MIRROR_QUEUE_FAILURE_MESSAGE_LENGTH = 160;
+
+const SOURCE_ORDER: readonly MirrorQueueSource[] = [
+  "subscriptions",
+  "definitions",
+  "agents",
+  "open_claims",
+  "challengers",
+];
+
+function formatSourceError(error: unknown): string {
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  const normalized = raw.replace(/\s+/g, " ").trim();
+  if (!normalized) return "Source unavailable";
+  if (normalized.length <= MAX_MIRROR_QUEUE_FAILURE_MESSAGE_LENGTH) {
+    return normalized;
+  }
+  return `${normalized.slice(0, MAX_MIRROR_QUEUE_FAILURE_MESSAGE_LENGTH - 1)}…`;
+}
+
+function buildFailureSummary(
+  recordedFailures: MirrorQueueSourceFailure[],
+  failedSources: Set<MirrorQueueSource>,
+  totalFailures: number,
+): MirrorQueueFailureSummary {
+  const unavailableSources = SOURCE_ORDER.filter((source) => failedSources.has(source));
+  const truncated = totalFailures > recordedFailures.length;
+  const sourceList = unavailableSources.join(", ");
+  const countDetail = truncated
+    ? `${totalFailures} failures recorded (showing first ${recordedFailures.length})`
+    : `${totalFailures} failure${totalFailures === 1 ? "" : "s"} recorded`;
+  const summary = `Mirror queue incomplete: unavailable ${sourceList} (${countDetail}).`;
+
+  return {
+    totalFailures,
+    unavailableSources,
+    failures: recordedFailures,
+    truncated,
+    summary,
+  };
+}
+
 /** The data sources the queue is built from, injectable for testing. */
 export interface MirrorQueueDependencies {
   listSubscriptions: (wallet: string) => Promise<string[]>;
@@ -59,34 +152,107 @@ const defaultDependencies: MirrorQueueDependencies = {
 };
 
 /**
- * Mirrors still open to a subscriber.
+ * Resolve pending mirrors along with completeness metadata and a bounded
+ * failure summary when one or more backing sources are unavailable.
  *
- * Weighted, not flat: a member at 10% of a basket should pull 10% of the
- * subscriber's per-market budget, or following a basket would just be following
- * whichever member happened to act first.
+ * Callers can distinguish:
+ *  - `status === "invalid_subscriber"` — address failed StrKey validation
+ *  - `status === "no_subscriptions"`   — subscriber follows no baskets
+ *  - `status === "complete"`           — all sources succeeded (empty `mirrors`
+ *                                        means genuinely no eligible opportunities)
+ *  - `status === "incomplete"`         — one or more sources failed; `mirrors`
+ *                                        contains any partial results and
+ *                                        `failureSummary` explains what failed
  */
-export async function pendingMirrorsFor(
+export async function pendingMirrorQueueFor(
   subscriber: string,
   perMarketUsdc: Record<string, number> = {},
   dependencies: MirrorQueueDependencies = defaultDependencies,
-): Promise<PendingMirror[]> {
+): Promise<MirrorQueueResult> {
   // Strkey check, and the address is then used verbatim throughout. The EVM regex
   // this replaced rejected every Stellar address, so the mirror queue was empty
   // for every real user; the `toLowerCase()` beside it would then have failed to
   // match any stored strkey even if the guard had let one through.
   const wallet = parseAddressParam(subscriber);
-  if (!wallet) return [];
+  if (!wallet) {
+    return {
+      status: "invalid_subscriber",
+      complete: true,
+      mirrors: [],
+      following: [],
+      failureSummary: null,
+    };
+  }
 
-  const subscribed = await dependencies.listSubscriptions(wallet).catch(() => []);
-  if (subscribed.length === 0) return [];
+  const recordedFailures: MirrorQueueSourceFailure[] = [];
+  const failedSources = new Set<MirrorQueueSource>();
+  let totalFailures = 0;
 
-  const [definitions, directory, openClaims] = await Promise.all([
-    dependencies.listDefinitions().catch(() => []),
-    dependencies.listAgents().catch(() => []),
-    dependencies.listOpenClaims().catch(() => []),
+  const recordFailure = (source: MirrorQueueSource, error: unknown, claimId?: number) => {
+    totalFailures += 1;
+    failedSources.add(source);
+    if (recordedFailures.length < MAX_MIRROR_QUEUE_FAILURES) {
+      const entry: MirrorQueueSourceFailure = {
+        source,
+        message: formatSourceError(error),
+      };
+      if (claimId !== undefined) entry.claimId = claimId;
+      recordedFailures.push(entry);
+    }
+  };
+
+  let subscribed: string[];
+  try {
+    subscribed = await dependencies.listSubscriptions(wallet);
+  } catch (error) {
+    recordFailure("subscriptions", error);
+    return {
+      status: "incomplete",
+      complete: false,
+      mirrors: [],
+      following: [],
+      failureSummary: buildFailureSummary(recordedFailures, failedSources, totalFailures),
+    };
+  }
+
+  if (subscribed.length === 0) {
+    return {
+      status: "no_subscriptions",
+      complete: true,
+      mirrors: [],
+      following: [],
+      failureSummary: null,
+    };
+  }
+
+  const [definitionsResult, directoryResult, openClaimsResult] = await Promise.allSettled([
+    dependencies.listDefinitions(),
+    dependencies.listAgents(),
+    dependencies.listOpenClaims(),
   ]);
+
+  const definitions =
+    definitionsResult.status === "fulfilled"
+      ? definitionsResult.value
+      : (recordFailure("definitions", definitionsResult.reason), []);
+  const directory =
+    directoryResult.status === "fulfilled"
+      ? directoryResult.value
+      : (recordFailure("agents", directoryResult.reason), []);
+  const openClaims =
+    openClaimsResult.status === "fulfilled"
+      ? openClaimsResult.value
+      : (recordFailure("open_claims", openClaimsResult.reason), []);
+
   const agentById = new Map(directory.map((agent) => [agent.id, agent]));
   const nowSeconds = Math.floor(Date.now() / 1000);
+
+  // Cache challenger lookups per claim so shared claims across multiple baskets
+  // are queried once and failures are not double-counted.
+  const challengersByClaim = new Map<
+    number,
+    { ok: true; challengers: Array<{ address: string; stake: number }> } | { ok: false }
+  >();
 
   const pending: PendingMirror[] = [];
 
@@ -100,7 +266,20 @@ export async function pendingMirrorsFor(
       if (claim.deadline <= nowSeconds + 300) continue;
       if (claim.creator === wallet) continue;
 
-      const challengers = await dependencies.listChallengers(claim.id).catch(() => []);
+      let cached = challengersByClaim.get(claim.id);
+      if (!cached) {
+        try {
+          const challengers = await dependencies.listChallengers(claim.id);
+          cached = { ok: true, challengers };
+        } catch (error) {
+          recordFailure("challengers", error, claim.id);
+          cached = { ok: false };
+        }
+        challengersByClaim.set(claim.id, cached);
+      }
+      if (!cached.ok) continue;
+
+      const challengers = cached.challengers;
       const taken = new Set(challengers.map((c) => c.address));
       if (taken.has(wallet)) continue; // already mirrored, or acted independently
 
@@ -127,5 +306,42 @@ export async function pendingMirrorsFor(
     }
   }
 
-  return pending.sort((a, b) => a.deadline - b.deadline);
+  pending.sort((a, b) => a.deadline - b.deadline);
+
+  if (totalFailures > 0) {
+    return {
+      status: "incomplete",
+      complete: false,
+      mirrors: pending,
+      following: subscribed,
+      failureSummary: buildFailureSummary(recordedFailures, failedSources, totalFailures),
+    };
+  }
+
+  return {
+    status: "complete",
+    complete: true,
+    mirrors: pending,
+    following: subscribed,
+    failureSummary: null,
+  };
+}
+
+/**
+ * Mirrors still open to a subscriber.
+ *
+ * Weighted, not flat: a member at 10% of a basket should pull 10% of the
+ * subscriber's per-market budget, or following a basket would just be following
+ * whichever member happened to act first.
+ *
+ * Kept for callers that only need the mirror array; use `pendingMirrorQueueFor`
+ * when you need to distinguish empty results from unavailable sources.
+ */
+export async function pendingMirrorsFor(
+  subscriber: string,
+  perMarketUsdc: Record<string, number> = {},
+  dependencies: MirrorQueueDependencies = defaultDependencies,
+): Promise<PendingMirror[]> {
+  const result = await pendingMirrorQueueFor(subscriber, perMarketUsdc, dependencies);
+  return result.mirrors;
 }
