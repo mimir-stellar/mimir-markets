@@ -74,7 +74,12 @@ import {
 } from "./philosophers";
 import { runPersonaForClaim } from "./shared/persona-runner";
 import { pruneEvidenceCache } from "./shared/evidence-cache";
-import { buyPeerReasoning } from "./shared/peer-reasoning";
+import {
+  buyPeerReasoning,
+  claimStatementDigest,
+  peerReasoningCacheKey,
+  prunePeerReasoningCache,
+} from "./shared/peer-reasoning";
 import { toClaimOnChain } from "./shared/types";
 import { parseCouncilConfig } from "./shared/config";
 import type {
@@ -250,8 +255,9 @@ async function poll(): Promise<void> {
     }
   }
   const allClaims = selectJoinableClaims(fetched, now);
-  // Drop cross-cycle evidence for claims that are no longer joinable.
+  // Drop cross-cycle evidence and peer reasoning for claims that are no longer joinable.
   pruneEvidenceCache(new Set(allClaims.map((claim) => claim.id)));
+  prunePeerReasoningCache(new Set(allClaims.map((claim) => claim.id)));
   if (allClaims.length === 0) {
     console.log("[council] No joinable claims this round.");
     return;
@@ -273,6 +279,7 @@ async function poll(): Promise<void> {
     for (const claim of claims) {
       try {
         if (PEER_READS_ENABLED && PEER_READS_PER_PERSONA > 0) {
+          const digest = claimStatementDigest(claim);
           const reads = await buyPeerReasoning({
             buyer: persona,
             activePersonas: ALL_ACTIVE,
@@ -281,11 +288,14 @@ async function poll(): Promise<void> {
             readsPerPersona: PEER_READS_PER_PERSONA,
             capUsdc: PEER_READ_CAP_USDC,
             delayMs: PEER_READ_DELAY_MS,
+            statementDigest: digest,
+            claim,
           });
           if (reads.length > 0) {
             const formattedReads = reads.map(
               (read) => `${read.sellerName}: ${read.reasoning}`,
             );
+            peerReasoning.set(peerReasoningCacheKey(claim.id, persona.slug, digest), formattedReads);
             peerReasoning.set(`${claim.id}:${persona.slug}`, formattedReads);
             const paidUsdc = reads.reduce(
               (sum, read) => sum + unitsToUsdc(BigInt(read.pricePaidUnits ?? "0")),

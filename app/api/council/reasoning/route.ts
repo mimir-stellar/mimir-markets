@@ -56,6 +56,7 @@ async function handler(req: NextRequest): Promise<NextResponse> {
   const { searchParams } = req.nextUrl;
   const claimId = Number(searchParams.get("claimId"));
   const slug = (searchParams.get("persona") ?? "").toLowerCase().trim();
+  const statementDigest = (searchParams.get("statementDigest") ?? "").trim() || undefined;
   const hasPass = hasCouncilPass(req);
 
   const persona = getPersonaBySlug(slug);
@@ -80,13 +81,14 @@ async function handler(req: NextRequest): Promise<NextResponse> {
 
   // A warm (claim, persona) pair skips both the contract read and the LLM call;
   // the read stays billed either way.
-  const cached = getCachedReasoning(claimId, slug);
+  const cached = getCachedReasoning(claimId, slug, statementDigest);
   if (cached) {
     return NextResponse.json({
       persona: { slug: persona.slug, name: persona.displayName, emoji: persona.emoji },
       claimId,
       question: cached.question,
       reasoning: cached.reasoning,
+      statementDigest: cached.statementDigest ?? statementDigest,
       paidTo: hasPass ? null : payTo,
       price: hasPass ? "$0 (pass)" : PRICES.councilReasoning,
       freshness: buildVSCacheFreshness({
@@ -130,7 +132,7 @@ async function handler(req: NextRequest): Promise<NextResponse> {
   const { reasoning, cacheable } = await produceReasoning(prompt, (p) => callLLM(p, { maxTokens: 300 }));
   if (cacheable) {
     // Only generations that passed the publish guard are cached — never the fallback.
-    setCachedReasoning(claimId, slug, { question, sideA, sideB, reasoning }, generatedAtMs);
+    setCachedReasoning(claimId, slug, { question, sideA, sideB, reasoning }, statementDigest, generatedAtMs);
   }
 
   return NextResponse.json({
@@ -138,6 +140,7 @@ async function handler(req: NextRequest): Promise<NextResponse> {
     claimId,
     question,
     reasoning,
+    statementDigest,
     paidTo: hasPass ? null : payTo,
     price: hasPass ? "$0 (pass)" : PRICES.councilReasoning,
     freshness: reasoning === UNAVAILABLE_REASONING ? null : buildVSCacheFreshness({

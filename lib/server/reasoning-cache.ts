@@ -25,6 +25,7 @@ export interface CachedReasoning {
   sideA: string;
   sideB: string;
   reasoning: string;
+  statementDigest?: string;
 }
 
 /**
@@ -32,53 +33,90 @@ export interface CachedReasoning {
  * generations must be neither cached nor returned to readers.
  */
 export function isPublishableReasoning(reasoning: string): boolean {
-  return checkPublishableText(reasoning).ok;
+  return checkPublishableText(reasoning).safe;
 }
 
 export type Entry = CachedReasoning & { at: number };
 
 const entries = new Map<string, Entry>();
 
-const cacheKey = (claimId: number, slug: string) => `${claimId}:${slug}`;
+const cacheKey = (claimId: number, slug: string, statementDigest?: string) =>
+  statementDigest ? `${claimId}:${slug}:${statementDigest}` : `${claimId}:${slug}`;
 
 export function getCachedReasoning(
   claimId: number,
   slug: string,
+  statementDigestOrNowMs?: string | number,
   nowMs = Date.now()
 ): Entry | null {
-  const key = cacheKey(claimId, slug);
-  const hit = entries.get(key);
-  if (!hit) {
-    return null;
-  }
-  if (nowMs - hit.at > TTL_MS) {
-    entries.delete(key);
-    return null;
+  const statementDigest =
+    typeof statementDigestOrNowMs === "string" ? statementDigestOrNowMs : undefined;
+  const effectiveNow =
+    typeof statementDigestOrNowMs === "number" ? statementDigestOrNowMs : nowMs;
+
+  if (statementDigest) {
+    const key = cacheKey(claimId, slug, statementDigest);
+    const hit = entries.get(key);
+    if (!hit) {
+      return null;
+    }
+    if (hit.statementDigest && hit.statementDigest !== statementDigest) {
+      return null;
+    }
+    if (effectiveNow - hit.at > TTL_MS) {
+      entries.delete(key);
+      return null;
+    }
+    return hit;
   }
 
-  return hit;
+  // Fallback for callers without statementDigest: find the latest entry for (claimId, slug)
+  const prefix = `${claimId}:${slug}`;
+  for (const [k, v] of entries.entries()) {
+    if (k === prefix || k.startsWith(`${prefix}:`)) {
+      if (effectiveNow - v.at > TTL_MS) {
+        entries.delete(k);
+        return null;
+      }
+      return v;
+    }
+  }
+
+  return null;
 }
 
 export function setCachedReasoning(
   claimId: number,
   slug: string,
   value: CachedReasoning,
+  statementDigestOrNowMs?: string | number,
   nowMs = Date.now()
 ): void {
   // Never cache unsafe generations — they must not be served to readers.
   if (!isPublishableReasoning(value.reasoning)) {
     return;
   }
-  const key = cacheKey(claimId, slug);
-  // Re-insert so the key moves to the back of the eviction order.
-  entries.delete(key);
+  const statementDigest =
+    typeof statementDigestOrNowMs === "string" ? statementDigestOrNowMs : value.statementDigest;
+  const effectiveNow =
+    typeof statementDigestOrNowMs === "number" ? statementDigestOrNowMs : nowMs;
+
+  const key = cacheKey(claimId, slug, statementDigest);
+  // Invalidate any previous entry for the same (claimId, slug) so stale wording/digests do not linger
+  const prefix = `${claimId}:${slug}`;
+  for (const k of entries.keys()) {
+    if (k === prefix || k.startsWith(`${prefix}:`)) {
+      entries.delete(k);
+    }
+  }
+
   if (entries.size >= MAX_ENTRIES) {
     const oldest = entries.keys().next().value;
     if (oldest !== undefined) {
       entries.delete(oldest);
     }
   }
-  entries.set(key, { ...value, at: nowMs });
+  entries.set(key, { ...value, statementDigest, at: effectiveNow });
 }
 
 /** Test seam — production code never needs this. */

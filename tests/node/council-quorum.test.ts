@@ -115,6 +115,31 @@ test("age past maxAgeMs is stale", () => {
   assert.equal(v.disposition, "stale");
 });
 
+test("statement digest mismatch marks attempt stale; matching or absent digest remains valid", () => {
+  const digest1 = "a".repeat(64);
+  const digest2 = "b".repeat(64);
+
+  // Mismatch -> stale
+  const mismatched = classifyVoteAttempt(
+    attempt({ slug: "optimist", statementDigest: digest1, expectedStatementDigest: digest2 }),
+  );
+  assert.equal(mismatched.disposition, "stale");
+  assert.equal(mismatched.decisive, false);
+  assert.match(mismatched.reason, /statement wording or source commitment changed/);
+
+  // Matching -> valid
+  const matched = classifyVoteAttempt(
+    attempt({ slug: "optimist", statementDigest: digest1, expectedStatementDigest: digest1 }),
+  );
+  assert.equal(matched.disposition, "valid");
+  assert.equal(matched.decisive, true);
+
+  // Absent -> valid (backwards compatible)
+  const legacy = classifyVoteAttempt(attempt({ slug: "optimist" }));
+  assert.equal(legacy.disposition, "valid");
+  assert.equal(legacy.decisive, true);
+});
+
 test("network/timeout/5xx are dependency_failure; 4xx are invalid; 404 is stale", () => {
   assert.equal(
     classifyVoteAttempt(attempt({ slug: "a", status: "timeout" })).disposition,

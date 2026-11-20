@@ -24,6 +24,10 @@ import {
   type PersonaSpec,
   personaSecretEnv,
 } from "../personas";
+import {
+  claimStatementDigest,
+  peerReasoningCacheKey,
+} from "./peer-reasoning";
 import { getOrFetchEvidence } from "./evidence-cache";
 import { checkEvidenceFreshness } from "./evidence-freshness";
 import { evaluateClaimAsPersona, type PersonaVerdict } from "./persona-llm";
@@ -58,8 +62,12 @@ const throttleLlm = createThrottle(parsedConfig.config.llmThrottleMs);
 // Exported so tests can assert the cap without duplicating the constant.
 export const KELLY_CAP = 0.15;
 
-function peerReasoningKey(claimId: number, personaSlug: string): string {
-  return `${claimId}:${personaSlug}`;
+export function peerReasoningKey(
+  claimId: number,
+  personaSlug: string,
+  statementDigest?: string,
+): string {
+  return peerReasoningCacheKey(claimId, personaSlug, statementDigest);
 }
 
 function categoryMatches(persona: PersonaSpec, claim: ClaimOnChain): boolean {
@@ -131,11 +139,16 @@ export async function evaluatePersonaForClaim(
   let verdict: PersonaVerdict;
   try {
     await throttleLlm();
+    const digest = claimStatementDigest(claim);
+    const peerReads =
+      ctx.peerReasoning?.get(peerReasoningKey(claim.id, persona.slug, digest)) ??
+      ctx.peerReasoning?.get(peerReasoningKey(claim.id, persona.slug)) ??
+      [];
     verdict = await evaluateClaimAsPersona(
       persona,
       claim,
       evidence.text,
-      ctx.peerReasoning?.get(peerReasoningKey(claim.id, persona.slug)) ?? [],
+      peerReads,
     );
   } catch (err) {
     return {

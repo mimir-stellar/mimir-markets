@@ -1,5 +1,5 @@
 /**
- * Council quorum + fallback rules for settlement (äagents / RFB council boundary).
+ * Council quorum + fallback rules for settlement (agents / RFB council boundary).
  *
  * `gatherCouncilVerdict` buys persona votes and tallies them. This module is the
  * pure policy layer that decides whether that tally is allowed to settle a claim,
@@ -27,6 +27,7 @@ export type ClaimSettleState = "open" | "active" | "resolved" | "cancelled" | "p
  * - **stale** — wrong claim id, already-resolved claim, or aged past maxAgeMs.
  * - **duplicated** — same persona already accepted onto this ballot.
  * - **cancelled** — claim is cancelled; council must not settle it.
+ * - **paused** — persona or claim is paused; council must not settle it.
  * - **dependency_failure** — network / timeout / 5xx; treated as abstention for
  *   tally purposes but recorded so fallback reasons stay auditable.
  */
@@ -90,6 +91,10 @@ export interface VoteAttemptInput {
   ageMs?: number;
   /** Responses older than this are stale (optional). */
   maxAgeMs?: number;
+  /** Statement digest of the claim when reasoning/vote was generated. */
+  statementDigest?: string;
+  /** Expected statement digest; mismatch classifies attempt as stale. */
+  expectedStatementDigest?: string;
 }
 
 export interface ClassifiedVote {
@@ -125,13 +130,13 @@ const EMPTY_DISPOSITIONS = (): Record<VoteDisposition, number> => ({
 });
 
 export function isDecisiveVerdict(verdict: Verdict): boolean {
-  return verdict === "CREATOR_WINS" || verdict === "CHALLENGERS_WINS";
+  return verdict === "CREATOR_WINS" || verdict === "CHALLENGERS_WIN" || (verdict as string) === "CHALLENGERS_WINS";
 }
 
 /**
  * Normalize a raw quorum (env Number, caller override, …).
  *
- * Invalid values (NaN, non-finite, &lt; 1) become the default so a typo cannot
+ * Invalid values (NaN, non-finite, < 1) become the default so a typo cannot
  * silently disable the gate (`quorum: 0` would otherwise accept an empty jury).
  * Values above {@link MAX_COUNCIL_QUORUM} clamp rather than reject — demanding
  * more jurors than the roster has is a config smell, not a settle-time abort.
@@ -139,28 +144,32 @@ export function isDecisiveVerdict(verdict: Verdict): boolean {
 export function normalizeQuorum(raw: unknown, fallback = DEFAULT_COUNCIL_QUORUM): number {
   const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : Number.NaN;
   if (!Number.isFinite(n) || n < 1) return fallback;
-  return Math.min(MAX_COUNCIL_QUORUM, Math.trunc(n));
+  return Math.min(Math.floor(n), MAX_COUNCIL_QUORUM);
 }
 
 /**
- * True when the raw value was unusable (callers that want strict refusal can
- * abort instead of normalizing). Empty / missing is not invalid — it means default.
+ * Tell whether a raw quorum value is clearly broken, so strict mode can abort
+ * before settling.
  */
 export function isInvalidQuorumConfig(raw: unknown): boolean {
-  if (raw === undefined || raw === null || raw === "") return false;
+  if (raw == null || raw === undefined || raw === "") return false;
   const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : Number.NaN;
   return !Number.isFinite(n) || n < 1;
 }
 
-function clampConfidence(value: unknown): number {
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(Math.round(n), 100));
-}
-
 /**
- * Classify a single vote attempt. Duplicates are handled by
- * {@link buildBallot} so this function stays order-independent.
+ * Classify a raw persona response into a disposition for the ballot.
+ *
+ * Precedence:
+ *   1. Persona paused → paused (must not vote)
+ *   2. Claim cancelled → cancelled (must not settle)
+ *   3. Claim already resolved → stale (must not replay)
+ *   4. Mismatched claimId → stale (cross-claim leakage)
+ *   5. Mismatched statementDigest → stale (claim wording or source commitment changed)
+ *   6. Response aged past maxAgeMs → stale (cached verdict too old)
+ *   7. Transport failure (network / timeout / 5xx) → dependency_failure
+ *   8. Missing slug or unknown verdict → invalid
+ *   9. Otherwise → valid (decisive iff CREATOR_WINS | CHALLENGERS_WIN)
  */
 export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
   const slug = (input.slug ?? "").trim().toLowerCase();
@@ -168,7 +177,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
     return {
       slug: "",
       disposition: "invalid",
-      reason: "missing persona slug",
+      reason: "missing or empty persona slug",
       decisive: false,
     };
   }
@@ -177,7 +186,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
     return {
       slug,
       disposition: "paused",
-      reason: "persona is paused",
+      reason: "persona is currently paused",
       decisive: false,
     };
   }
@@ -215,6 +224,19 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
   }
 
   if (
+    input.expectedStatementDigest &&
+    input.statementDigest &&
+    input.statementDigest !== input.expectedStatementDigest
+  ) {
+    return {
+      slug,
+      disposition: "stale",
+      reason: "claim statement digest mismatch (statement wording or source commitment changed)",
+      decisive: false,
+    };
+  }
+
+  if (
     input.maxAgeMs != null &&
     Number.isFinite(input.maxAgeMs) &&
     input.maxAgeMs >= 0 &&
@@ -247,7 +269,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       return {
         slug,
         disposition: "dependency_failure",
-        reason: `vote endpoint HTTP ${code || "error"}`,
+        reason: `vote endpoint HTTP ${code}`,
         decisive: false,
       };
     }
@@ -255,14 +277,14 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       return {
         slug,
         disposition: "stale",
-        reason: "claim not found at vote endpoint",
+        reason: "vote endpoint 404 — claim not found",
         decisive: false,
       };
     }
     return {
       slug,
       disposition: "invalid",
-      reason: `vote endpoint HTTP ${code}`,
+      reason: `vote endpoint rejected request (HTTP ${code})`,
       decisive: false,
     };
   }
@@ -271,16 +293,25 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
     return {
       slug,
       disposition: "invalid",
-      reason: "missing or unknown verdict",
+      reason: `verdict '${String(input.verdict)}' is not one of CREATOR_WINS | CHALLENGERS_WIN | DRAW | UNRESOLVABLE`,
       decisive: false,
     };
   }
 
-  const confidence = clampConfidence(input.confidence);
+  const confidenceRaw =
+    typeof input.confidence === "number"
+      ? input.confidence
+      : typeof input.confidence === "string"
+        ? Number(input.confidence)
+        : 0;
+  const confidence = Number.isFinite(confidenceRaw)
+    ? Math.max(0, Math.min(100, Math.round(confidenceRaw)))
+    : 0;
+
   return {
     slug,
     disposition: "valid",
-    reason: "accepted",
+    reason: "well-formed vote",
     verdict: input.verdict,
     confidence,
     decisive: isDecisiveVerdict(input.verdict),
@@ -289,93 +320,106 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
 
 /**
  * Fold classified attempts into a ballot: first valid vote per slug wins;
- * later attempts for the same slug are marked duplicated and dropped.
+ * later attempts for the same slug become `duplicated`. Non-valid attempts
+ * pass through to `rejected` unchanged.
  */
-export function buildBallot(classified: ClassifiedVote[]): {
+export function buildBallot(attempts: readonly ClassifiedVote[]): {
   ballot: ClassifiedVote[];
   rejected: ClassifiedVote[];
 } {
-  const seen = new Set<string>();
   const ballot: ClassifiedVote[] = [];
   const rejected: ClassifiedVote[] = [];
+  const seenSlugs = new Set<string>();
 
-  for (const vote of classified) {
-    if (vote.disposition !== "valid") {
-      rejected.push(vote);
+  for (const attempt of attempts) {
+    if (attempt.disposition !== "valid") {
+      rejected.push(attempt);
       continue;
     }
-    if (seen.has(vote.slug)) {
+    if (seenSlugs.has(attempt.slug)) {
       rejected.push({
-        ...vote,
+        ...attempt,
         disposition: "duplicated",
-        reason: `duplicate vote for persona '${vote.slug}'`,
+        reason: `persona '${attempt.slug}' already submitted a vote on this ballot`,
         decisive: false,
-        verdict: undefined,
-        confidence: undefined,
       });
       continue;
     }
-    seen.add(vote.slug);
-    ballot.push(vote);
+    seenSlugs.add(attempt.slug);
+    ballot.push(attempt);
   }
 
   return { ballot, rejected };
 }
 
-function countDispositions(
-  votes: ClassifiedVote[],
-): Record<VoteDisposition, number> {
+function countDispositions(votes: readonly ClassifiedVote[]): Record<VoteDisposition, number> {
   const counts = EMPTY_DISPOSITIONS();
-  for (const vote of votes) counts[vote.disposition] += 1;
+  for (const v of votes) {
+    counts[v.disposition] = (counts[v.disposition] ?? 0) + 1;
+  }
   return counts;
 }
 
+export interface QuorumEvaluationOptions {
+  /**
+   * On-chain claim state. Checked before counting votes so a cancelled or
+   * already-resolved claim aborts even if every attempt looks valid.
+   */
+  claimState?: ClaimSettleState;
+  /**
+   * Reject unparseable quorum config with `abort_invalid_config` instead of
+   * falling back to the default.
+   */
+  strictConfig?: boolean;
+}
+
 /**
- * Decide whether the council ballot may settle the claim, or how to fall back.
+ * Pure policy gate: evaluates whether a set of vote attempts meets quorum.
  *
- * @param strictConfig — when set and {@link isInvalidQuorumConfig} is true,
- *   returns `abort_invalid_config` instead of normalizing.
+ * Rules:
+ *   - Cancelled claim aborts (`abort_cancelled`).
+ *   - Resolved claim aborts (`abort_resolved`).
+ *   - Strict-config aborts on junk quorum (`abort_invalid_config`).
+ *   - Duplicate persona attempts are deduplicated (first valid wins).
+ *   - Decisive votes (CREATOR_WINS | CHALLENGERS_WIN) must meet or exceed quorum.
+ *   - If decisive votes >= quorum → `use_council`.
+ *   - Otherwise → `fallback_solo` with the shortfall in `reason`.
  */
 export function evaluateQuorum(
-  attempts: ClassifiedVote[],
+  attempts: readonly ClassifiedVote[],
   quorumRaw: unknown = DEFAULT_COUNCIL_QUORUM,
-  opts?: {
-    claimState?: ClaimSettleState;
-    strictConfig?: boolean;
-  },
+  opts?: QuorumEvaluationOptions,
 ): QuorumEvaluation {
-  const claimState = opts?.claimState;
-
-  if (claimState === "cancelled") {
+  if (opts?.claimState === "cancelled") {
     return {
       action: "abort_cancelled",
-      quorum: normalizeQuorum(quorumRaw),
+      quorum: 0,
       decisiveCount: 0,
       acceptedCount: 0,
       dispositions: countDispositions(attempts),
-      reason: "claim is cancelled — council settlement aborted",
+      reason: "claim is cancelled on-chain — council settlement aborted",
       acceptedSlugs: [],
       ballot: [],
     };
   }
 
-  if (claimState === "resolved") {
+  if (opts?.claimState === "resolved") {
     return {
       action: "abort_resolved",
-      quorum: normalizeQuorum(quorumRaw),
+      quorum: 0,
       decisiveCount: 0,
       acceptedCount: 0,
       dispositions: countDispositions(attempts),
-      reason: "claim is already resolved — council pass is stale",
+      reason: "claim is already resolved — council settlement aborted",
       acceptedSlugs: [],
       ballot: [],
     };
   }
 
-  if (claimState === "paused") {
+  if (opts?.claimState === "paused") {
     return {
       action: "abort_paused",
-      quorum: normalizeQuorum(quorumRaw),
+      quorum: 0,
       decisiveCount: 0,
       acceptedCount: 0,
       dispositions: countDispositions(attempts),
@@ -418,16 +462,38 @@ export function evaluateQuorum(
     };
   }
 
+  const dep = dispositions.dependency_failure;
+  const paused = dispositions.paused;
+  const reasonParts = [
+    `below quorum: ${decisiveCount} decisive < ${quorum}`,
+    dispositions.invalid ? `${dispositions.invalid} invalid` : null,
+    dispositions.stale ? `${dispositions.stale} stale` : null,
+    dispositions.duplicated ? `${dispositions.duplicated} duplicated` : null,
+    dispositions.cancelled ? `${dispositions.cancelled} cancelled` : null,
+    paused ? `${paused} paused` : null,
+    dep ? `${dep} dependency_failure` : null,
+  ].filter(Boolean);
+
   return {
     action: "fallback_solo",
     quorum,
     decisiveCount,
     acceptedCount: ballot.length,
     dispositions,
-    reason: `council quorum not met (${decisiveCount}/${quorum} decisive votes) — falling back to solo oracle`,
+    reason: reasonParts.join("; "),
     acceptedSlugs,
     ballot,
   };
+}
+
+/** True when the oracle should settle with its own evidence (not abort). */
+export function shouldFallbackSolo(evaluation: QuorumEvaluation): boolean {
+  return evaluation.action === "fallback_solo";
+}
+
+/** True when council tally is authoritative for this settlement. */
+export function shouldUseCouncil(evaluation: QuorumEvaluation): boolean {
+  return evaluation.action === "use_council";
 }
 
 /** Minimal shape of a claim as read from chain for joinability selection. */
@@ -500,3 +566,8 @@ export function selectJoinableClaims(
   }
   return out;
 }
+
+export {
+  claimStatementDigest,
+  type ClaimStatementInput,
+} from "../../agents/council/shared/peer-reasoning";

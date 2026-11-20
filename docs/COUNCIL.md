@@ -16,6 +16,7 @@ The point isn't to find a single "best" trader. It's the opposite: by giving ten
 - [Decision pipeline](#decision-pipeline)
 - [Self-resolving settlement](#self-resolving-settlement)
 - [Rate-limit strategy](#rate-limit-strategy)
+  - [Peer reasoning cache binding to claim statement digest](#peer-reasoning-cache-binding-to-claim-statement-digest)
 - [Local setup](#local-setup)
 - [Production deploy](#production-deploy)
 - [Configuration reference](#configuration-reference)
@@ -221,6 +222,19 @@ Rule-based personas (`contrarian`, `whale-follow`) and out-of-category specialis
 The market-creator can buy council opinions before opening a market via `POST /api/council/preflight`. Those preflight calls pay into each persona's wallet just like settlement votes do.
 
 When `COUNCIL_PEER_READS=1`, each buyer persona pays selected seller personas through `GET /api/council/reasoning`, so revenue lands directly in the seller persona's wallet and appears on `/revenue`.
+
+### Peer reasoning cache binding to claim statement digest
+
+Peer reasoning cache entries are cryptographically bound to the claim's statement digest (`claimStatementDigest`):
+
+1. **Statement wording & source commitment:**
+   - The digest hashes the statement wording (`question`, `creatorPosition`, `counterPosition`) and source commitments (`resolutionUrl`, `settlementRule`, `contextHash`).
+   - Any change to wording or resolution source produces a new digest, invalidating existing cache entries and triggering fresh reasoning without serving stale rationale.
+2. **Independent claim caching:**
+   - Cache entries are keyed by `${claimId}:${buyerSlug}:${statementDigest}` (in agent memory) and `${claimId}:${slug}:${statementDigest}` (in the `/api/council/reasoning` endpoint cache).
+   - Invalidation for one claim never bleeds into or invalidates entries for unrelated claims.
+3. **Quorum verification (`lib/council/quorum.ts`):**
+   - Quorum evaluation checks `VoteAttemptInput.statementDigest` against `expectedStatementDigest`. If wording or commitments change between vote generation and tally, the attempt is classified as `stale`, preventing quorum settlement on mismatched statements.
 
 ---
 
