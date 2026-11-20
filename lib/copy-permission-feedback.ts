@@ -158,17 +158,26 @@ export function buildCopyPermissionFeedback(
 
   // 1. Loading
   if (input.loading || input.permission === undefined) {
-    return emptyFeedback("loading", "Querying on-chain allowance and policy bounds.");
+    return emptyFeedback(
+      "loading",
+      "Querying on-chain allowance and policy bounds.",
+    );
   }
 
   // 2. Disconnected
   if (input.disconnected) {
-    return emptyFeedback("disconnected", "Wallet is disconnected. Connect owner wallet to view or manage execution permissions.");
+    return emptyFeedback(
+      "disconnected",
+      "Wallet is disconnected. Connect owner wallet to view or manage execution permissions.",
+    );
   }
 
   // 3. Not Found
   if (input.permission === null) {
-    return emptyFeedback("invalid", "No copy execution permission found for this identifier.");
+    return emptyFeedback(
+      "invalid",
+      "No copy execution permission found for this identifier.",
+    );
   }
 
   const p = input.permission;
@@ -184,10 +193,14 @@ export function buildCopyPermissionFeedback(
     weeklyCapAtomic = parseUsdcAtomic(p.weeklyCapUsdc);
     totalOpenExposureAtomic = parseUsdcAtomic(p.totalOpenExposureUsdc);
   } catch {
-    return emptyFeedback("invalid", "Permission defines malformed numeric financial bounds.", {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-    });
+    return emptyFeedback(
+      "invalid",
+      "Permission defines malformed numeric financial bounds.",
+      {
+        permissionId: p.permissionId,
+        ownerWallet: p.ownerWallet,
+      },
+    );
   }
 
   // Connected wallet mismatch
@@ -196,10 +209,14 @@ export function buildCopyPermissionFeedback(
     input.connectedWallet !== null &&
     input.connectedWallet.trim() !== p.ownerWallet.trim()
   ) {
-    return emptyFeedback("disconnected", "Connected wallet does not match permission owner.", {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-    });
+    return emptyFeedback(
+      "disconnected",
+      "Connected wallet does not match permission owner.",
+      {
+        permissionId: p.permissionId,
+        ownerWallet: p.ownerWallet,
+      },
+    );
   }
 
   // 4. Invalid policy check
@@ -210,40 +227,52 @@ export function buildCopyPermissionFeedback(
     now,
   );
   if (validationError) {
-    return emptyFeedback("invalid", `Policy fails contract constraints: ${validationError}`, {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-      executionAgentId: p.executionAgentId,
-      signalAgentId: p.signalAgentId,
-    });
+    return emptyFeedback(
+      "invalid",
+      `Policy fails contract constraints: ${validationError}`,
+      {
+        permissionId: p.permissionId,
+        ownerWallet: p.ownerWallet,
+        executionAgentId: p.executionAgentId,
+        signalAgentId: p.signalAgentId,
+      },
+    );
   }
 
   // 5. Revoked
   const isRevoked = p.status === "revoked";
   if (isRevoked) {
-    return emptyFeedback("revoked", "Copy execution permission has been revoked by the owner.", {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-      executionAgentId: p.executionAgentId,
-      signalAgentId: p.signalAgentId,
-      isRevoked: true,
-      isTokenConfigured: true,
-      isSpenderConfigured: true,
-    });
+    return emptyFeedback(
+      "revoked",
+      "Copy execution permission has been revoked by the owner.",
+      {
+        permissionId: p.permissionId,
+        ownerWallet: p.ownerWallet,
+        executionAgentId: p.executionAgentId,
+        signalAgentId: p.signalAgentId,
+        isRevoked: true,
+        isTokenConfigured: true,
+        isSpenderConfigured: true,
+      },
+    );
   }
 
   // 6. Global or permission pause
   const isPaused = Boolean(input.globalPaused || p.status === "paused");
   if (isPaused) {
-    return emptyFeedback("paused", "Copy trading execution is currently paused.", {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-      executionAgentId: p.executionAgentId,
-      signalAgentId: p.signalAgentId,
-      isPaused: true,
-      isTokenConfigured: true,
-      isSpenderConfigured: true,
-    });
+    return emptyFeedback(
+      "paused",
+      "Copy trading execution is currently paused.",
+      {
+        permissionId: p.permissionId,
+        ownerWallet: p.ownerWallet,
+        executionAgentId: p.executionAgentId,
+        signalAgentId: p.signalAgentId,
+        isPaused: true,
+        isTokenConfigured: true,
+        isSpenderConfigured: true,
+      },
+    );
   }
 
   // 7. Expired
@@ -263,9 +292,15 @@ export function buildCopyPermissionFeedback(
 
   // Configured token / spender comparison
   const expectedToken = (input.configuredUsdc ?? getUsdcSacId())?.trim();
-  const expectedSpender = (input.configuredSpender ?? configuredSpender())?.trim();
-  const isTokenConfigured = expectedToken ? p.spendPermission.token.trim() === expectedToken : true;
-  const isSpenderConfigured = expectedSpender ? p.spendPermission.spender.trim() === expectedSpender : true;
+  const expectedSpender = (
+    input.configuredSpender ?? configuredSpender()
+  )?.trim();
+  const isTokenConfigured = expectedToken
+    ? p.spendPermission.token.trim() === expectedToken
+    : true;
+  const isSpenderConfigured = expectedSpender
+    ? p.spendPermission.spender.trim() === expectedSpender
+    : true;
 
   if (!isTokenConfigured) {
     return emptyFeedback(
@@ -313,35 +348,49 @@ export function buildCopyPermissionFeedback(
   let isStale = false;
   if (input.freshness) {
     if (input.freshness.isStale) isStale = true;
-    else if (input.freshness.ttlMs && now - input.freshness.timestamp > input.freshness.ttlMs) {
+    else if (
+      input.freshness.ttlMs &&
+      now - input.freshness.timestamp > input.freshness.ttlMs
+    ) {
       isStale = true;
     }
   }
 
   // 10. Live on-chain allowance and balance verification
-  const onchainAllowance = input.onchainAllowanceAtomic !== undefined ? input.onchainAllowanceAtomic : null;
-  const onchainBalance = input.onchainBalanceAtomic !== undefined ? input.onchainBalanceAtomic : null;
+  const onchainAllowance =
+    input.onchainAllowanceAtomic !== undefined
+      ? input.onchainAllowanceAtomic
+      : null;
+  const onchainBalance =
+    input.onchainBalanceAtomic !== undefined
+      ? input.onchainBalanceAtomic
+      : null;
   const signedAllowance = p.spendPermission.allowanceAtomic;
   const spentInPeriod = input.spentInPeriodAtomic ?? 0n;
 
-  const hasSufficientAllowance = onchainAllowance !== null && onchainAllowance >= maxPerPositionAtomic;
-  const hasSufficientBalance = onchainBalance === null || onchainBalance >= maxPerPositionAtomic;
+  const hasSufficientAllowance =
+    onchainAllowance !== null && onchainAllowance >= maxPerPositionAtomic;
+  const hasSufficientBalance =
+    onchainBalance === null || onchainBalance >= maxPerPositionAtomic;
 
-  const remaining = onchainAllowance !== null && onchainAllowance > spentInPeriod
-    ? onchainAllowance - spentInPeriod
-    : 0n;
+  const remaining =
+    onchainAllowance !== null && onchainAllowance > spentInPeriod
+      ? onchainAllowance - spentInPeriod
+      : 0n;
 
   let status: CopyPermissionStatus = "ready";
   let detail = "Active execution permission backed by contract allowance.";
 
   if (isStale) {
     status = "stale";
-    detail = "Permission or on-chain allowance snapshot may be stale; refresh to confirm latest ledger state.";
+    detail =
+      "Permission or on-chain allowance snapshot may be stale; refresh to confirm latest ledger state.";
   } else if (!hasSufficientAllowance) {
     status = "invalid";
-    detail = onchainAllowance === 0n
-      ? "On-chain USDC allowance is zero; the spender cannot execute copies until allowance is raised."
-      : "On-chain USDC allowance is lower than the per-position bound.";
+    detail =
+      onchainAllowance === 0n
+        ? "On-chain USDC allowance is zero; the spender cannot execute copies until allowance is raised."
+        : "On-chain USDC allowance is lower than the per-position bound.";
   } else if (!hasSufficientBalance) {
     status = "invalid";
     detail = "On-chain USDC balance is lower than the per-position bound.";
@@ -359,10 +408,12 @@ export function buildCopyPermissionFeedback(
     dailyCapAtomic: dailyCapAtomic.toString(),
     weeklyCapAtomic: weeklyCapAtomic.toString(),
     totalOpenExposureAtomic: totalOpenExposureAtomic.toString(),
-    maxRealizedLossAtomic: p.maxRealizedLossUsdc ? parseUsdcAtomic(p.maxRealizedLossUsdc).toString() : null,
-    signedAllowanceAtomic: signedAllowanceAtomic,
-    onchainAllowanceAtomic: onchainAllowance === null ? null : onchainAllowance.toString(),
-    onchainBalanceAtomic: onchainBalance === null ? null : onchainBalance.toString(),
+    maxRealizedLossAtomic: p.maxRealizedLossAtomic,
+    signedAllowanceAtomic: signedAllowance.toString(),
+    onchainAllowanceAtomic:
+      onchainAllowance === null ? null : onchainAllowance.toString(),
+    onchainBalanceAtomic:
+      onchainBalance === null ? null : onchainBalance.toString(),
     remainingAllowanceAtomic: remaining.toString(),
     hasSufficientAllowance,
     hasSufficientBalance,
@@ -377,7 +428,6 @@ export function buildCopyPermissionFeedback(
     minConfidenceBps: p.minConfidenceBps ?? null,
     minPayoutBps: p.minPayoutBps ?? null,
     expiresAt: p.expiresAt,
-    createdAt: p.createdAt ?? null,
   };
 }
 
@@ -444,4 +494,21 @@ export function buildRevokeConfirmationCopy(
     confirmLabel: "Revoke permission",
     cancelLabel: "Cancel",
   };
+}
+
+export async function evaluateCopyPermissionOnchain(
+  permission: CopyPermission,
+): Promise<CopyPermissionFeedbackView> {
+  const onchainAllowanceAtomic = await getUsdcAllowanceUnits(
+    permission.ownerWallet,
+    permission.spendPermission.spender,
+  );
+  const onchainBalanceAtomic = await getUsdcBalanceUnits(
+    permission.ownerWallet,
+  );
+  return buildCopyPermissionFeedback({
+    permission,
+    onchainAllowanceAtomic,
+    onchainBalanceAtomic,
+  });
 }

@@ -548,3 +548,51 @@ export function explainCopySkipReason(reason: CopySkipReason): string {
       return "Unknown skip reason.";
   }
 }
+
+export interface CopyExposureReservation {
+  reservationId: string;
+  permissionId: string;
+  permissionRevision: string;
+  ownerWallet: string;
+  sourcePositionId: string;
+  stakeAtomic: bigint;
+  status: "held" | "settled" | "released";
+  createdAt: number;
+}
+
+export type CopyExposureReservationDecision =
+  | { ok: true }
+  | {
+      ok: false;
+      reason:
+        | "permission_revision_mismatch"
+        | "permission_revoked"
+        | "permission_paused"
+        | "permission_expired"
+        | "daily_cap"
+        | "weekly_cap"
+        | "open_exposure_cap";
+    };
+
+export function copyPermissionRevision(permission: CopyPermission): string {
+  return permission.signedPolicyHash;
+}
+
+export function evaluateCopyExposureReservation(args: {
+  permission: CopyPermission;
+  permissionRevision: string;
+  stakeAtomic: bigint;
+  usage: { dailyUsedAtomic: bigint; weeklyUsedAtomic: bigint; openExposureAtomic: bigint };
+  nowMs: number;
+}): CopyExposureReservationDecision {
+  const { permission, permissionRevision, stakeAtomic, usage, nowMs } = args;
+  if (permissionRevision !== copyPermissionRevision(permission)) return { ok: false, reason: "permission_revision_mismatch" };
+  if (permission.status === "revoked") return { ok: false, reason: "permission_revoked" };
+  if (permission.status === "paused") return { ok: false, reason: "permission_paused" };
+  if (!Number.isSafeInteger(nowMs) || nowMs >= permission.expiresAt) return { ok: false, reason: "permission_expired" };
+  if (stakeAtomic <= 0n) return { ok: false, reason: "daily_cap" };
+  if (usage.dailyUsedAtomic + stakeAtomic > parseUsdcAtomic(permission.dailyCapUsdc)) return { ok: false, reason: "daily_cap" };
+  if (usage.weeklyUsedAtomic + stakeAtomic > parseUsdcAtomic(permission.weeklyCapUsdc)) return { ok: false, reason: "weekly_cap" };
+  if (usage.openExposureAtomic + stakeAtomic > parseUsdcAtomic(permission.totalOpenExposureUsdc)) return { ok: false, reason: "open_exposure_cap" };
+  return { ok: true };
+}
