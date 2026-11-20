@@ -5,6 +5,13 @@
  * and who staked on them) filtered by a subscription the caller names. Nothing
  * here can move funds, and requiring a signature to read your own queue would buy
  * privacy that the chain does not offer anyway.
+ *
+ * Response shape:
+ *  - `mirrors`        — pending mirrors computed from available sources
+ *  - `following`      — basket IDs the subscriber follows (empty if unavailable)
+ *  - `status`         — `"no_subscriptions" | "complete" | "incomplete"`
+ *  - `complete`       — `true` when every required source succeeded
+ *  - `failureSummary` — bounded failure summary when `complete === false`, else `null`
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -12,8 +19,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { apiError } from "@/lib/api/errors";
 import { clientIpFrom } from "@/lib/api/origin";
 import { authorizeRequest } from "@/lib/api/policy";
-import { listBasketSubscriptions } from "@/lib/db";
-import { pendingMirrorsFor } from "@/lib/server/mirror-queue";
+import { pendingMirrorQueueFor } from "@/lib/server/mirror-queue";
 import { parseAddressParam } from "@/lib/server/api-validation";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +32,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }
 
-  // Stellar str111, checked with StrKey and used verbatim. The
+  // Stellar strkey, checked with StrKey and used verbatim. The
   // `/^0x[0-9a-fA-F]{40}$/` this used to carry did not just skip normalisation —
   // it rejected every real Stellar address, so this endpoint 400'd for all callers.
   const subscriber = parseAddressParam(rawSubscriber);
@@ -35,13 +41,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(err.body, { status: err.status });
   }
 
-  const [mirrors, subscriptions] = await Promise.all([
-    pendingMirrorsFor(subscriber).catch(() => []),
-    listBasketSubscriptions(subscriber).catch(() => []),
-  ]);
+  const result = await pendingMirrorQueueFor(subscriber);
 
   return NextResponse.json(
-    { mirrors, following: subscriptions },
+    {
+      mirrors: result.mirrors,
+      following: result.following,
+      status: result.status,
+      complete: result.complete,
+      failureSummary: result.failureSummary,
+    },
     { headers: { "cache-control": "no-store" } },
   );
 }
