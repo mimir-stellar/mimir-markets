@@ -204,6 +204,8 @@ flowchart LR
     J -. quorum / fallback .-> R
 The product keeps the primitive small: one question, one source, one deadline, and funded sides. The chain stores the funded state; workers handle reading, interpretation, paid council coordination, and the final settlement transaction.
 
+The canonical claim statement is available from `get_claim_statement` (aliased as `export_claim_statement`); `get_claim_statement_digest` returns just the digest. It exports the question, the immutable `context_hash` as `source_commitment`, the deadline, and a version-1 SHA-256 digest. The digest preimage is `b"mimir.claim.statement.v1\0" || u32_be(question byte length) || question UTF-8 bytes || source_commitment (32 bytes) || u64_be(deadline)`. Clients can recompute it from the exported fields; no mutable `resolution_url`, settlement state, or fee data is included.
+
 The settlement lifecycle
 mermaid
 

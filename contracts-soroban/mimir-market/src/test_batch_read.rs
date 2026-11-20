@@ -482,9 +482,15 @@ fn withdrawable_batch_output_order_mirrors_input() {
     let c = f.user(10 * USDC);
 
     // Park distinct balances on each address.
-    f.client().add_withdrawable(&a, &(1 * USDC));
-    f.client().add_withdrawable(&b, &(2 * USDC));
-    f.client().add_withdrawable(&c, &(3 * USDC));
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::add_withdrawable(&f.env, &a, 1 * USDC);
+    });
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::add_withdrawable(&f.env, &b, 2 * USDC);
+    });
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::add_withdrawable(&f.env, &c, 3 * USDC);
+    });
 
     let addrs = sdk_addrs(&f, &[c.clone(), a.clone(), b.clone()]);
     let out = f.client().get_withdrawable_batch(&addrs);
@@ -501,7 +507,9 @@ fn withdrawable_batch_unknown_addresses_return_zero() {
     let known = f.user(10 * USDC);
     let unknown = f.user(10 * USDC);
 
-    f.client().add_withdrawable(&known, &(5 * USDC));
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::add_withdrawable(&f.env, &known, 5 * USDC);
+    });
 
     let addrs = sdk_addrs(&f, &[unknown.clone(), known.clone(), unknown.clone()]);
     let out = f.client().get_withdrawable_batch(&addrs);
@@ -566,8 +574,12 @@ fn withdrawable_batch_matches_individual_get_withdrawable() {
     let b = f.user(10 * USDC);
     let c = f.user(10 * USDC);
 
-    f.client().add_withdrawable(&a, &(7 * USDC));
-    f.client().add_withdrawable(&c, &(11 * USDC));
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::add_withdrawable(&f.env, &a, 7 * USDC);
+    });
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::add_withdrawable(&f.env, &c, 11 * USDC);
+    });
 
     let addrs = sdk_addrs(&f, &[a.clone(), b.clone(), c.clone()]);
     let out = f.client().get_withdrawable_batch(&addrs);

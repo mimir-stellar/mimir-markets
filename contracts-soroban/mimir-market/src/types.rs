@@ -277,6 +277,22 @@ pub struct Claim {
     pub fees: FeeSnapshot,
 }
 
+/// Canonical export of the fields that define what a claim asks.
+/// `source_commitment` is the claim's on-chain `context_hash`: the bytes
+/// the creator committed to at creation, not the mutable resolution URL.
+///
+/// `digest` commits to exactly the three public inputs above. Its encoding is
+/// documented on `util::claim_statement_digest` so any client can recompute it
+/// from the exported fields without trusting the contract's answer.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimStatement {
+    pub question: String,
+    pub source_commitment: BytesN<32>,
+    pub deadline: u64,
+    pub digest: BytesN<32>,
+}
+
 // ── Create parameters ────────────────────────────────────────────────────────
 
 /// Mirrors `MimirV2.CreateParams`. Grouped into a struct for the same reason the
@@ -431,4 +447,7 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    /// An ownership or governance action was refused while the market is
+    /// paused, so pause cannot be used to strand already-committed funds.
+    Paused = 48,
 }
