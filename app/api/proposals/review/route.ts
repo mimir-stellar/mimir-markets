@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api/policy";
 import { apiError } from "@/lib/api/errors";
 import { getDb, isDbConfigured } from "@/lib/db";
+import { validateSignedWindow } from "@/lib/signed-window";
 import {
   claimProposalForReview,
   completeProposalReview,
@@ -20,6 +21,7 @@ import {
   markStaleProposals,
   updateProposalReviewStatus,
   listProposalsForReview,
+  getProposalBacklogTriage,
   REVIEW_STATUSES,
   type ReviewStatus,
 } from "@/lib/db";
@@ -57,10 +59,31 @@ async function requireAuth(request: NextRequest): Promise<NextResponse | null> {
     presentedSecret: presented,
     expectedSecret: process.env.CRON_SECRET,
   });
-  if (auth.allowed) return null;
-  const error = auth.error;
-  if (!error) return errorResponse("Unauthorized", 401);
-  return NextResponse.json(error.body, { status: error.status, headers: error.headers });
+  if (!auth.allowed) {
+    const error = auth.error;
+    if (!error) return errorResponse("Unauthorized", 401);
+    return NextResponse.json(error.body, { status: error.status, headers: error.headers });
+  }
+
+  // Validate signed window if window headers or query parameters are present
+  const nonce = request.headers.get("x-mimir-nonce") ?? request.headers.get("x-nonce");
+  const expiresAtHeader = request.headers.get("x-mimir-expires-at") ?? request.headers.get("x-expires-at");
+  const url = new URL(request.url);
+  const nonceParam = url.searchParams.get("nonce");
+  const expiresAtParam = url.searchParams.get("expiresAt") ?? url.searchParams.get("expires_at");
+
+  const effectiveNonce = nonce ?? nonceParam;
+  const effectiveExpiresAtRaw = expiresAtHeader ?? expiresAtParam;
+
+  if (effectiveNonce !== null || effectiveExpiresAtRaw !== null) {
+    const expiresAt = effectiveExpiresAtRaw ? Number(effectiveExpiresAtRaw) : Number.NaN;
+    const windowResult = validateSignedWindow(effectiveNonce, expiresAt);
+    if (!windowResult.ok) {
+      return json({ error: { message: windowResult.message, code: windowResult.code, field: windowResult.field } }, 400);
+    }
+  }
+
+  return null;
 }
 
 function parseIntParam(raw: string | null): number | undefined {
@@ -79,9 +102,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   const { searchParams } = new URL(request.url);
-  const statusRaw = searchParams.get("status");
+  const exportType = searchParams.get("export");
+  const isTriage =
+    exportType === "triage" ||
+    searchParams.get("view") === "triage" ||
+    searchParams.get("triage") === "true";
+
   const limitRaw = searchParams.get("limit");
   const offsetRaw = searchParams.get("offset");
+  const limit = parseIntParam(limitRaw);
+  const offset = parseIntParam(offsetRaw);
+
+  if (isTriage) {
+    try {
+      const triageExport = await getProposalBacklogTriage({ limit, offset });
+      return json(triageExport);
+    } catch (err) {
+      console.error("[proposals/review] GET triage error:", err);
+      return internalErrorResponse(500);
+    }
+  }
+
+  const statusRaw = searchParams.get("status");
 
   let status: ReviewStatus | null = null;
   if (statusRaw !== null && statusRaw !== "") {
@@ -90,9 +132,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
     status = statusRaw as ReviewStatus;
   }
-
-  const limit = parseIntParam(limitRaw);
-  const offset = parseIntParam(offsetRaw);
 
   try {
     const result = await listProposalsForReview({ status, limit, offset });
@@ -128,7 +167,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     reviewer?: string;
     approve?: boolean;
     reason?: string;
+    nonce?: string;
+    expiresAt?: number;
+    expires_at?: number;
   };
+
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    ("nonce" in body || "expiresAt" in body || "expires_at" in body)
+  ) {
+    const b = body as Record<string, unknown>;
+    const windowResult = validateSignedWindow(b.nonce, b.expiresAt ?? b.expires_at);
+    if (!windowResult.ok) {
+      return json({ error: { message: windowResult.message, code: windowResult.code, field: windowResult.field } }, 400);
+    }
+  }
 
   if (!action) {
     return errorResponse("Missing action", 400);

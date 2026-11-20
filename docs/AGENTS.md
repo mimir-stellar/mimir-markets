@@ -34,6 +34,7 @@ deploy/contract-artifacts.manifest.json	Pinned Wasm digests for fail-closed prov
 lib/ops/artifact-provenance.ts	Offline SHA-256 artifact provenance verifier
 lib/ops/cache-backup.ts	Offline read-index cache-backup verifier (checksum + privacy, no network)
 lib/ops/dependency-audit.ts	Fail-closed npm audit triage (production high/critical, privacy-safe)
+lib/ops/proposal-triage.ts	Operator proposal backlog triage export (grouped by age & blocking reason, privacy-safe)
 lib/server/read-index-backup.ts	DB-backed read-index dump / verified restore (restore fingerprint check)
 scripts/verify-artifact-provenance.ts	CLI: verify or --write-pins contract artifacts
 scripts/verify-cache-backup.ts	CLI: offline cache-backup verification (npm run verify:cache-backup)
@@ -81,6 +82,7 @@ environment behavior.
 | `deploy/contract-artifacts.manifest.json` | Pinned Wasm digests for fail-closed provenance checks |
 | `lib/ops/artifact-provenance.ts` | Offline SHA-256 artifact provenance verifier |
 | `lib/ops/cache-backup.ts` | Offline read-index cache-backup verifier (checksum + privacy, no network) |
+| `lib/ops/proposal-triage.ts` | Operator proposal backlog triage export (grouped by age & blocking reason, privacy-safe) |
 | `lib/server/read-index-backup.ts` | DB-backed read-index dump / verified restore (restore fingerprint check) |
 | `scripts/verify-artifact-provenance.ts` | CLI: verify or `--write-pins` contract artifacts |
 | `scripts/verify-cache-backup.ts` | CLI: offline cache-backup verification (`npm run verify:cache-backup`) |
@@ -435,3 +437,21 @@ that change reviewable:
 - Every new table or index must ship with a `schema_migrations` registration; a
   schema with no registered migration fails `MIGRATION_UNREGISTERED`.
 - Policy: [`docs/SCHEMA_SNAPSHOTS.md`](./SCHEMA_SNAPSHOTS.md).
+
+## Operator proposal backlog triage export
+
+The operator proposal backlog triage export (`GET /api/proposals/review?export=triage` or `GET /api/proposals/review/triage`) provides structured operational visibility into unresolved market creator proposals (`queued` and `in_review`).
+
+- **Access & Authentication**: Gated on the `internal_worker` tier with `CRON_SECRET` (`authorization: Bearer <CRON_SECRET>`). Unset secret refuses callers fail-closed.
+- **Signed Request Windows**: When freshness window parameters are provided (via `x-mimir-nonce` / `x-mimir-expires-at` headers or query parameters), the freshness window is validated using `validateSignedWindow` (valid nonce format, bounded within 5 minutes max TTL, not in the past).
+- **Grouping**:
+  - **By Age**: Unresolved proposals are categorized into standard age brackets: `under_1h` (< 3,600s), `1h_to_24h` (3,600s to 86,400s), and `over_24h` (> 86,400s).
+  - **By Blocking Reason**: Proposals are grouped by their explicit blocking reason (`blocked_by`), failure reason (`failure_reason`), or default to `unblocked`.
+  - **Cross Grouping**: `byAgeAndReason` cross-tabulates age bracket and blocking reason for rapid queue prioritization.
+- **Privacy Safeguards**:
+  - Private source text (`mode_rationale`, `context_pack_hash`, `preflight_verdict`) is strictly omitted from the export.
+  - Signing metadata and secrets (`nonce`, `expiresAt`, `signature`, credentials) are never echoed in the triage export.
+- **Bounding & Pagination**:
+  - `limit` (default 50, clamped between 1 and 200).
+  - `offset` (default 0, non-negative).
+

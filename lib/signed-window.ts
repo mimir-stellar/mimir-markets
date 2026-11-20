@@ -1,6 +1,6 @@
 /**
  * Freshness window for owner-signed authorisations (copy-trading grants and
- * revocations, basket subscriptions).
+ * revocations, basket subscriptions, and operator proposal review decisions).
  *
  * A signature over a message without a nonce or an expiry is a bearer token
  * that never dies: anyone who ever saw the request body can replay it. Every
