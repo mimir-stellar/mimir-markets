@@ -22,6 +22,11 @@ import {
   formatChartDay,
   MAX_TABLE_ROWS,
 } from "@/lib/performance-chart-rows";
+import {
+  verifyPortfolioPerformanceManifest,
+  type PortfolioPerformanceStatementManifest,
+} from "@/lib/portfolio-performance";
+import { formatAtomicUsdc } from "@/lib/usdc";
 
 export interface ChartPoint {
   timestamp: number;
@@ -56,6 +61,7 @@ export function PerformanceChart({
   emptyMessage = "No settled results in this window yet.",
   invalidMessage = "Performance data is unavailable.",
   height = 180,
+  statementManifest,
 }: {
   points: ChartPoint[];
   /** The line drawn as "flat": starting NAV, or zero for cumulative P&amp;L. */
@@ -65,6 +71,7 @@ export function PerformanceChart({
   emptyMessage?: string;
   invalidMessage?: string;
   height?: number;
+  statementManifest?: PortfolioPerformanceStatementManifest;
 }) {
   const gradientId = useId();
   const tableId = useId();
@@ -72,6 +79,10 @@ export function PerformanceChart({
   const [hover, setHover] = useState<number | null>(null);
   const [showData, setShowData] = useState(false);
   const pathRef = useRef<SVGPathElement>(null);
+  const manifestVerification = useMemo(
+    () => (statementManifest ? verifyPortfolioPerformanceManifest(statementManifest) : null),
+    [statementManifest],
+  );
 
   const allSeries = series && series.length > 0 ? series : points ? [{ points }] : [];
   const primaryCount = allSeries[0]?.points.length ?? 0;
@@ -279,6 +290,25 @@ export function PerformanceChart({
                 Showing the last {table.rows.length} of {table.total} points.
               </p>
             )}
+          </div>
+        )}
+        {statementManifest && manifestVerification && (
+          <div
+            data-testid="statement-manifest-summary"
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-pv-muted"
+          >
+            <span className={manifestVerification.ok ? "text-pv-accent" : "text-pv-danger"}>
+              {manifestVerification.ok ? "Statement verified" : "Statement mismatch"}
+            </span>
+            <span>
+              Realized: {formatAtomicUsdc(manifestVerification.recomputedTotals.realizedPnlAtomic)} {statementManifest.priceConventions.asset}
+            </span>
+            <span>
+              Coverage: {statementManifest.coverage.settledPositions} settled / {statementManifest.coverage.totalPositions} total
+            </span>
+            <span title={statementManifest.digest}>
+              Digest: {statementManifest.digest.slice(0, 12)}…
+            </span>
           </div>
         )}
       </div>
