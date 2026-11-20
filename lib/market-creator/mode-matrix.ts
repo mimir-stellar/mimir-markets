@@ -124,6 +124,23 @@ export function defaultCreatorPolicy(
   };
 }
 
+export type CreatorDecisionCode =
+  | "category_budget_exhausted"
+  | "source_quality_rejected"
+  | "duplicate"
+  | "global_exposure_exceeded"
+  | "active_market_cap_exceeded"
+  | "category_disabled"
+  | "invalid_odds"
+  | "insufficient_liquidity"
+  | "unsupported_mode"
+  | "created"
+  | "review"
+  | "open_duel_invite"
+  | "run_quota"
+  | "mode_quota"
+  | "creator_quota";
+
 export interface ModeDecision {
   settlementMode: SettlementMode;
   modifiers: ProductModifier[];
@@ -132,6 +149,8 @@ export interface ModeDecision {
   rationale: string;
   /** Reason a proposal was downgraded or skipped. */
   blockedBy?: string;
+  /** Distinct machine-readable decision code for creator reports. */
+  decisionCode: CreatorDecisionCode;
 }
 
 /**
@@ -152,6 +171,7 @@ export function decideMode(
     return {
       ...base,
       disposition: "skip",
+      decisionCode: "source_quality_rejected",
       rationale: "below the preflight quality bar",
       blockedBy: `quality ${candidate.qualityScore} < ${policy.minQualityScore}`,
     };
@@ -160,6 +180,7 @@ export function decideMode(
     return {
       ...base,
       disposition: "skip",
+      decisionCode: "active_market_cap_exceeded",
       rationale: "active market cap reached",
       blockedBy: `${candidate.activeMarkets}/${policy.maxActiveMarkets} active`,
     };
@@ -168,6 +189,7 @@ export function decideMode(
     return {
       ...base,
       disposition: "skip",
+      decisionCode: "global_exposure_exceeded",
       rationale: "would exceed the agent's open exposure cap",
       blockedBy: `${candidate.openExposureUsdc + candidate.stakeUsdc} > ${policy.maxOpenExposureUsdc}`,
     };
@@ -184,9 +206,14 @@ export function decideMode(
       stakeUsdc: candidate.stakeUsdc,
     });
     if (!categoryGate.allowed) {
+      const decisionCode: CreatorDecisionCode =
+        categoryGate.reason === "category_disabled"
+          ? "category_disabled"
+          : "category_budget_exhausted";
       return {
         ...base,
         disposition: "skip",
+        decisionCode,
         rationale: "would exceed the creator's per-category cap",
         blockedBy: categoryGate.blockedBy,
       };
@@ -202,11 +229,13 @@ export function decideMode(
           ? {
               ...base,
               disposition: "create" as ProposalDisposition,
+              decisionCode: "created" as CreatorDecisionCode,
               rationale: `private duel against ${candidate.targetAgentId}`,
             }
           : {
               ...base,
               disposition: "open_duel_invite" as ProposalDisposition,
+              decisionCode: "open_duel_invite" as CreatorDecisionCode,
               rationale: "no named opponent — published as an open duel invitation",
             };
 
@@ -216,6 +245,7 @@ export function decideMode(
           return {
             ...base,
             disposition: "skip" as ProposalDisposition,
+            decisionCode: "invalid_odds" as CreatorDecisionCode,
             rationale: "fixed odds needs a total return above 1x",
             blockedBy: `challengerPayoutBps ${bps}`,
           };
@@ -227,6 +257,7 @@ export function decideMode(
           return {
             ...base,
             disposition: "skip" as ProposalDisposition,
+            decisionCode: "insufficient_liquidity" as CreatorDecisionCode,
             rationale: "insufficient liquidity to back the posted odds",
             blockedBy: `needs ${profitPerFullStake}, has ${candidate.availableLiquidityUsdc}`,
           };
@@ -234,6 +265,7 @@ export function decideMode(
         return {
           ...base,
           disposition: "create" as ProposalDisposition,
+          decisionCode: "created" as CreatorDecisionCode,
           rationale: `creator-backed ${(bps / 10_000).toFixed(2)}x total return`,
         };
       }
@@ -242,6 +274,7 @@ export function decideMode(
         return {
           ...base,
           disposition: "skip" as ProposalDisposition,
+          decisionCode: "unsupported_mode" as CreatorDecisionCode,
           rationale: "squad markets need the v2 escrow",
           blockedBy: `needs contract v${SETTLEMENT_MODE_POLICY.squad_pool.requiresContractVersion}`,
         };
@@ -252,6 +285,7 @@ export function decideMode(
           ...base,
           settlementMode: "pool" as SettlementMode,
           disposition: "create" as ProposalDisposition,
+          decisionCode: "created" as CreatorDecisionCode,
           rationale: "public multi-participant topic",
         };
     }
@@ -269,6 +303,7 @@ export function decideMode(
     return {
       ...withModifiers,
       disposition: "review",
+      decisionCode: "review",
       rationale: `${withModifiers.rationale} (shadow mode: held for review)`,
     };
   }
@@ -357,6 +392,8 @@ export interface RunSlot {
 export interface AdmissionResult {
   admitted: boolean;
   reason?: "duplicate" | "category_quota" | "mode_quota" | "creator_quota" | "run_quota";
+  /** Distinct machine-readable decision code exposing quota/duplication boundaries. */
+  decisionCode?: CreatorDecisionCode;
 }
 
 /**
@@ -373,25 +410,29 @@ export function admitToRun(
   maxPerRun = 5,
 ): AdmissionResult {
   if (isDuplicate(candidate.signature, accepted.map((slot) => slot.signature))) {
-    return { admitted: false, reason: "duplicate" };
+    return { admitted: false, reason: "duplicate", decisionCode: "duplicate" };
   }
-  if (accepted.length >= maxPerRun) return { admitted: false, reason: "run_quota" };
+  if (accepted.length >= maxPerRun) {
+    return { admitted: false, reason: "run_quota", decisionCode: "run_quota" };
+  }
   const inCategory = accepted.filter((slot) => slot.category === candidate.category).length;
   if (inCategory >= policy.maxPerCategoryPerRun) {
-    return { admitted: false, reason: "category_quota" };
+    return { admitted: false, reason: "category_quota", decisionCode: "category_budget_exhausted" };
   }
   // Mode and creator caps only apply when the slot declares them: an older caller
   // that supplies neither keeps its previous behaviour rather than being refused
   // by a field it does not know about.
   if (candidate.mode) {
     const inMode = accepted.filter((slot) => slot.mode === candidate.mode).length;
-    if (inMode >= policy.maxPerModePerRun) return { admitted: false, reason: "mode_quota" };
+    if (inMode >= policy.maxPerModePerRun) {
+      return { admitted: false, reason: "mode_quota", decisionCode: "mode_quota" };
+    }
   }
   if (candidate.creator) {
     const key = candidate.creator.toLowerCase();
     const byCreator = accepted.filter((slot) => slot.creator?.toLowerCase() === key).length;
     if (byCreator >= policy.maxPerCreatorPerRun) {
-      return { admitted: false, reason: "creator_quota" };
+      return { admitted: false, reason: "creator_quota", decisionCode: "creator_quota" };
     }
   }
   return { admitted: true };

@@ -385,6 +385,8 @@ export interface CategoryCapDecision {
   allowed: boolean;
   category?: string;
   reason?: CategoryCapBlockReason;
+  /** Distinct decision code for creator reports. */
+  decisionCode?: "category_budget_exhausted" | "category_disabled" | "invalid_state" | "invalid_stake" | "invalid_category" | "invalid_policy" | "approved";
   /** Which half of the cap refused, when a cap is what refused it. */
   limitedBy?: "markets" | "exposure";
   /** The effective cap that applied. */
@@ -485,6 +487,7 @@ export function checkCategoryCreatorCap(args: {
       ...decision,
       allowed: false,
       reason: "category_disabled",
+      decisionCode: "category_disabled",
       blockedBy: `category ${category} is disabled by an operational switch`,
     };
   }
@@ -494,6 +497,7 @@ export function checkCategoryCreatorCap(args: {
       allowed: false,
       reason: "cap_exceeded",
       limitedBy: "markets",
+      decisionCode: "category_budget_exhausted",
       blockedBy: `category ${category} already has ${args.openMarkets} open markets (cap ${cap.maxMarkets})`,
     };
   }
@@ -503,8 +507,12 @@ export function checkCategoryCreatorCap(args: {
       allowed: false,
       reason: "cap_exceeded",
       limitedBy: "exposure",
+      decisionCode: "category_budget_exhausted",
       blockedBy: `category ${category} exposure ${nextExposureUsdc} > cap ${cap.maxExposureUsdc}`,
     };
   }
-  return decision;
+  return {
+    ...decision,
+    decisionCode: "approved",
+  };
 }

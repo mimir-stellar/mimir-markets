@@ -1171,7 +1171,7 @@ async function run(): Promise<void> {
     });
     if (!exposureGate.allowed) {
       console.log(
-        `[market-creator] Exposure cap blocks further creates — ${exposureGate.blockedBy} ` +
+        `[market-creator] Exposure cap blocks further creates [decision_code: global_exposure_exceeded] — ${exposureGate.blockedBy} ` +
           `(policy max ${CREATOR_POLICY.maxOpenExposureUsdc} USDC).`,
       );
       break;
@@ -1199,7 +1199,11 @@ async function run(): Promise<void> {
       categoryEnabled: isCategoryEnabled(candidate.category),
     });
     if (!categoryGate.allowed) {
-      console.log(`[market-creator] Per-category cap blocks this candidate — ${categoryGate.blockedBy}`);
+      const decisionCode =
+        categoryGate.reason === "category_disabled"
+          ? "category_disabled"
+          : "category_budget_exhausted";
+      console.log(`[market-creator] Per-category cap blocks this candidate [decision_code: ${decisionCode}] — ${categoryGate.blockedBy}`);
       continue;
     }
 

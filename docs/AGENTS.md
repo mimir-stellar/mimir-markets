@@ -239,6 +239,26 @@ Bash
 - Sync/read-index changes must pass `npm run check:ledger-fixture`; see
   `docs/LEDGER_REPLAY.md` for artifact, secret, release, and rollback policy.
 
+## Market Creator Reporting & Decision Codes
+
+The market creator evaluates drafted candidate questions against deduplication, source quality, active market caps, global exposure caps, and per-category budget caps before on-chain creation.
+
+Creator reports expose category budget exhaustion distinctly from source-quality rejections through machine-readable decision codes:
+
+| Decision Code | Meaning | Outcome |
+| :--- | :--- | :--- |
+| `category_budget_exhausted` | The candidate's category budget or standing cap has been reached (either open market count or USDC exposure cap in `lib/market-creator/category-caps.ts`, or run-level category quota in `lib/market-creator/mode-matrix.ts`). | Skipped |
+| `source_quality_rejected` | Candidate failed source-quality checks: question/URL/deadline missing or invalid, crypto threshold failed sanity check (`cryptoThresholdReason`), or preflight quality score below `minQualityScore`. | Skipped |
+| `duplicate` | Candidate matched an existing open claim or another candidate within the same batch signature `(question\|resolutionUrl\|deadline)`. | Skipped |
+| `global_exposure_exceeded` | The creator's total open USDC exposure ceiling (`MAX_OPEN_EXPOSURE_USDC`) would be exceeded. | Skipped |
+| `active_market_cap_exceeded` | Total active market count has reached `MAX_ACTIVE_CLAIMS`. | Skipped |
+| `category_disabled` | Category disabled by operational switch (`lib/ops/flags.ts`). | Skipped |
+| `created` | Candidate passed all checks and is submitted or marked for creation. | Created |
+| `review` | Candidate passed checks but held for human review under shadow mode (`MARKET_CREATOR_AUTONOMOUS !== "1"`). | Review |
+| `open_duel_invite` | Candidate approved as an open invitation (no named opponent). | Invitation |
+
+All USDC calculations preserve exact arithmetic: equality at the cap (`openExposureUsdc + stakeUsdc === maxExposureUsdc`) is permitted, while exceeding by any amount is refused under `category_budget_exhausted` or `global_exposure_exceeded`.
+
 ## Node test workflow (must stay green on release)
 
 The release entry point is `npm run test:node`; `test:smoke` remains an alias

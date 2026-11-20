@@ -69,3 +69,65 @@ export function filterDuplicateCandidates<T extends CandidateLike>(
   }
   return out;
 }
+
+export interface DedupeEvaluationResult<T extends CandidateLike = CandidateLike> {
+  candidate: T;
+  allowed: boolean;
+  signature: string;
+  decisionCode: "approved" | "duplicate";
+  reason?: string;
+}
+
+/**
+ * Evaluate candidate duplication against already-seen signatures.
+ */
+export function evaluateCandidateDuplication<T extends CandidateLike>(
+  candidate: T,
+  seen: Set<string> = new Set(),
+): DedupeEvaluationResult<T> {
+  const signature = buildCandidateSignature(candidate);
+  if (seen.has(signature)) {
+    return {
+      candidate,
+      allowed: false,
+      signature,
+      decisionCode: "duplicate",
+      reason: `duplicate candidate signature: ${signature}`,
+    };
+  }
+  seen.add(signature);
+  return {
+    candidate,
+    allowed: true,
+    signature,
+    decisionCode: "approved",
+  };
+}
+
+/**
+ * Filter duplicates returning distinct decisions for dropped candidates.
+ */
+export function filterDuplicateCandidatesWithDecisions<T extends CandidateLike>(
+  candidates: readonly T[],
+  seen: Set<string> = new Set(),
+): {
+  approved: T[];
+  duplicates: Array<{ candidate: T; signature: string; decisionCode: "duplicate"; reason: string }>;
+} {
+  const approved: T[] = [];
+  const duplicates: Array<{ candidate: T; signature: string; decisionCode: "duplicate"; reason: string }> = [];
+  for (const candidate of candidates) {
+    const res = evaluateCandidateDuplication(candidate, seen);
+    if (res.allowed) {
+      approved.push(candidate);
+    } else {
+      duplicates.push({
+        candidate,
+        signature: res.signature,
+        decisionCode: "duplicate",
+        reason: res.reason ?? "duplicate candidate",
+      });
+    }
+  }
+  return { approved, duplicates };
+}

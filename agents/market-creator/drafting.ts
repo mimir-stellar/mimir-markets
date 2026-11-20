@@ -119,6 +119,112 @@ export async function draftClaimCandidates(
   return filterUnsafeCryptoThresholds(parsed);
 }
 
+export interface DraftEvaluationResult {
+  candidate: ClaimCandidate;
+  allowed: boolean;
+  decisionCode: "approved" | "source_quality_rejected";
+  reason?: string;
+}
+
+/**
+ * Evaluate a single candidate for source-quality checks.
+ *
+ * Verifies completeness (question, resolutionUrl, deadline), valid format,
+ * crypto threshold safety, and preflight quality score floor if provided.
+ */
+export function evaluateCandidateSourceQuality(
+  candidate: ClaimCandidate,
+  opts: { minQualityScore?: number } = {},
+): DraftEvaluationResult {
+  if (!candidate || typeof candidate !== "object") {
+    return {
+      candidate: candidate ?? ({} as ClaimCandidate),
+      allowed: false,
+      decisionCode: "source_quality_rejected",
+      reason: "candidate must be a valid object",
+    };
+  }
+  if (!candidate.question || typeof candidate.question !== "string" || candidate.question.trim() === "") {
+    return {
+      candidate,
+      allowed: false,
+      decisionCode: "source_quality_rejected",
+      reason: "missing or empty question",
+    };
+  }
+  if (!candidate.resolutionUrl || typeof candidate.resolutionUrl !== "string" || candidate.resolutionUrl.trim() === "") {
+    return {
+      candidate,
+      allowed: false,
+      decisionCode: "source_quality_rejected",
+      reason: "missing or empty resolutionUrl",
+    };
+  }
+  if (!candidate.deadline || typeof candidate.deadline !== "string" || candidate.deadline.trim() === "") {
+    return {
+      candidate,
+      allowed: false,
+      decisionCode: "source_quality_rejected",
+      reason: "missing or empty deadline",
+    };
+  }
+  if (candidate.threshold !== undefined) {
+    const thresholdErr = cryptoThresholdReason(candidate.threshold);
+    if (thresholdErr !== null) {
+      return {
+        candidate,
+        allowed: false,
+        decisionCode: "source_quality_rejected",
+        reason: `unsafe crypto threshold: ${thresholdErr}`,
+      };
+    }
+  }
+  if (
+    opts.minQualityScore !== undefined &&
+    typeof candidate.qualityScore === "number" &&
+    candidate.qualityScore < opts.minQualityScore
+  ) {
+    return {
+      candidate,
+      allowed: false,
+      decisionCode: "source_quality_rejected",
+      reason: `quality score ${candidate.qualityScore} < min ${opts.minQualityScore}`,
+    };
+  }
+  return {
+    candidate,
+    allowed: true,
+    decisionCode: "approved",
+  };
+}
+
+/**
+ * Filter candidates for source quality, returning distinct decision codes for rejected items.
+ */
+export function filterCandidatesWithDecisions(
+  candidates: readonly ClaimCandidate[],
+  opts: { minQualityScore?: number } = {},
+): {
+  approved: ClaimCandidate[];
+  rejected: Array<{ candidate: ClaimCandidate; decisionCode: "source_quality_rejected"; reason: string }>;
+} {
+  const approved: ClaimCandidate[] = [];
+  const rejected: Array<{ candidate: ClaimCandidate; decisionCode: "source_quality_rejected"; reason: string }> = [];
+  for (const c of candidates) {
+    const evalRes = evaluateCandidateSourceQuality(c, opts);
+    if (evalRes.allowed) {
+      approved.push(c);
+    } else {
+      rejected.push({
+        candidate: c,
+        decisionCode: "source_quality_rejected",
+        reason: evalRes.reason ?? "failed source-quality check",
+      });
+    }
+  }
+  return { approved, rejected };
+}
+
 /**
  * Exported for tests and for callers that want to inspect threshold
  * mentions in a drafted question without running the full filter.
