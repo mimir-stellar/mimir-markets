@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isPortfolioPerformanceResponse } from "../../lib/portfolio-performance";
+import {
+  applyLiveRefreshToSnapshots,
+  comparePortfolioSnapshots,
+  freezePortfolioSnapshot,
+  isPortfolioPerformanceResponse,
+  isPortfolioSnapshot,
+  isPortfolioSnapshotComparison,
+  type PortfolioSnapshot,
+} from "../../lib/portfolio-performance";
 
 const CACHE = {
   source: "index" as const,
@@ -62,4 +70,176 @@ test("rejects malformed freshness and settlement counts", () => {
     }),
     false,
   );
+});
+
+test("creates and validates a frozen portfolio snapshot", () => {
+  const points = [
+    { timestamp: 1_800_000_000_000, value: 10 },
+    { timestamp: 1_800_060_000_000, value: 25 },
+  ];
+  const snap = freezePortfolioSnapshot("q3-review", "Q3 Reviewed Portfolio", {
+    points,
+    settled: 2,
+  });
+
+  assert.equal(isPortfolioSnapshot(snap), true);
+  assert.equal(snap.id, "q3-review");
+  assert.equal(snap.metric, "cumulative_pnl_usdc");
+  assert.equal(snap.frozen, true);
+  assert.equal(snap.points.length, 2);
+  assert.equal(snap.points[0].value, 10);
+});
+
+test("rejects invalid portfolio snapshots", () => {
+  // Empty or invalid id
+  assert.equal(
+    isPortfolioSnapshot({
+      id: "",
+      label: "empty id",
+      capturedAt: Date.now(),
+      metric: "cumulative_pnl_usdc",
+      points: [],
+      settled: 0,
+      frozen: true,
+    }),
+    false,
+  );
+
+  // Non-finite point money
+  assert.equal(
+    isPortfolioSnapshot({
+      id: "bad-point",
+      label: "Bad Point",
+      capturedAt: Date.now(),
+      metric: "cumulative_pnl_usdc",
+      points: [{ timestamp: 1000, value: Number.NaN }],
+      settled: 1,
+      frozen: true,
+    }),
+    false,
+  );
+
+  // Negative settled count
+  assert.equal(
+    isPortfolioSnapshot({
+      id: "neg-settled",
+      label: "Negative Settled",
+      capturedAt: Date.now(),
+      metric: "cumulative_pnl_usdc",
+      points: [],
+      settled: -1,
+      frozen: true,
+    }),
+    false,
+  );
+});
+
+test("compares selected snapshots using the same metric definition", () => {
+  const snap1 = freezePortfolioSnapshot(
+    "q1-review",
+    "Q1 Review",
+    { points: [{ timestamp: 1_000_000, value: 100 }], settled: 1 },
+    { metric: "cumulative_pnl_usdc" },
+  );
+  const snap2 = freezePortfolioSnapshot(
+    "q2-review",
+    "Q2 Review",
+    { points: [{ timestamp: 2_000_000, value: 250 }], settled: 2 },
+    { metric: "cumulative_pnl_usdc" },
+  );
+
+  const comparison = comparePortfolioSnapshots([snap1, snap2], "cumulative_pnl_usdc");
+  assert.equal(isPortfolioSnapshotComparison(comparison), true);
+  assert.equal(comparison.metric, "cumulative_pnl_usdc");
+  assert.equal(comparison.snapshots.length, 2);
+  assert.equal(comparison.snapshots[0].id, "q1-review");
+  assert.equal(comparison.snapshots[1].id, "q2-review");
+});
+
+test("boundary: compares an empty set of snapshots cleanly", () => {
+  const comparison = comparePortfolioSnapshots([], "cumulative_pnl_usdc");
+  assert.equal(isPortfolioSnapshotComparison(comparison), true);
+  assert.equal(comparison.snapshots.length, 0);
+});
+
+test("failure: refuses comparison when snapshots use mismatched metric definitions", () => {
+  const snap1: PortfolioSnapshot = {
+    id: "snap-1",
+    label: "Snap 1",
+    capturedAt: 1000,
+    metric: "cumulative_pnl_usdc",
+    points: [{ timestamp: 1000, value: 10 }],
+    settled: 1,
+    frozen: true,
+  };
+  const snap2: PortfolioSnapshot = {
+    id: "snap-2",
+    label: "Snap 2",
+    capturedAt: 2000,
+    metric: "realised_pnl_usdc",
+    points: [{ timestamp: 2000, value: 15 }],
+    settled: 1,
+    frozen: true,
+  };
+
+  assert.throws(
+    () => comparePortfolioSnapshots([snap1, snap2], "cumulative_pnl_usdc"),
+    /Metric mismatch in snapshot comparison/,
+  );
+});
+
+test("prevents live refreshes from changing a reviewed historical comparison", () => {
+  const frozenHistorical = freezePortfolioSnapshot(
+    "historical-benchmark",
+    "Reviewed Benchmark 2026-Q1",
+    {
+      points: [
+        { timestamp: 1_800_000_000_000, value: 100 },
+        { timestamp: 1_800_060_000_000, value: 150 },
+      ],
+      settled: 2,
+    },
+  );
+
+  const snapshots: PortfolioSnapshot[] = [frozenHistorical];
+
+  // Incoming live refresh tries to mutate the historical snapshot with new points and settled counts
+  const refreshed = applyLiveRefreshToSnapshots(snapshots, {
+    id: "historical-benchmark",
+    points: [
+      { timestamp: 1_800_000_000_000, value: 500 },
+      { timestamp: 1_800_060_000_000, value: 999 },
+    ],
+    settled: 99,
+  });
+
+  // The historical comparison snapshot was frozen and must remain intact
+  assert.equal(refreshed[0].frozen, true);
+  assert.equal(refreshed[0].settled, 2);
+  assert.equal(refreshed[0].points[0].value, 100);
+  assert.equal(refreshed[0].points[1].value, 150);
+
+  // An unfrozen live snapshot, on the other hand, accepts live refreshes
+  const unfrozenLive: PortfolioSnapshot = {
+    id: "live-active",
+    label: "Live Active Portfolio",
+    capturedAt: 1_800_000_000_000,
+    metric: "cumulative_pnl_usdc",
+    points: [{ timestamp: 1_800_000_000_000, value: 10 }],
+    settled: 1,
+    frozen: false,
+  };
+
+  const updatedLive = applyLiveRefreshToSnapshots([unfrozenLive], {
+    id: "live-active",
+    points: [
+      { timestamp: 1_800_000_000_000, value: 10 },
+      { timestamp: 1_800_060_000_000, value: 20 },
+    ],
+    settled: 2,
+  });
+
+  assert.equal(updatedLive[0].settled, 2);
+  assert.equal(updatedLive[0].points.length, 2);
+  assert.equal(updatedLive[0].points[1].value, 20);
 });
