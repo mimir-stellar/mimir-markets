@@ -1111,6 +1111,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run load:x402`                          | Offline load test: fixture verification + settle/replay limits                      |
 | `npm run load:rate-limit`                    | Offline load test: the API rate limiter under mixed traffic                         |
 | `npm run test:node`                          | Full Node test suite with a versioned compile cache and process isolation           |
+| `npm run market-creator:manifest`            | Export an offline dry-run batch of statements, atomic USDC budgets and rejection reasons; [input/output reference](./docs/MARKET_CREATOR_MANIFEST.md) |
 | `npm run test:node:coverage`                 | Full Node suite plus a fresh LCOV report at `coverage/node/node-tests.lcov`         |
 | `npm run test:smoke`                         | Backwards-compatible alias for the Node test runner                                |
 | `npm run test:research`                      | Research adapters, categories, SSRF guard, x402 discovery suites                   |

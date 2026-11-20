@@ -50,46 +50,65 @@ export function buildDraftingPrompt(context: DraftingContext): string {
   ].filter(Boolean).join("\n\n");
 }
 
-/**
- * Parse the LLM response into candidates. Tolerates code fences and
- * surrounding prose. Returns [] on any parsing failure - the caller treats
- * that as "no candidates this run".
- */
-export function parseDraftedCandidates(raw: string): ClaimCandidate[] {
-  if (!raw) return [];
+export interface DraftedCandidateResult {
+  index: number;
+  /** Retained even when another required field is missing. */
+  statement: string | null;
+  candidate: ClaimCandidate | null;
+  rejectionReason: "invalid_candidate" | null;
+}
+
+export interface DraftedCandidateBatch {
+  entries: DraftedCandidateResult[];
+  error: "invalid_draft_response" | null;
+}
+
+/** Inspect each draft before filters discard it, for offline batch reports. */
+export function parseDraftedCandidateBatch(raw: string): DraftedCandidateBatch {
+  const invalid = (): DraftedCandidateBatch => ({ entries: [], error: "invalid_draft_response" });
+  if (!raw) return invalid();
   const trimmed = raw.trim();
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*)```/i);
   const jsonText = fenceMatch ? fenceMatch[1] : trimmed;
 
   const start = jsonText.indexOf("[");
   const end = jsonText.lastIndexOf("]");
-  if (start < 0 || end <= start) return [];
+  if (start < 0 || end <= start) return invalid();
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonText.slice(start, end + 1));
   } catch {
-    return [];
+    return invalid();
   }
-  if (!Array.isArray(parsed)) return [];
+  if (!Array.isArray(parsed)) return invalid();
 
-  const out: ClaimCandidate[] = [];
-  for (const item of parsed) {
-    if (!item || typeof item !== "object") continue;
-    const rec = item as Record<string, unknown>;
+  const entries = parsed.map((item, index): DraftedCandidateResult => {
+    const rec = item && typeof item === "object" ? item as Record<string, unknown> : {};
     const question = typeof rec.question === "string" ? rec.question.trim() : "";
     const resolutionUrl = typeof rec.resolutionUrl === "string" ? rec.resolutionUrl.trim() : "";
     const deadline = typeof rec.deadline === "string" ? rec.deadline.trim() : "";
-    if (!question || !resolutionUrl || !deadline) continue;
-    out.push({
+    if (!question || !resolutionUrl || !deadline) {
+      return { index, statement: question || null, candidate: null, rejectionReason: "invalid_candidate" };
+    }
+    const candidate: ClaimCandidate = {
       question,
       resolutionUrl,
       deadline,
       category: typeof rec.category === "string" ? rec.category : undefined,
       threshold: typeof rec.threshold === "number" ? rec.threshold : undefined,
-    });
-  }
-  return out;
+    };
+    return { index, statement: question, candidate, rejectionReason: null };
+  });
+  return { entries, error: null };
+}
+
+/**
+ * Parse candidates, tolerating code fences and surrounding prose.
+ * Compatibility API: malformed responses/entries still produce no candidate.
+ */
+export function parseDraftedCandidates(raw: string): ClaimCandidate[] {
+  return parseDraftedCandidateBatch(raw).entries.flatMap(({ candidate }) => candidate ? [candidate] : []);
 }
 
 /**

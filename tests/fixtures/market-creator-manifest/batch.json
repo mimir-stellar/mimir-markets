@@ -1,0 +1,10 @@
+{
+  "evaluatedAt": "2030-01-01T00:00:00Z",
+  "budget": {
+    "stakeAtomic": "20000000",
+    "maxTotalStakeAtomic": "20000000",
+    "maxMarkets": 3
+  },
+  "existingCandidates": [],
+  "draftResponse": "[{\"question\":\"Will the temperature exceed 30 C?\",\"resolutionUrl\":\"https://example.org/weather\",\"deadline\":\"2030-01-02T00:00:00Z\",\"category\":\"weather\"},{\"question\":\"WILL the temperature exceed 30 C!!!\",\"resolutionUrl\":\"https://example.org/weather/\",\"deadline\":\"2030-01-02T00:00:00Z\",\"category\":\"weather\"},{\"question\":\"Will the launch occur tomorrow?\",\"resolutionUrl\":\"https://example.org/launch\",\"deadline\":\"2030-01-02T00:00:00Z\",\"category\":\"culture\"}]"
+}

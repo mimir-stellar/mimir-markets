@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "dryRun": true,
+  "evaluatedAt": "2030-01-01T00:00:00.000Z",
+  "stateSource": "supplied_snapshot",
+  "executionReady": false,
+  "sideEffects": {
+    "marketCreation": false,
+    "payments": false,
+    "livePublishing": false
+  },
+  "error": null,
+  "budget": {
+    "asset": "USDC",
+    "decimals": 7,
+    "stakeAtomic": "20000000",
+    "maxTotalStakeAtomic": "20000000",
+    "maxMarkets": 3,
+    "plannedStakeAtomic": "20000000",
+    "remainingStakeAtomic": "0"
+  },
+  "summary": {
+    "drafted": 3,
+    "proposed": 1,
+    "rejected": 2
+  },
+  "entries": [
+    {
+      "index": 0,
+      "statement": "Will the temperature exceed 30 C?",
+      "resolutionUrl": "https://example.org/weather",
+      "deadline": "2030-01-02T00:00:00Z",
+      "category": "weather",
+      "threshold": null,
+      "stakeAtomic": "20000000",
+      "status": "proposed",
+      "rejection": null
+    },
+    {
+      "index": 1,
+      "statement": "WILL the temperature exceed 30 C!!!",
+      "resolutionUrl": "https://example.org/weather/",
+      "deadline": "2030-01-02T00:00:00Z",
+      "category": "weather",
+      "threshold": null,
+      "stakeAtomic": "20000000",
+      "status": "rejected",
+      "rejection": {
+        "code": "duplicate_batch",
+        "detail": "Signature already occurs earlier in this batch"
+      }
+    },
+    {
+      "index": 2,
+      "statement": "Will the launch occur tomorrow?",
+      "resolutionUrl": "https://example.org/launch",
+      "deadline": "2030-01-02T00:00:00Z",
+      "category": "culture",
+      "threshold": null,
+      "stakeAtomic": "20000000",
+      "status": "rejected",
+      "rejection": {
+        "code": "budget_exceeded",
+        "detail": "Proposed stake would exceed maxTotalStakeAtomic"
+      }
+    }
+  ]
+}

@@ -6,6 +6,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "market-creator:manifest": "node --import tsx scripts/market-creator-manifest.ts",
     "test:node": "node scripts/run-node-tests.mjs"
   },
   "dependencies": {
