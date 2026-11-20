@@ -81,6 +81,8 @@ export type CopySkipReason =
   | "confidence_below_floor" | "payout_below_floor" | "position_cap"
   | "daily_cap" | "weekly_cap" | "open_exposure_cap" | "spend_permission_mismatch"
   | "loss_limit" | "simulation_failed";
+export type CopyLifecycleReason = "permission_revoked" | "permission_expired";
+
 
 export interface CopyExecutionContext {
   now: number;
@@ -181,6 +183,8 @@ export function evaluateCopy(permission: CopyPermission, signal: CopySignal, con
   if (context.globalPaused || isPaused("copy_execution", context.env)) return { allowed: false, reason: "global_paused" };
   if (permission.status === "revoked") return { allowed: false, reason: "permission_revoked" };
   if (permission.status === "paused") return { allowed: false, reason: "permission_paused" };
+  if (permission.status === "revoked") return { allowed: false, reason: "permission_revoked" };
+  if (context.now >= permission.expiresAt) return { allowed: false, reason: "permission_expired" };
   if (!Number.isSafeInteger(context.now) || !context.usage ||
       typeof context.usage.usedTodayUsdc !== "number" ||
       typeof context.usage.usedThisWeekUsdc !== "number" ||
@@ -508,6 +512,8 @@ export function explainCopySkipReason(reason: CopySkipReason): string {
       return "The copy permission is currently paused.";
     case "permission_expired":
       return "The copy permission has expired.";
+    case "permission_revoked_terminal":
+      return "The copy permission was revoked and will not become active again; do not retry.";
     case "self_copy":
       return "You cannot copy your own signals.";
     case "copy_depth":

@@ -67,6 +67,41 @@ function jsonResponse(data: unknown, init?: ResponseInit): Response {
   });
 }
 
+/**
+ * Describes why a permission is no longer usable. Revocation is terminal and is
+ * reported distinctly from expiry so clients never retry a revoked policy.
+ */
+function permissionStatusDetails(permission: CopyPermission, now: number): {
+  status: CopyPermission["status"];
+  reasonCode: "active" | "revoked" | "expired";
+  effectiveAt: number | null;
+  retryable: boolean;
+} {
+  if (permission.status === "revoked") {
+    return {
+      status: permission.status,
+      reasonCode: "revoked",
+      effectiveAt: permission.revokedAt ?? null,
+      retryable: false,
+    };
+  }
+  const expiresAt = permission.spendPermission.expiresAt;
+  if (typeof expiresAt === "number" && expiresAt <= now) {
+    return {
+      status: permission.status,
+      reasonCode: "expired",
+      effectiveAt: expiresAt,
+      retryable: true,
+    };
+  }
+  return {
+    status: permission.status,
+    reasonCode: "active",
+    effectiveAt: null,
+    retryable: false,
+  };
+}
+
 export async function POST(req: Request): Promise<Response> {
   const { authorizeRequest } = await import("@/lib/api/policy");
   const ip = clientIpFrom(req.headers);
@@ -151,7 +186,14 @@ export async function POST(req: Request): Promise<Response> {
   // another owner's row by reusing its id.
   const existing = await getCopyPermission(permission.permissionId);
   if (existing?.status === "revoked") {
-    return jsonResponse({ error: "permission was revoked; grant a new permissionId" }, { status: 409 });
+    return jsonResponse(
+      {
+        error: "permission was revoked; grant a new permissionId",
+        reasonCode: "revoked",
+        retryable: false,
+      },
+      { status: 409 },
+    );
   }
   if (existing && existing.ownerWallet !== permission.ownerWallet) {
     return jsonResponse({ error: "permissionId belongs to another owner" }, { status: 409 });
@@ -171,6 +213,7 @@ export async function POST(req: Request): Promise<Response> {
     permission: record,
     worstCase: worstCaseCopySpend(record),
     feedback,
+    details: permissionStatusDetails(record, Math.floor(Date.now() / 1000)),
   });
 }
 
@@ -226,6 +269,9 @@ export async function DELETE(req: Request): Promise<Response> {
   return jsonResponse({
     permissionId: revoked.permissionId,
     status: "revoked",
+    reasonCode: "revoked",
+    effectiveAt: revoked.revokedAt ?? Math.floor(Date.now() / 1000),
+    retryable: false,
     feedback,
   });
 }

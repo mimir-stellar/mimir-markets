@@ -89,6 +89,46 @@ export type PermissionRejection =
   | "allowance_exhausted";
 
 /**
+ * Stable reason codes for responses. A revoked grant is permanently dead and must
+ * never suggest a retry; an expired grant can only be replaced by a new signature.
+ */
+export const PERMISSION_REASON_CODES: Record<PermissionRejection, string> = {
+  wrong_token: "permission_wrong_token",
+  wrong_spender: "permission_wrong_spender",
+  not_started: "permission_not_started",
+  expired: "permission_expired",
+  revoked: "permission_revoked",
+  zero_allowance: "permission_zero_allowance",
+  bad_period: "permission_bad_period",
+  allowance_exhausted: "permission_allowance_exhausted",
+};
+
+/** Whether a client may usefully retry the same grant later. Revocation is terminal. */
+export function isRetryableRejection(reason: PermissionRejection): boolean {
+  return reason !== "revoked";
+}
+
+/**
+ * Response-ready description of a rejection, with stable code and effective times.
+ * `effectiveAt` is when the state began (revocation time, start, or expiry).
+ */
+export function describeRejection(
+  permission: SpendPermissionRecord,
+  reason: PermissionRejection,
+): { reason: PermissionRejection; code: string; retryable: boolean; effectiveAt?: number } {
+  let effectiveAt: number | undefined;
+  if (reason === "revoked") effectiveAt = permission.revokedAt;
+  else if (reason === "expired") effectiveAt = permission.endAt;
+  else if (reason === "not_started") effectiveAt = permission.startAt;
+  return {
+    reason,
+    code: PERMISSION_REASON_CODES[reason],
+    retryable: isRetryableRejection(reason),
+    effectiveAt,
+  };
+}
+
+/**
  * Mimir's spender address. Unset means funded actions cannot be delegated at all.
  *
  * Accepts a `G…` account or a `C…` contract: the spender in a SAC allowance is an
@@ -158,6 +198,8 @@ export function checkPermission(
   nowSeconds: number,
   spender: string | null,
 ): { ok: true } | { ok: false; reason: PermissionRejection } {
+  // Revocation is checked first and wins over expiry: a permission that was revoked
+  // before its end must report `revoked` (terminal) rather than `expired`.
   if (permission.revokedAt) return { ok: false, reason: "revoked" };
   const token = requiredToken();
   // An unconfigured USDC contract id must not degrade into "any token passes":
