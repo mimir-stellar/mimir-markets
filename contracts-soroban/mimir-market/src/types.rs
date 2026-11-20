@@ -218,6 +218,43 @@ pub struct FeeSnapshot {
     pub agent_owner_recipient: Option<Address>,
 }
 
+// ── Fee liability summary ────────────────────────────────────────────────────
+
+/// Known recipient class for fee liabilities.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum FeeRecipientClass {
+    Platform = 1,
+    AgentOwner = 2,
+}
+
+/// Liability status for a specific recipient class.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeClassLiability {
+    pub recipient_class: FeeRecipientClass,
+    pub accrued: i128,
+    pub claimed: i128,
+    pub collectible: i128,
+}
+
+/// Aggregate summary of fee liabilities across all markets, partitioned by
+/// known recipient class and strictly separated from user principal in custody.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeLiabilitySummary {
+    pub platform_accrued: i128,
+    pub platform_claimed: i128,
+    pub platform_collectible: i128,
+    pub agent_owner_accrued: i128,
+    pub agent_owner_claimed: i128,
+    pub agent_owner_collectible: i128,
+    pub total_collectible_fees: i128,
+    pub user_principal: i128,
+    pub total_withdrawable: i128,
+}
+
 // ── Claim ────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -431,4 +468,5 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    Paused = 48,
 }

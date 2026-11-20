@@ -46,6 +46,16 @@ Source: `contracts-soroban/mimir-market/src/fees.rs`, mirrored off-chain in
   for an unrelated address having nothing to claim.
 - Lifetime accrued and claimed totals (`get_platform_stats`) support reconciliation
   against the off-chain atomic ledger.
+- Aggregate fee liabilities are queryable in O(1) constant time via
+  `get_fee_liability_summary()` and `get_fee_liability_by_class(recipient_class)`
+  without iterating over individual claims.
+- Recipient classes are categorized into `FeeRecipientClass::Platform` (1) and
+  `FeeRecipientClass::AgentOwner` (2). Each class tracks `accrued`, `claimed`, and
+  outstanding `collectible` liabilities independently.
+- Collectible fees (`accrued - claimed`) are strictly segregated from user
+  principal held in custody:
+  `user_principal = total_escrow_balance.saturating_sub(total_collectible_fees)`.
+- Parked and unclaimed user funds are tracked via `get_total_withdrawable()`.
 - Exact-balance intake (`escrow::pull`) rejects fee-on-transfer and rebasing
   behaviour: the contract asserts escrow moved by exactly the requested amount and
   errors with `UnsupportedToken` otherwise.

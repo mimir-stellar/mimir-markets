@@ -491,3 +491,45 @@ export function scheduleTotalBps(
 ): number {
   return schedule.platformBps + schedule.agentOwnerBps + schedule.basketCreatorBps;
 }
+
+/** Known recipient classes for bounded aggregate liabilities. */
+export enum FeeRecipientClass {
+  Platform = 1,
+  AgentOwner = 2,
+}
+
+/** Liability summary for a specific recipient class. */
+export interface FeeClassLiability {
+  recipientClass: FeeRecipientClass;
+  accrued: bigint;
+  claimed: bigint;
+  collectible: bigint;
+}
+
+/** Bounded aggregate liabilities across known recipient classes and user principal. */
+export interface FeeLiabilitySummary {
+  platformAccrued: bigint;
+  platformClaimed: bigint;
+  platformCollectible: bigint;
+  agentOwnerAccrued: bigint;
+  agentOwnerClaimed: bigint;
+  agentOwnerCollectible: bigint;
+  totalCollectibleFees: bigint;
+  userPrincipal: bigint;
+  totalWithdrawable: bigint;
+}
+
+/**
+ * Segregate collectible fees from custody balance to compute user principal.
+ *
+ * Invariant:
+ *   user_principal = max(0, total_escrow_balance - total_collectible_fees)
+ */
+export function calculateUserPrincipal(
+  escrowBalanceUnits: bigint,
+  totalCollectibleFeesUnits: bigint,
+): bigint {
+  return escrowBalanceUnits > totalCollectibleFeesUnits
+    ? escrowBalanceUnits - totalCollectibleFeesUnits
+    : 0n;
+}

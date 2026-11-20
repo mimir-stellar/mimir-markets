@@ -6,12 +6,13 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 use crate::admin;
 use crate::claims;
 use crate::escrow;
+use crate::fees;
 use crate::resolve;
 use crate::storage;
 use crate::types::{
-    Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeePolicy,
-    MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict,
-    WinnerSide, MAX_BATCH_SIZE,
+    Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeeClassLiability,
+    FeeLiabilitySummary, FeePolicy, FeeRecipientClass, MarketConfig, PayoutQuote,
+    PendingFeePolicy, PendingOracle, PlatformStats, Verdict, WinnerSide, MAX_BATCH_SIZE,
 };
 
 #[contract]
@@ -385,7 +386,53 @@ impl MimirMarket {
         storage::withdrawable(&env, &who)
     }
 
+    pub fn get_withdrawable_batch(
+        env: Env,
+        addrs: Vec<Address>,
+    ) -> Result<Vec<i128>, Error> {
+        storage::get_withdrawable_batch(&env, addrs)
+    }
+
+    #[cfg(test)]
+    pub fn add_withdrawable(env: Env, who: Address, amount: i128) {
+        storage::add_withdrawable(&env, &who, amount);
+    }
+
     pub fn get_accrued_fees(env: Env, who: Address) -> i128 {
         storage::accrued_fees(&env, &who)
+    }
+
+    /// Return accrued, unclaimed fees for an individual address filtered by recipient class.
+    pub fn get_accrued_class_fees(
+        env: Env,
+        who: Address,
+        recipient_class: FeeRecipientClass,
+    ) -> i128 {
+        storage::accrued_class_fees(&env, &who, recipient_class)
+    }
+
+    /// Return aggregate fee liabilities by known recipient class (Platform and AgentOwner)
+    /// alongside total collectible fees, user principal in custody, and total parked withdrawables.
+    /// Bounded O(1) query without iterating markets.
+    pub fn get_fee_liability_summary(env: Env) -> Result<FeeLiabilitySummary, Error> {
+        fees::fee_liability_summary(&env)
+    }
+
+    /// Alias for get_fee_liability_summary matching generic query naming.
+    pub fn get_fee_liabilities(env: Env) -> Result<FeeLiabilitySummary, Error> {
+        fees::fee_liability_summary(&env)
+    }
+
+    /// Return fee liability for a specific known recipient class (Platform or AgentOwner).
+    pub fn get_fee_liability_by_class(
+        env: Env,
+        recipient_class: FeeRecipientClass,
+    ) -> Result<FeeClassLiability, Error> {
+        fees::fee_liability_by_class(&env, recipient_class)
+    }
+
+    /// Current total uncollected withdrawable balances parked across all users.
+    pub fn get_total_withdrawable(env: Env) -> i128 {
+        storage::total_withdrawable(&env)
     }
 }

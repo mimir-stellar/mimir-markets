@@ -11,6 +11,8 @@ import {
   snapshotFeePolicy,
   splitFees,
   validateFeePolicy,
+  calculateUserPrincipal,
+  FeeRecipientClass,
   type FeePolicy,
   type FeeSnapshot,
   type Participant,
@@ -560,4 +562,22 @@ test("fee legs round down exactly as the contract does", () => {
     assert.ok(fee * 10_000n <= profit * 1_000n, `profit ${profit}: fee above exact`);
     assert.equal(payoutUnits, U(2) + profit - fee);
   }
+});
+
+test("calculateUserPrincipal keeps collectible fees separate from user principal", () => {
+  // Total escrow contains user principal and collectible fees
+  const totalEscrow = U(100);
+  const collectibleFees = U(15);
+  const userPrincipal = calculateUserPrincipal(totalEscrow, collectibleFees);
+  assert.equal(userPrincipal, U(85));
+
+  // If collectible fees equal total escrow, principal is 0
+  assert.equal(calculateUserPrincipal(U(20), U(20)), 0n);
+
+  // If collectible fees exceed total escrow (boundary case), saturates to 0
+  assert.equal(calculateUserPrincipal(U(10), U(15)), 0n);
+
+  // FeeRecipientClass enum variants
+  assert.equal(FeeRecipientClass.Platform, 1);
+  assert.equal(FeeRecipientClass.AgentOwner, 2);
 });

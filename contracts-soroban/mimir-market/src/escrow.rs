@@ -76,3 +76,12 @@ pub fn push(env: &Env, usdc: &Address, to: &Address, amount: i128) {
 pub fn balance(env: &Env, usdc: &Address) -> i128 {
     token::TokenClient::new(env, usdc).balance(&env.current_contract_address())
 }
+
+/// User principal held in custody, strictly separate from collectible fee liabilities.
+///
+/// Total USDC balance is partitioned into `user_principal + collectible_fees`.
+/// User principal covers open creator stakes, active challenger stakes, uncollected
+/// payouts, and parked withdrawable funds.
+pub fn user_principal(env: &Env, usdc: &Address, collectible_fees: i128) -> i128 {
+    balance(env, usdc).saturating_sub(collectible_fees).max(0)
+}

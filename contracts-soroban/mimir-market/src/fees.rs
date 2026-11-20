@@ -2,9 +2,12 @@
 
 use soroban_sdk::Env;
 
+use crate::escrow;
 use crate::events;
 use crate::storage;
-use crate::types::{Error, FeeSnapshot, BPS_DIVISOR};
+use crate::types::{
+    Error, FeeClassLiability, FeeLiabilitySummary, FeeRecipientClass, FeeSnapshot, BPS_DIVISOR,
+};
 
 /// `stake * bps / BPS_DIVISOR`, truncating. Checked multiplication so an
 /// absurd stake errors instead of wrapping, matching Solidity 0.8 revert-on-
@@ -97,7 +100,9 @@ pub fn apply_fees(
     if platform_fee > 0 {
         let to = fees.platform_recipient.clone().unwrap();
         storage::add_accrued_fees(env, &to, platform_fee);
+        storage::add_accrued_class_fees(env, &to, FeeRecipientClass::Platform, platform_fee);
         storage::add_lifetime_fees_accrued(env, platform_fee);
+        storage::add_platform_fees_accrued(env, platform_fee);
         events::FeeAccrued {
             id: claim_id,
             recipient: to,
@@ -109,7 +114,9 @@ pub fn apply_fees(
     if owner_fee > 0 {
         let to = fees.agent_owner_recipient.clone().unwrap();
         storage::add_accrued_fees(env, &to, owner_fee);
+        storage::add_accrued_class_fees(env, &to, FeeRecipientClass::AgentOwner, owner_fee);
         storage::add_lifetime_fees_accrued(env, owner_fee);
+        storage::add_agent_owner_fees_accrued(env, owner_fee);
         events::FeeAccrued {
             id: claim_id,
             recipient: to,
@@ -120,4 +127,66 @@ pub fn apply_fees(
     }
 
     Ok((owed, fees_taken))
+}
+
+/// Compute aggregate fee liabilities across all markets partitioned by known
+/// recipient class (Platform and AgentOwner), strictly separated from user principal.
+///
+/// Bounded O(1) query reading global instance counters and escrow balance
+/// without iterating claims or markets.
+pub fn fee_liability_summary(env: &Env) -> Result<FeeLiabilitySummary, Error> {
+    if !storage::is_initialized(env) {
+        return Err(Error::NotInitialized);
+    }
+    let usdc = storage::usdc(env)?;
+    let platform_accrued = storage::platform_fees_accrued(env);
+    let platform_claimed = storage::platform_fees_claimed(env);
+    let platform_collectible = (platform_accrued - platform_claimed).max(0);
+
+    let agent_owner_accrued = storage::agent_owner_fees_accrued(env);
+    let agent_owner_claimed = storage::agent_owner_fees_claimed(env);
+    let agent_owner_collectible = (agent_owner_accrued - agent_owner_claimed).max(0);
+
+    let total_collectible_fees = platform_collectible + agent_owner_collectible;
+    let user_principal = escrow::user_principal(env, &usdc, total_collectible_fees);
+    let total_withdrawable = storage::total_withdrawable(env);
+
+    Ok(FeeLiabilitySummary {
+        platform_accrued,
+        platform_claimed,
+        platform_collectible,
+        agent_owner_accrued,
+        agent_owner_claimed,
+        agent_owner_collectible,
+        total_collectible_fees,
+        user_principal,
+        total_withdrawable,
+    })
+}
+
+/// Query liability status for a specific recipient class in O(1).
+pub fn fee_liability_by_class(
+    env: &Env,
+    recipient_class: FeeRecipientClass,
+) -> Result<FeeClassLiability, Error> {
+    if !storage::is_initialized(env) {
+        return Err(Error::NotInitialized);
+    }
+    let (accrued, claimed) = match recipient_class {
+        FeeRecipientClass::Platform => (
+            storage::platform_fees_accrued(env),
+            storage::platform_fees_claimed(env),
+        ),
+        FeeRecipientClass::AgentOwner => (
+            storage::agent_owner_fees_accrued(env),
+            storage::agent_owner_fees_claimed(env),
+        ),
+    };
+    let collectible = (accrued - claimed).max(0);
+    Ok(FeeClassLiability {
+        recipient_class,
+        accrued,
+        claimed,
+        collectible,
+    })
 }
