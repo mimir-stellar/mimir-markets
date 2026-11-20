@@ -120,6 +120,8 @@ export default function PortfolioPerformancePanel({
             label={t("portfolioPerformanceChartLabel")}
             emptyMessage={t("portfolioPerformanceEmpty")}
             invalidMessage={t("portfolioPerformanceInvalid")}
+            coverage={data.coverage}
+            stale={data.cache.status === "stale"}
           />
         </>
       ) : null}

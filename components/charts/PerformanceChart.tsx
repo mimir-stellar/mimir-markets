@@ -1,31 +1,35 @@
 "use client";
 
 /**
- * One line chart for oth agent P&amp;L and basket NAV.
+ * One line chart for both agent P&L and basket NAV.
  *
- * Inline SVG rather than a charting library: this is a path, a baseline and a
- * hover readout — a chart dependency would ship more JavaScript than the rest of
- * the page. Colours come from theme tokens so it inverts with the palette.
+ * Inline SVG rather than a charting library: this is a path, a baseline,
+ * observation-coverage overlays, and a hover readout — a chart dependency would
+ * ship more JavaScript than the rest of the page. Colours come from theme tokens
+ * so it inverts with the palette.
  *
- * The line draws itself on mount via stroke-dasharray, which animates on the
- * compositor rather than by re-rendering React on every frame. Anyone who asked
- * their system not to animate gets the finished line immediately.
+ * Missing observation intervals are rendered as hatched gap bands and break the
+ * series line so unobserved periods are visually distinct from verified zero
+ * performance.
  *
  * Keyboard and screen-reader users can't hover, so a "Show data" toggle
- * reveals a table of the same points (last MAX_TABLE_ROWS).
+ * reveals a table of the same points (last MAX_TABLE_ROWS) plus any missing
+ * observation intervals.
  */
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import {
-  buildPerformanceChartRows,
-  formatChartDay,
-  MAX_TABLE_ROWS,
-} from "@/lib/performance-chart-rows";
+  formatTrustedLedger,
+  normalizeMissingIntervals,
+  splitPointsByMissingIntervals,
+  type PerformanceMissingInterval,
+  type PerformanceObservationCoverage,
+} from "@/lib/portfolio-performance";
 
 export interface ChartPoint {
   timestamp: number;
-  /** Display units — USDC for both NAV and cumulative P&amp;L. */
+  /** Display units — USDC for both NAV and cumulative P&L. */
   value: number;
 }
 
@@ -42,9 +46,23 @@ const VIEW_WIDTH = 720;
 const VIEW_HEIGHT = 180;
 const PAD_X = 10;
 const PAD_Y = 14;
+const MAX_TABLE_ROWS = 50;
 
 function formatDay(timestamp: number): string {
-  return formatChartDay(timestamp);
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+function buildChartTableRows(points: readonly ChartPoint[], valueSuffix: string) {
+  const total = points.length;
+  const sliced = total > MAX_TABLE_ROWS ? points.slice(total - MAX_TABLE_ROWS) : points;
+  return {
+    rows: sliced.map((point) => ({
+      date: formatDay(point.timestamp),
+      value: `${point.value.toFixed(2)}${valueSuffix}`,
+    })),
+    total,
+    truncated: total > MAX_TABLE_ROWS,
+  };
 }
 
 export function PerformanceChart({
@@ -56,30 +74,50 @@ export function PerformanceChart({
   emptyMessage = "No settled results in this window yet.",
   invalidMessage = "Performance data is unavailable.",
   height = 180,
+  coverage,
+  stale = false,
 }: {
-  points: ChartPoint[];
-  /** The line drawn as "flat": starting NAV, or zero for cumulative P&amp;L. */
+  points?: ChartPoint[];
+  series?: ChartSeries[];
+  /** The line drawn as "flat": starting NAV, or zero for cumulative P&L. */
   baseline: number;
   label: string;
   valueSuffix?: string;
   emptyMessage?: string;
   invalidMessage?: string;
   height?: number;
+  /** Observation coverage metadata (last trusted ledger and missing intervals). */
+  coverage?: PerformanceObservationCoverage;
+  /** Marks the chart as displaying stale indexed data. */
+  stale?: boolean;
 }) {
   const gradientId = useId();
+  const gapPatternId = useId();
   const tableId = useId();
   const [drawn, setDrawn] = useState(false);
   const [hover, setHover] = useState<number | null>(null);
   const [showData, setShowData] = useState(false);
   const pathRef = useRef<SVGPathElement>(null);
 
-  const allSeries = series && series.length > 0 ? series : points ? [{ points }] : [];
-  const primaryCount = allSeries[0]?.points.length ?? 0;
-  const invalid = !Number.isFinite(baseline) || allSeries.some((s) =>
-    s.points.some((point) =>
-      !Number.isFinite(point.timestamp) || point.timestamp <= 0 || !Number.isFinite(point.value)
-    )
+  const allSeries = useMemo<ChartSeries[]>(
+    () => (series && series.length > 0 ? series : points ? [{ points }] : []),
+    [series, points],
   );
+  const missingIntervals = useMemo<PerformanceMissingInterval[]>(
+    () => normalizeMissingIntervals(coverage?.missingIntervals),
+    [coverage?.missingIntervals],
+  );
+  const primaryCount = allSeries[0]?.points.length ?? 0;
+  const invalid =
+    !Number.isFinite(baseline) ||
+    allSeries.some((s) =>
+      s.points.some(
+        (point) =>
+          !Number.isFinite(point.timestamp) ||
+          point.timestamp <= 0 ||
+          !Number.isFinite(point.value),
+      ),
+    );
 
   useEffect(() => {
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -93,41 +131,96 @@ export function PerformanceChart({
     if (invalid || allSeries.length === 0) return null;
     const allPoints = allSeries.flatMap((s) => s.points);
     if (allPoints.length === 0) return null;
+
     const values = allPoints.map((point) => point.value);
     const min = Math.min(baseline, ...values);
     const max = Math.max(baseline, ...values);
     // A flat series would divide by zero; give it a nominal band so it centres.
     const span = max - min || Math.max(1, Math.abs(max) * 0.02);
 
-    const buildSeriesGeom = (s: ChartSeries) => {
-      const pts = s.points;
-      if (pts.length === 0) return { coords: [] as Array<{ x: number; y: number; timestamp: number; value: number }>, line: "", area: "" };
-      const x = (index: number) =>
-        PAD_X + (index / Math.max(1, pts.length - 1)) * (VIEW_WIDTH - PAD_X * 2);
-      const y = (value: number) =>
-        VIEW_HEIGHT - PAD_Y - ((value - min) / span) * (VIEW_HEIGHT - PAD_Y * 2);
-      const coords = pts.map((point, index) => ({
-        x: x(index), y: y(point.value), timestamp: point.timestamp, value: point.value,
-      }));
-      const line = pts.length === 1
-        ? `M${PAD_X},${coords[0].y} L${VIEW_WIDTH - PAD_X},${coords[0].y}`
-        : coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
-      const area = `${line} L${(pts.length === 1 ? VIEW_WIDTH - PAD_X : coords.at(-1)!.x).toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${PAD_X},${VIEW_HEIGHT - PAD_Y} Z`;
-      return { coords, line, area };
+    const timestamps = [
+      ...allPoints.map((point) => point.timestamp),
+      ...missingIntervals.flatMap((interval) => [interval.startTimestamp, interval.endTimestamp]),
+    ];
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+    const tsSpan = maxTs - minTs;
+
+    const xForTimestamp = (ts: number, fallbackIndex: number, total: number) => {
+      if (tsSpan > 0) {
+        return PAD_X + ((ts - minTs) / tsSpan) * (VIEW_WIDTH - PAD_X * 2);
+      }
+      return PAD_X + (fallbackIndex / Math.max(1, total - 1)) * (VIEW_WIDTH - PAD_X * 2);
     };
 
-    const seriesGeoms = allSeries.map(buildSeriesGeom);
     const y = (value: number) =>
       VIEW_HEIGHT - PAD_Y - ((value - min) / span) * (VIEW_HEIGHT - PAD_Y * 2);
 
-    // A single point has no line; draw a short flat stub so the dot has context.
-    const coords = points.map((point, index) => ({ x: x(index), y: y(point.value) }));
-    const line = points.length === 1
-      ? `M${PAD_X},${coords[0].y} L${VIEW_WIDTH - PAD_X},${coords[0].y}`
-      : coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
-    const area = `${line} L${points.length === 1 ? VIEW_WIDTH - PAD_X : coords.at(-1)!.x.toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${PAD_X},${VIEW_HEIGHT - PAD_Y} Z`;
-    return { coords, line, area, baselineY: y(baseline) };
-  }, [points, baseline, invalid]);
+    const buildSeriesGeom = (s: ChartSeries) => {
+      const pts = s.points;
+      if (pts.length === 0) {
+        return {
+          coords: [] as Array<{ x: number; y: number; timestamp: number; value: number }>,
+          segments: [] as Array<{ line: string; area: string }>,
+          stroke: s.stroke,
+          area: s.area,
+        };
+      }
+
+      const coords = pts.map((point, index) => ({
+        x: xForTimestamp(point.timestamp, index, pts.length),
+        y: y(point.value),
+        timestamp: point.timestamp,
+        value: point.value,
+      }));
+
+      // Break the line across missing intervals so a gap is never bridged or
+      // mistaken for verified zero performance.
+      const observedSegments = splitPointsByMissingIntervals(coords, missingIntervals);
+      const segments = observedSegments.map((seg) => {
+        if (seg.length === 1) {
+          const only = seg[0];
+          const stubLeft = Math.max(PAD_X, only.x - 10);
+          const stubRight = Math.min(VIEW_WIDTH - PAD_X, only.x + 10);
+          const line =
+            pts.length === 1 && missingIntervals.length === 0
+              ? `M${PAD_X},${only.y.toFixed(1)} L${VIEW_WIDTH - PAD_X},${only.y.toFixed(1)}`
+              : `M${stubLeft.toFixed(1)},${only.y.toFixed(1)} L${stubRight.toFixed(1)},${only.y.toFixed(1)}`;
+          const areaLeft = pts.length === 1 && missingIntervals.length === 0 ? PAD_X : stubLeft;
+          const areaRight =
+            pts.length === 1 && missingIntervals.length === 0 ? VIEW_WIDTH - PAD_X : stubRight;
+          const area = `${line} L${areaRight.toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${areaLeft.toFixed(1)},${VIEW_HEIGHT - PAD_Y} Z`;
+          return { line, area };
+        }
+        const line = seg
+          .map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`)
+          .join(" ");
+        const area = `${line} L${seg[seg.length - 1].x.toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${seg[0].x.toFixed(1)},${VIEW_HEIGHT - PAD_Y} Z`;
+        return { line, area };
+      });
+
+      return { coords, segments, stroke: s.stroke, area: s.area };
+    };
+
+    const seriesGeoms = allSeries.map(buildSeriesGeom);
+    const gapRects = missingIntervals.map((interval) => {
+      const x1 = xForTimestamp(interval.startTimestamp, 0, 2);
+      const x2 = xForTimestamp(interval.endTimestamp, 1, 2);
+      return {
+        x: Math.min(x1, x2),
+        width: Math.max(6, Math.abs(x2 - x1)),
+        interval,
+      };
+    });
+
+    return {
+      seriesGeoms,
+      gapRects,
+      baselineY: y(baseline),
+      firstTimestamp: minTs,
+      lastTimestamp: maxTs,
+    };
+  }, [allSeries, baseline, invalid, missingIntervals]);
 
   if (invalid) {
     return (
@@ -140,10 +233,19 @@ export function PerformanceChart({
     );
   }
 
+  const hasCoverageBanner = Boolean(coverage) || stale;
+
   if (!geometry) {
     return (
-      <div className="border border-pv-ink/[0.1] bv-surface/40 px-4 py-12 text-center text-sm text-pv-muted">
-        {emptyMessage}
+      <div className="border border-pv-ink/[0.1] bg-pv-surface/40 px-4 py-12 text-center text-sm text-pv-muted">
+        <p>{emptyMessage}</p>
+        {hasCoverageBanner ? (
+          <p className="mt-2 font-mono text-[10px] uppercase tracking-wider text-pv-muted">
+            {coverage ? `Last trusted ledger ${formatTrustedLedger(coverage.lastTrustedLedger)}` : null}
+            {coverage && stale ? " · " : null}
+            {stale ? "Stale data" : null}
+          </p>
+        ) : null}
       </div>
     );
   }
@@ -156,16 +258,47 @@ export function PerformanceChart({
   const up = last.value >= baseline;
   const strokeDefault = up ? "rgb(var(--pv-accent))" : "rgb(var(--pv-danger))";
   const length = pathRef.current?.getTotalLength?.() ?? 2000;
-  const table = buildPerformanceChartRows(points, valueSuffix);
+  const table = buildChartTableRows(allSeries[0]?.points ?? [], valueSuffix);
 
   return (
     <figure className="border border-pv-ink/[0.1] bg-pv-surface/40 p-3">
+      {hasCoverageBanner ? (
+        <div
+          data-performance-coverage="true"
+          className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-pv-ink/[0.08] pb-2 font-mono text-[10px] uppercase tracking-wider text-pv-muted"
+        >
+          <span>
+            {coverage
+              ? `Last trusted ledger ${formatTrustedLedger(coverage.lastTrustedLedger)}`
+              : "Observation coverage"}
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {missingIntervals.length > 0 ? (
+              <span
+                data-missing-intervals={missingIntervals.length}
+                className="rounded-sm border border-pv-ink/[0.18] bg-pv-ink/[0.05] px-1.5 py-0.5 text-pv-text"
+              >
+                {missingIntervals.length} missing interval{missingIntervals.length === 1 ? "" : "s"} (gap ≠ 0.00{valueSuffix})
+              </span>
+            ) : null}
+            {stale ? (
+              <span
+                data-stale-data="true"
+                className="rounded-sm border border-pv-danger/40 bg-pv-danger/[0.08] px-1.5 py-0.5 text-pv-danger"
+              >
+                Stale data
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       <svg
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
         style={{ height }}
         className="w-full touch-none"
         role="img"
-        aria-label={`${label}: ${primary.coords.length} point${primary.coords.length === 1 ? "" : "s"}, ending at ${last.value.toFixed(2)}${valueSuffix}`}
+        aria-label={`${label}: ${primary.coords.length} point${primary.coords.length === 1 ? "" : "s"}, ending at ${last.value.toFixed(2)}${valueSuffix}${missingIntervals.length > 0 ? `, ${missingIntervals.length} missing interval${missingIntervals.length === 1 ? "" : "s"}` : ""}${stale ? ", stale data" : ""}`}
         onMouseLeave={() => setHover(null)}
       >
         <defs>
@@ -173,33 +306,89 @@ export function PerformanceChart({
             <stop offset="0%" stopColor={strokeDefault} stopOpacity="0.22" />
             <stop offset="100%" stopColor={strokeDefault} stopOpacity="0" />
           </linearGradient>
+          <pattern
+            id={gapPatternId}
+            width="8"
+            height="8"
+            patternUnits="userSpaceOnUse"
+            patternTransform="rotate(45)"
+          >
+            <line
+              x1="0"
+              y1="0"
+              x2="0"
+              y2="8"
+              stroke="rgb(var(--pv-ink) / 0.22)"
+              strokeWidth="2"
+            />
+          </pattern>
         </defs>
 
+        {/* Missing-interval bands: hatched shading distinct from a verified zero line */}
+        {geometry.gapRects.map((gap, index) => (
+          <g key={`gap-${gap.interval.startTimestamp}-${gap.interval.endTimestamp}-${index}`} data-performance-gap="true">
+            <rect
+              x={gap.x}
+              y={PAD_Y}
+              width={gap.width}
+              height={VIEW_HEIGHT - PAD_Y * 2}
+              fill={`url(#${gapPatternId})`}
+              stroke="rgb(var(--pv-ink) / 0.24)"
+              strokeWidth="1"
+              strokeDasharray="2 2"
+            >
+              <title>
+                {`Missing observation interval: ${formatDay(gap.interval.startTimestamp)} to ${formatDay(gap.interval.endTimestamp)}${gap.interval.reason ? ` (${gap.interval.reason})` : ""}`}
+              </title>
+            </rect>
+          </g>
+        ))}
+
         <line
-          x1={PAD_X} x2={VIEW_WIDTH - PAD_X}
-          y1={geometry.baselineY} y2={geometry.baselineY}
-          stroke="rgb(var(--pv-ink) / 0.18)" strokeWidth="1" strokeDasharray="3 4"
+          x1={PAD_X}
+          x2={VIEW_WIDTH - PAD_X}
+          y1={geometry.baselineY}
+          y2={geometry.baselineY}
+          stroke="rgb(var(--pv-ink) / 0.18)"
+          strokeWidth="1"
+          strokeDasharray="3 4"
         />
 
-        <path
-          d={geometry.area}
-          fill={`url(#${gradientId})`}
-          style={{ opacity: drawn ? 1 : 0, transition: "opacity 600ms ease-out 250ms" }}
-        />
-        <path
-          ref={pathRef}
-          d={geometry.line}
-          fill="none"
-          stroke={stroke}
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          style={{
-            strokeDasharray: length,
-            strokeDashoffset: drawn ? 0 : length,
-            transition: "stroke-dasharray 900ms cubic-bezier(0.22, 1, 0.36, 1)",
-          }}
-        />
+        {geometry.seriesGeoms.map((seriesGeom, seriesIndex) => {
+          const seriesStroke = seriesGeom.stroke ?? strokeDefault;
+          const showArea = seriesGeom.area ?? seriesIndex === 0;
+          return (
+            <g key={`series-${seriesIndex}`}>
+              {showArea
+                ? seriesGeom.segments.map((seg, segIndex) => (
+                    <path
+                      key={`area-${seriesIndex}-${segIndex}`}
+                      d={seg.area}
+                      fill={`url(#${gradientId})`}
+                      style={{ opacity: drawn ? 1 : 0, transition: "opacity 600ms ease-out 250ms" }}
+                    />
+                  ))
+                : null}
+              {seriesGeom.segments.map((seg, segIndex) => (
+                <path
+                  key={`line-${seriesIndex}-${segIndex}`}
+                  ref={seriesIndex === 0 && segIndex === 0 ? pathRef : undefined}
+                  d={seg.line}
+                  fill="none"
+                  stroke={seriesStroke}
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{
+                    strokeDasharray: length,
+                    strokeDashoffset: drawn ? 0 : length,
+                    transition: "stroke-dasharray 900ms cubic-bezier(0.22, 1, 0.36, 1)",
+                  }}
+                />
+              ))}
+            </g>
+          );
+        })}
 
         {/* Hover targets: one invisible column per point, so the pointer never has
             to find a 4px dot. */}
@@ -211,8 +400,8 @@ export function PerformanceChart({
             width={
               index === primary.coords.length - 1
                 ? VIEW_WIDTH
-                : (primary.coords[index + 1].x - coord.x) / 2
-                  + (index === 0 ? coord.x : (coord.x - primary.coords[index - 1].x) / 2)
+                : (primary.coords[index + 1].x - coord.x) / 2 +
+                  (index === 0 ? coord.x : (coord.x - primary.coords[index - 1].x) / 2)
             }
             height={VIEW_HEIGHT}
             fill="transparent"
@@ -222,8 +411,12 @@ export function PerformanceChart({
 
         {hover !== null && activeCoord && (
           <line
-            x1={activeCoord.x} x2={activeCoord.x} y1={PAD_Y} y2={VIEW_HEIGHT - PAD_Y}
-            stroke="rgb(var(--pv-ink) / 0.2)" strokeWidth="1"
+            x1={activeCoord.x}
+            x2={activeCoord.x}
+            y1={PAD_Y}
+            y2={VIEW_HEIGHT - PAD_Y}
+            stroke="rgb(var(--pv-ink) / 0.2)"
+            strokeWidth="1"
           />
         )}
         <circle
@@ -274,6 +467,19 @@ export function PerformanceChart({
                 ))}
               </tbody>
             </table>
+            {missingIntervals.length > 0 && (
+              <div className="mt-2 border-t border-pv-ink/[0.1] pt-2 font-mono text-xs text-pv-muted">
+                <p className="font-semibold text-pv-text">Missing observation intervals (not zero):</p>
+                <ul className="mt-1 list-disc pl-4">
+                  {missingIntervals.map((interval, index) => (
+                    <li key={`table-gap-${interval.startTimestamp}-${index}`}>
+                      {formatDay(interval.startTimestamp)} to {formatDay(interval.endTimestamp)}
+                      {interval.reason ? ` — ${interval.reason}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {table.truncated && (
               <p className="mt-1 text-xs text-pv-muted">
                 Showing the last {table.rows.length} of {table.total} points.

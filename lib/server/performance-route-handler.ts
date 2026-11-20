@@ -18,9 +18,13 @@ import { computeAgentPerformance, cumulativePnlPoints } from "@/lib/agents/perfo
 import { apiError } from "@/lib/api/errors";
 import { authorizeRequest } from "@/lib/api/policy";
 import { getAgentTradeRows, getSyncMeta } from "@/lib/db";
-import type { PortfolioPerformanceResponse } from "@/lib/portfolio-performance";
+import {
+  parseTrustedLedger,
+  type PortfolioPerformanceResponse,
+} from "@/lib/portfolio-performance";
 import { parseAddressParam } from "@/lib/server/api-validation";
 import { cachedFor } from "@/lib/server/ttl-cache";
+import { CLAIM_EVENTS_CURSOR_KEY } from "@/lib/server/vs-index";
 import { buildVSCacheFreshness } from "@/lib/vs-freshness";
 
 export const PERFORMANCE_ROUTE = "/api/performance/[address]";
@@ -52,12 +56,14 @@ export type PerformanceCalculator = (
 ) => Promise<PortfolioPerformanceResponse>;
 
 export const readIndexPerformance: PerformanceCalculator = async (address) => {
-  const [rows, lastSettlementSync] = await Promise.all([
+  const [rows, lastSettlementSync, rawTrustedLedger] = await Promise.all([
     getAgentTradeRows(address),
     getSyncMeta(SETTLEMENT_LAST_SYNC_META_KEY),
+    getSyncMeta(CLAIM_EVENTS_CURSOR_KEY),
   ]);
   const { performance, results } = computeAgentPerformance(rows);
   const updatedAtMs = Number(lastSettlementSync ?? "0");
+  const lastTrustedLedger = parseTrustedLedger(rawTrustedLedger);
 
   return {
     points: cumulativePnlPoints(results),
@@ -68,6 +74,10 @@ export const readIndexPerformance: PerformanceCalculator = async (address) => {
       freshnessWindowMs: performanceFreshnessWindowMs(),
       source: "index",
     }),
+    coverage: {
+      lastTrustedLedger,
+      missingIntervals: [],
+    },
   };
 };
 

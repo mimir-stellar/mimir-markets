@@ -655,6 +655,37 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
     },
   };
 
+  const PerformanceMissingIntervalSchema: Record<string, unknown> = {
+    type: "object",
+    description: "An unobserved interval in a performance series (`lib/portfolio-performance.ts::PerformanceMissingInterval`).",
+    required: ["startTimestamp", "endTimestamp"],
+    additionalProperties: false,
+    properties: {
+      startTimestamp: { type: "integer", minimum: 1, description: "Start of the missing interval in epoch milliseconds." },
+      endTimestamp: { type: "integer", minimum: 1, description: "End of the missing interval in epoch milliseconds." },
+      reason: { type: "string", description: "Optional human-readable reason for the observation gap." },
+    },
+  };
+
+  const PerformanceObservationCoverageSchema: Record<string, unknown> = {
+    type: "object",
+    description: "Observation coverage metadata (`lib/portfolio-performance.ts::PerformanceObservationCoverage`).",
+    required: ["lastTrustedLedger", "missingIntervals"],
+    additionalProperties: false,
+    properties: {
+      lastTrustedLedger: {
+        type: ["integer", "null"],
+        minimum: 0,
+        description: "Highest ledger sequence trusted by the read index, or null when unavailable.",
+      },
+      missingIntervals: {
+        type: "array",
+        items: PerformanceMissingIntervalSchema,
+        description: "Unobserved intervals that must remain visually distinct from verified zero performance.",
+      },
+    },
+  };
+
   const PortfolioPerformanceResponseSchema: Record<string, unknown> = {
     type: "object",
     description: "Response payload for `GET /api/performance/{address}` (`lib/portfolio-performance.ts::PortfolioPerformanceResponse`).",
@@ -664,6 +695,7 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
       points: { type: "array", items: PnlPointSchema },
       settled: { type: "integer", minimum: 0, description: "Total number of settled markets for this address." },
       cache: VSCacheFreshness,
+      coverage: PerformanceObservationCoverageSchema,
     },
   };
 

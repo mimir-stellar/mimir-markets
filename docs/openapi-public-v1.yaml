@@ -2720,6 +2720,42 @@ paths:
                         type: integer
                         minimum: 1
                         description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+                  coverage:
+                    type: object
+                    description: "Observation coverage metadata (`lib/portfolio-performance.ts::PerformanceObservationCoverage`)."
+                    required:
+                      - lastTrustedLedger
+                      - missingIntervals
+                    additionalProperties: false
+                    properties:
+                      lastTrustedLedger:
+                        type:
+                          - integer
+                          - "null"
+                        minimum: 0
+                        description: "Highest ledger sequence trusted by the read index, or null when unavailable."
+                      missingIntervals:
+                        type: array
+                        description: "Unobserved intervals that must remain visually distinct from verified zero performance."
+                        items:
+                          type: object
+                          description: "An unobserved interval in a performance series (`lib/portfolio-performance.ts::PerformanceMissingInterval`)."
+                          required:
+                            - startTimestamp
+                            - endTimestamp
+                          additionalProperties: false
+                          properties:
+                            startTimestamp:
+                              type: integer
+                              minimum: 1
+                              description: "Start of the missing interval in epoch milliseconds."
+                            endTimestamp:
+                              type: integer
+                              minimum: 1
+                              description: "End of the missing interval in epoch milliseconds."
+                            reason:
+                              type: string
+                              description: "Optional human-readable reason for the observation gap."
               examples:
                 portfolioPerformance:
                   summary: "Cumulative realised P&L series computed from settled markets."
@@ -5096,6 +5132,42 @@ components:
               type: integer
               minimum: 1
               description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+        coverage:
+          type: object
+          description: "Observation coverage metadata (`lib/portfolio-performance.ts::PerformanceObservationCoverage`)."
+          required:
+            - lastTrustedLedger
+            - missingIntervals
+          additionalProperties: false
+          properties:
+            lastTrustedLedger:
+              type:
+                - integer
+                - "null"
+              minimum: 0
+              description: "Highest ledger sequence trusted by the read index, or null when unavailable."
+            missingIntervals:
+              type: array
+              description: "Unobserved intervals that must remain visually distinct from verified zero performance."
+              items:
+                type: object
+                description: "An unobserved interval in a performance series (`lib/portfolio-performance.ts::PerformanceMissingInterval`)."
+                required:
+                  - startTimestamp
+                  - endTimestamp
+                additionalProperties: false
+                properties:
+                  startTimestamp:
+                    type: integer
+                    minimum: 1
+                    description: "Start of the missing interval in epoch milliseconds."
+                  endTimestamp:
+                    type: integer
+                    minimum: 1
+                    description: "End of the missing interval in epoch milliseconds."
+                  reason:
+                    type: string
+                    description: "Optional human-readable reason for the observation gap."
     StoredBasket:
       type: object
       description: "A user-composed agent basket (`lib/db.ts::StoredBasket`)."
