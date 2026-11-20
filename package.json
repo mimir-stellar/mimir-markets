@@ -6,6 +6,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "prepack": "node scripts/check-tracked-path-case.mjs",
     "test:node": "node scripts/run-node-tests.mjs"
   },
   "dependencies": {
