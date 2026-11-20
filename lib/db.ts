@@ -477,6 +477,22 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_resource ON payments_v2(resource)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_seller ON payments_v2(seller)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_tx ON payments_v2(network, transaction_hash, resource)" },
+  // Which resource each settled x402 payment bought (lib/x402/fulfillment-receipt.ts).
+  // The primary key makes the binding first-writer-wins: a payment is consumed by
+  // exactly one canonical resource digest, and a lost response can be redelivered
+  // for that resource only, without a second charge.
+  { sql: `CREATE TABLE IF NOT EXISTS x402_fulfillment_receipts (
+    network TEXT NOT NULL,
+    transaction_hash TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    resource_digest TEXT NOT NULL,
+    payer TEXT NOT NULL,
+    amount_atomic NUMERIC(78,0) NOT NULL,
+    settled_at BIGINT NOT NULL,
+    redeliveries INTEGER NOT NULL DEFAULT 0,
+    last_delivered_at BIGINT NOT NULL,
+    PRIMARY KEY(network, transaction_hash)
+  )` },
   // The oracle's classic USDC bonus transfer is outside Soroban settlement.
   // Reserve once before submission; an ambiguous failure stays held for manual
   // reconciliation rather than risking a second transfer after a restart.
@@ -1976,6 +1992,72 @@ export async function insertPayment(e: PaymentRow): Promise<void> {
       e.settled_at,
       e.created_at,
     ],
+  });
+}
+
+export interface FulfillmentReceiptRow {
+  network: string;
+  transaction: string;
+  resource: string;
+  resourceDigest: string;
+  payer: string;
+  amountAtomic: string;
+  settledAt: number;
+  redeliveries: number;
+  lastDeliveredAt: number;
+}
+
+function toFulfillmentReceipt(row: Record<string, unknown>): FulfillmentReceiptRow {
+  return {
+    network: getString(row.network),
+    transaction: getString(row.transaction_hash),
+    resource: getString(row.resource),
+    resourceDigest: getString(row.resource_digest),
+    payer: getString(row.payer),
+    amountAtomic: String(row.amount_atomic),
+    settledAt: getNumber(row.settled_at),
+    redeliveries: getNumber(row.redeliveries),
+    lastDeliveredAt: getNumber(row.last_delivered_at),
+  };
+}
+
+export async function getFulfillmentReceipt(network: string, transaction: string): Promise<FulfillmentReceiptRow | null> {
+  const pool = await getDb();
+  const result = await execute(pool, {
+    sql: `SELECT * FROM x402_fulfillment_receipts WHERE network = ? AND transaction_hash = ? LIMIT 1`,
+    args: [network, transaction.toLowerCase()],
+  });
+  const row = result.rows[0];
+  return row ? toFulfillmentReceipt(row as Record<string, unknown>) : null;
+}
+
+/** Insert-if-absent; returns the binding that now holds and whether it is new. */
+export async function bindFulfillmentReceipt(
+  r: FulfillmentReceiptRow,
+): Promise<{ receipt: FulfillmentReceiptRow; created: boolean }> {
+  const pool = await getDb();
+  const inserted = await execute(pool, {
+    sql: `INSERT INTO x402_fulfillment_receipts (
+      network, transaction_hash, resource, resource_digest, payer, amount_atomic,
+      settled_at, redeliveries, last_delivered_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(network, transaction_hash) DO NOTHING
+    RETURNING *`,
+    args: [r.network, r.transaction.toLowerCase(), r.resource, r.resourceDigest, r.payer,
+      r.amountAtomic, r.settledAt, r.redeliveries, r.lastDeliveredAt],
+  });
+  if (inserted.rows[0]) return { receipt: toFulfillmentReceipt(inserted.rows[0] as Record<string, unknown>), created: true };
+  const existing = await getFulfillmentReceipt(r.network, r.transaction);
+  if (!existing) throw new Error("fulfillment receipt conflict without an existing row");
+  return { receipt: existing, created: false };
+}
+
+export async function noteFulfillmentRedelivery(network: string, transaction: string, at: number): Promise<void> {
+  const pool = await getDb();
+  await execute(pool, {
+    sql: `UPDATE x402_fulfillment_receipts SET redeliveries = redeliveries + 1, last_delivered_at = ?
+      WHERE network = ? AND transaction_hash = ?`,
+    args: [at, network, transaction.toLowerCase()],
   });
 }
 
