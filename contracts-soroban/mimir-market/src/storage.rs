@@ -405,6 +405,16 @@ pub fn get_creator_claims(
     (out, total)
 }
 
+pub fn creator_claims_page(
+    env: &Env,
+    creator: &Address,
+    offset: u32,
+    limit: u32,
+) -> (Vec<u64>, u32) {
+    let (ids, total) = get_creator_claims(env, creator, offset, limit);
+    (ids, total as u32)
+}
+
 // ── Versioned verdicts ───────────────────────────────────────────────────────
 
 /// The versioned verdict stored for a resolved claim, if one was written.

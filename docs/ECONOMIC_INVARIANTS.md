@@ -79,6 +79,25 @@ established gross meaning for `total_return_multiple` and gains a `fee_adjusted`
 marker, so the fee-adjusted and fee-unknown cases stay distinguishable without
 renaming an event or an envelope field.
 
+### Payout preview completeness under truncated history
+
+When aggregating payout preview and liability across claim history (`preview_creator_payouts`
+and `preview_claims_batch` in `contracts-soroban/mimir-market/src/fees.rs` and `contract.rs`),
+the aggregate explicitly reports completeness:
+
+- **Explicit missing observations:** If claim history is truncated by pagination
+  (`limit < total_claims` or `offset > 0`) or if any claim in a requested batch cannot be
+  observed, `missing_observations` is marked explicitly and `is_complete` is `false`.
+- **Incomplete aggregates are never presented as verified total liability:**
+  `verified_total_liability` is `Option::Some(aggregate_liability)` ONLY when
+  `is_complete` is `true` (`missing_observations == 0` and `is_truncated == false`).
+  Whenever history is truncated or incomplete, `verified_total_liability` is `None`,
+  preventing any caller or keeper from presenting an incomplete aggregate as a verified
+  total liability.
+- Tests: `src/test_payout_preview_completeness.rs`. Covers complete history, limit-truncated
+  slices, offset-truncated slices, missing observations, boundary limits, and fixed-odds
+  reserved liability accounting.
+
 ### Settlement conservation
 
 `conservation_holds_across_every_verdict` asserts, for every `WinnerSide`, that

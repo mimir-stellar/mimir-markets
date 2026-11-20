@@ -6,11 +6,12 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 use crate::admin;
 use crate::claims;
 use crate::escrow;
+use crate::fees;
 use crate::resolve;
 use crate::storage;
 use crate::types::{
     Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeePolicy,
-    MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict,
+    MarketConfig, PayoutPreview, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict,
     WinnerSide, MAX_BATCH_SIZE,
 };
 
@@ -202,6 +203,65 @@ impl MimirMarket {
         Ok(storage::creator_claims_page(&env, &creator, offset, limit))
     }
 
+    /// Preview payout aggregate and completeness for a creator's claim history.
+    ///
+    /// Reads up to `limit` claim ids starting at `offset` (0-based) from the
+    /// creator index, loading each claim and aggregating gross, fee, net and liability.
+    ///
+    /// # Invariants
+    ///
+    /// - **Explicit missing observations:** If the page is truncated (`limit < total`
+    ///   or `offset > 0`) or any claim cannot be loaded, `missing_observations`
+    ///   records the missing count explicitly and `is_complete` is `false`.
+    /// - **Never present incomplete aggregate as verified total liability:**
+    ///   `verified_total_liability` is `Some(amount)` ONLY when `is_complete` is `true`.
+    ///   When truncated or missing observations exist, `verified_total_liability` is `None`.
+    pub fn preview_creator_payouts(
+        env: Env,
+        creator: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<PayoutPreview, Error> {
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let total_count = storage::creator_claim_count(&env, &creator);
+        let (ids, _) = storage::get_creator_claims(&env, &creator, offset, limit);
+        let is_truncated = (offset as u64) > 0
+            || (limit > 0 && (offset as u64 + ids.len() as u64) < total_count);
+
+        let mut claims: Vec<Option<Claim>> = Vec::new(&env);
+        for id in ids.iter() {
+            claims.push_back(storage::get_claim_opt(&env, id));
+        }
+
+        fees::aggregate_payout_preview(&env, &claims, total_count as u32, is_truncated)
+    }
+
+    /// Preview payout aggregate and completeness for an explicit batch of claim ids.
+    ///
+    /// Guards against over-sized batches with `Error::BatchTooLarge`.
+    /// Missing claims are marked as missing observations, setting `is_complete = false`
+    /// and leaving `verified_total_liability = None`.
+    pub fn preview_claims_batch(
+        env: Env,
+        ids: Vec<u64>,
+    ) -> Result<PayoutPreview, Error> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+
+        let mut claims: Vec<Option<Claim>> = Vec::new(&env);
+        for id in ids.iter() {
+            claims.push_back(storage::get_claim_opt(&env, id));
+        }
+
+        fees::aggregate_payout_preview(&env, &claims, ids.len(), false)
+    }
+
     /// The claim's verdict with its explicit encoding version.
     ///
     /// Refuses with `Error::UnsupportedVerdictVersion` if the stored verdict was
@@ -383,6 +443,18 @@ impl MimirMarket {
 
     pub fn get_withdrawable(env: Env, who: Address) -> i128 {
         storage::withdrawable(&env, &who)
+    }
+
+    pub fn get_withdrawable_batch(
+        env: Env,
+        addrs: Vec<Address>,
+    ) -> Result<Vec<i128>, Error> {
+        storage::get_withdrawable_batch(&env, addrs)
+    }
+
+    #[cfg(test)]
+    pub fn add_withdrawable(env: Env, who: Address, amount: i128) {
+        storage::add_withdrawable(&env, &who, amount);
     }
 
     pub fn get_accrued_fees(env: Env, who: Address) -> i128 {
