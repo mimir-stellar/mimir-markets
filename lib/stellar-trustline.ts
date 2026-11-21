@@ -49,8 +49,10 @@
  */
 
 import {
+  Account,
   BASE_FEE,
   Operation,
+  StrKey,
   TransactionBuilder,
   type Horizon,
 } from "@stellar/stellar-sdk";
@@ -62,6 +64,61 @@ import {
   type StellarSigner,
 } from "./stellar";
 import { USDC_CODE, USDC_ISSUER, usdcAsset } from "./usdc";
+
+/** Safe metadata identifying the USDC asset and issuer. */
+export const USDC_TRUSTLINE_DESCRIPTOR = {
+  code: USDC_CODE,
+  issuer: USDC_ISSUER,
+} as const;
+
+/**
+ * Redact Stellar secret seeds (S… 56 base32 chars) and sensitive tokens
+ * from diagnostic/error strings to avoid leaking credentials.
+ * Preserves public keys (G…), contract IDs (C…), and asset identifiers.
+ */
+export function sanitizeTrustlineDiagnostic(detail: string): string {
+  if (!detail) return "";
+  return detail
+    .replace(/(api[_-]?key|authorization|bearer|private[_-]?key|secret(?:[_-]?seed)?)\s*[:=]\s*S[A-Za-z2-7]{55}/gi, "$1=[redacted-seed]")
+    .replace(/(api[_-]?key|authorization|bearer|private[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/(^|[^A-Za-z0-9])S[A-Za-z2-7]{55}(?![A-Za-z0-9])/gi, "$1[redacted-seed]");
+}
+
+/**
+ * Format a trustline operation error so that it clearly identifies the target asset
+ * and safe issuer metadata, while keeping private connector payloads out of public
+ * diagnostics and redacting any accidental secret seeds.
+ */
+export function formatTrustlineError(cause: unknown): Error {
+  let rawMessage = "";
+  if (cause instanceof Error) {
+    rawMessage = cause.message;
+  } else if (cause && typeof cause === "object") {
+    // Only extract public error messages; private connector payloads
+    // (such as `ext`, `payload`, `data`) are strictly kept out of diagnostics.
+    const obj = cause as { message?: unknown; error?: unknown };
+    if (typeof obj.message === "string" && obj.message.trim()) {
+      rawMessage = obj.message.trim();
+    } else if (typeof obj.error === "string" && obj.error.trim()) {
+      rawMessage = obj.error.trim();
+    }
+  } else if (typeof cause === "string" && cause.trim()) {
+    rawMessage = cause.trim();
+  }
+
+  const sanitized = sanitizeTrustlineDiagnostic(rawMessage);
+
+  // If the message already contains both the asset code and safe issuer metadata,
+  // preserve it directly.
+  if (sanitized && sanitized.includes(USDC_CODE) && sanitized.includes(USDC_ISSUER)) {
+    return new Error(sanitized);
+  }
+
+  const detail = sanitized ? `: ${sanitized}` : ".";
+  return new Error(
+    `Failed to add ${USDC_CODE} trustline (issuer: ${USDC_ISSUER})${detail}`,
+  );
+}
 
 export type TrustlineStatus =
   /** Trustline present: the account can hold and stake USDC. */
@@ -153,6 +210,22 @@ export async function readUsdcTrustline(
   }
 }
 
+export interface HorizonSubmitResult {
+  hash: string;
+}
+
+export type HorizonTransactionSubmitter = (
+  transaction: any,
+) => Promise<HorizonSubmitResult>;
+
+export interface EnsureUsdcTrustlineOptions extends ReadUsdcTrustlineOptions {
+  submitTransaction?: HorizonTransactionSubmitter;
+  server?: {
+    loadAccount: HorizonAccountLoader;
+    submitTransaction?: HorizonTransactionSubmitter;
+  };
+}
+
 /**
  * Add the USDC trustline, signed by the connected wallet.
  *
@@ -160,39 +233,73 @@ export async function readUsdcTrustline(
  * (Soroban RPC does not accept classic-only transactions for submission in a way
  * that gains anything here). Idempotent from the caller's point of view: a
  * trustline that already exists returns immediately without prompting.
+ *
+ * Diagnostics identify the target asset and safe issuer metadata, keep private
+ * connector payloads out of error messages, and redact secret seeds.
  */
 export async function ensureUsdcTrustline(
   signer: StellarSigner,
+  options: EnsureUsdcTrustlineOptions = {},
 ): Promise<{ added: boolean; hash?: string }> {
-  const existing = await readUsdcTrustline(signer.publicKey);
-  if (existing.status === "ready") return { added: false };
-  if (existing.status === "unfunded") {
+  // Reject secret seeds passed as signer.publicKey without echoing the secret
+  if (
+    typeof signer?.publicKey === "string" &&
+    (signer.publicKey.startsWith("S") || StrKey.isValidEd25519SecretSeed(signer.publicKey))
+  ) {
     throw new Error(
-      "This account does not exist on the Stellar ledger yet. Fund it with XLM first, then add the USDC trustline.",
+      `Invalid signer public key for ${USDC_CODE} trustline (issuer: ${USDC_ISSUER}): secret seed must not be used as public key.`,
     );
   }
 
-  const horizon = createHorizonServer();
-  const account = await horizon.loadAccount(signer.publicKey);
+  const existing = await readUsdcTrustline(signer.publicKey, options);
+  if (existing.status === "ready") return { added: false };
+  if (existing.status === "unfunded") {
+    throw new Error(
+      `This account does not exist on the Stellar ledger yet. Fund it with XLM first, then add the ${USDC_CODE} trustline (issuer: ${USDC_ISSUER}).`,
+    );
+  }
 
-  const transaction = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-    .addOperation(Operation.changeTrust({ asset: usdcAsset() }))
-    // 180s rather than the 30s used for simulation-only envelopes: this one is
-    // actually submitted, and a hardware wallet confirmation can take a while.
-    .setTimeout(180)
-    .build();
+  try {
+    const loadAccount =
+      options.loadAccount ??
+      options.server?.loadAccount ??
+      resolveAccountLoader(options);
 
-  const { signedTxXdr } = await signer.signTransaction(transaction.toXDR(), {
-    networkPassphrase: NETWORK_PASSPHRASE,
-    address: signer.publicKey,
-  });
+    const submitTx =
+      options.submitTransaction ??
+      options.server?.submitTransaction ??
+      ((tx: any) => createHorizonServer().submitTransaction(tx));
 
-  const signed = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
-  const result = await horizon.submitTransaction(signed);
-  return { added: true, hash: result.hash };
+    const rawAccount = await loadAccount(signer.publicKey);
+    const account =
+      typeof (rawAccount as any)?.sequenceNumber === "function"
+        ? (rawAccount as any)
+        : new Account(
+            (rawAccount as any)?.id ?? (rawAccount as any)?.account_id ?? signer.publicKey,
+            String((rawAccount as any)?.sequence ?? "1"),
+          );
+
+    const transaction = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(Operation.changeTrust({ asset: usdcAsset() }))
+      // 180s rather than the 30s used for simulation-only envelopes: this one is
+      // actually submitted, and a hardware wallet confirmation can take a while.
+      .setTimeout(180)
+      .build();
+
+    const { signedTxXdr } = await signer.signTransaction(transaction.toXDR(), {
+      networkPassphrase: NETWORK_PASSPHRASE,
+      address: signer.publicKey,
+    });
+
+    const signed = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
+    const result = await submitTx(signed);
+    return { added: true, hash: result.hash };
+  } catch (cause) {
+    throw formatTrustlineError(cause);
+  }
 }
 
 

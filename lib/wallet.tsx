@@ -152,23 +152,50 @@ async function loadKit(): Promise<Kit> {
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /**
+ * Redact Stellar secret seeds (S… 56 base32 chars) and sensitive key patterns
+ * from diagnostic/error strings to avoid leaking credentials.
+ */
+export function sanitizeWalletMessage(message: string): string {
+  if (!message) return "";
+  return message
+    .replace(/(api[_-]?key|authorization|bearer|private[_-]?key|secret(?:[_-]?seed)?)\s*[:=]\s*S[A-Za-z2-7]{55}/gi, "$1=[redacted-seed]")
+    .replace(/(api[_-]?key|authorization|bearer|private[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/(^|[^A-Za-z0-9])S[A-Za-z2-7]{55}(?![A-Za-z0-9])/gi, "$1[redacted-seed]");
+}
+
+/**
  * The kit rejects with plain `{ code, message }` objects, not `Error`s, so a
  * `catch (e) { e.message }` at a call site reads `undefined`. Everything crossing
  * out of this module becomes a real `Error` with a message worth showing.
+ *
+ * Private connector payloads (such as `ext` or `payload` details) are kept out
+ * of public diagnostics and error messages, and secret seeds are redacted.
  */
-function toWalletError(cause: unknown, action: string): Error {
-  if (cause instanceof Error) return cause;
+export function toWalletError(cause: unknown, action: string): Error {
+  let message: string | undefined;
 
-  if (cause && typeof cause === "object") {
+  if (cause instanceof Error) {
+    message = cause.message;
+  } else if (cause && typeof cause === "object") {
     const kitError = cause as {
       code?: number;
       message?: string;
-      ext?: string;
+      ext?: unknown;
+      payload?: unknown;
+      data?: unknown;
     };
 
-    if (typeof kitError.message === "string" && kitError.message) {
-      return new Error(kitError.message);
+    if (typeof kitError.message === "string" && kitError.message.trim()) {
+      message = kitError.message.trim();
     }
+    // Private connector payloads (kitError.ext, kitError.payload) are intentionally
+    // omitted from public diagnostics and error messages.
+  } else if (typeof cause === "string" && cause.trim()) {
+    message = cause.trim();
+  }
+
+  if (message) {
+    return new Error(sanitizeWalletMessage(message));
   }
 
   return new Error(`Could not ${action}.`);
