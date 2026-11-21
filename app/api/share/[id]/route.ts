@@ -9,8 +9,14 @@
  * This route is PUBLIC and unauthenticated — an OG scraper holds no session and
  * no invite key. So a private claim renders a locked placeholder: see
  * lib/share-card.ts for why the content model is separate and tested.
+ *
+ * Caching: responses carry an ETag bound to the canonical settlement identity
+ * (claim id, size, locale, state, winner side, and visibility). Private cards
+ * are marked `private` so they can never be stored in a shared/public cache,
+ * and their ETag is namespaced so it can never collide with a public card's.
  */
 
+import { createHash } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { readClaimRaw, type ClaimData } from "@/lib/contract";
 import { toCanonicalMode } from "@/lib/market-modes";
@@ -117,6 +123,42 @@ function renderSvg(card: ShareCard, claimId: number): string {
 </svg>`;
 }
 
+/**
+ * Build a strong ETag from the canonical settlement identity of the card.
+ * Visibility is part of the identity, and private cards use a distinct
+ * namespace so a private ETag can never equal a public one.
+ */
+export function buildShareEtag(input: {
+  claimId: number;
+  size: string;
+  locale: ShareCardLocale;
+  state: string;
+  winnerSide: unknown;
+  isPrivate: boolean;
+  kind: string;
+}): string {
+  const identity = [
+    "share-card-v1",
+    input.isPrivate ? "private" : "public",
+    String(input.claimId),
+    input.size,
+    input.locale,
+    input.state,
+    String(input.winnerSide ?? ""),
+    input.kind,
+  ].join("|");
+  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 32);
+  return `"${input.isPrivate ? "p" : "s"}-${digest}"`;
+}
+
+function matchesEtag(ifNoneMatch: string | null, etag: string): boolean {
+  if (!ifNoneMatch) return false;
+  return ifNoneMatch
+    .split(",")
+    .map((t) => t.trim().replace(/^W\//, ""))
+    .some((t) => t === "*" || t === etag);
+}
+
 export async function GET(
   req: NextRequest | Request,
   ctx: { params: Promise<{ id: string }> | { id: string } },
@@ -147,6 +189,8 @@ export async function GET(
     maxChallengers: claim.max_challengers,
   });
 
+  const isPrivate = Boolean(claim.is_private || claim.visibility === "private");
+
   const cardBuilder = deps.buildCard ?? buildShareCard;
   const card = cardBuilder(
     {
@@ -160,7 +204,7 @@ export async function GET(
       deadline: claim.deadline,
       state: claim.state,
       // The single guard that keeps a private claim off a public card.
-      isPrivate: Boolean(claim.is_private || claim.visibility === "private"),
+      isPrivate,
       winnerSide: claim.winner_side,
       locale,
       creatorIdentity: claim.creator,
@@ -168,6 +212,31 @@ export async function GET(
     },
     size,
   );
+
+  const etag = buildShareEtag({
+    claimId,
+    size,
+    locale,
+    state: claim.state,
+    winnerSide: claim.winner_side,
+    isPrivate,
+    kind: card.kind,
+  });
+
+  // Private cards must never be stored by a shared/public cache: `private`
+  // keeps them to the requester's own cache only.
+  const cacheControl = isPrivate
+    ? "private, max-age=0, must-revalidate"
+    : claim.state === "resolved" || claim.state === "cancelled"
+      ? "public, s-maxage=86400, stale-while-revalidate=604800"
+      : "public, s-maxage=60, stale-while-revalidate=300";
+
+  const cacheHeaders: Record<string, string> = {
+    ETag: etag,
+    "Cache-Control": cacheControl,
+    Vary: "Accept-Encoding",
+  };
+  if (isPrivate) cacheHeaders["Vary"] = "Accept-Encoding, Cookie";
 
   // Awaited: the function freezes as soon as the response returns. The
   // idempotency key is per (claim, size, kind), so a scraper refetching the same
@@ -189,14 +258,18 @@ export async function GET(
     consented: true,
   });
 
+  const ifNoneMatch =
+    "headers" in req && typeof req.headers?.get === "function"
+      ? req.headers.get("if-none-match")
+      : null;
+  if (matchesEtag(ifNoneMatch, etag)) {
+    return new Response(null, { status: 304, headers: cacheHeaders });
+  }
+
   return new Response(renderSvg(card, claimId), {
     headers: {
       "content-type": "image/svg+xml; charset=utf-8",
-      // A settled card never changes; an open one changes as the pot moves.
-      "cache-control":
-        claim.state === "resolved" || claim.state === "cancelled"
-          ? "public, s-maxage=86400, stale-while-revalidate=604800"
-          : "public, s-maxage=60, stale-while-revalidate=300",
+      ...cacheHeaders,
     },
   });
 }

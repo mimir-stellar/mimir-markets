@@ -289,6 +289,49 @@ export function schemaVersionHeaders(): Record<string, string> {
   return { [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION) };
 }
 
+// ── Conditional read responses ────────────────────────────────────────────────
+
+/**
+ * Visibility of a market read view. Private (invite-scoped) views must never
+ * share a cache key with public ones, so visibility is part of the key input.
+ */
+export type ReadVisibility = "public" | "invite";
+
+export interface SettlementIdentity {
+  marketId: string;
+  settlementId: string;
+  visibility: ReadVisibility;
+  /** Invite scope identifier. Required when visibility is "invite". */
+  inviteScope?: string;
+}
+
+/**
+ * Build the cache-key material for a settled-market read. Visibility and invite
+ * scope are bound into the identity so a private response cannot be served to,
+ * or collide with, a public one.
+ */
+export function settlementCacheKey(id: SettlementIdentity): string {
+  if (id.visibility === "invite" && !id.inviteScope) {
+    throw new Error("invite-scoped settlement identity requires inviteScope");
+  }
+  const scope = id.visibility === "invite" ? `invite:${id.inviteScope}` : "public";
+  return `v${API_SCHEMA_VERSION}|${id.marketId}|${id.settlementId}|${scope}`;
+}
+
+/**
+ * Headers for a conditional response. Private views are marked `private` so
+ * shared caches never store them, and the ETag is derived from the cache key.
+ */
+export function conditionalReadHeaders(id: SettlementIdentity, etag: string): Record<string, string> {
+  const cacheControl = id.visibility === "invite" ? "private, no-cache" : "public, max-age=0, must-revalidate";
+  return {
+    ...schemaVersionHeaders(),
+    ETag: `"${etag}"`,
+    "Cache-Control": cacheControl,
+    Vary: "Accept-Encoding",
+  };
+}
+
 // ── Agent API Drift Check ─────────────────────────────────────────────────────
 
 /**

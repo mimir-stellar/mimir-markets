@@ -37,6 +37,8 @@ export type ApiErrorCode =
   // ── 404/409 ──
   | "not_found"
   | "conflict"
+  // ── 412/304: conditional request outcomes ──
+  | "precondition_failed"
   // ── 429: slow down ──
   | "rate_limited"
   | "budget_exhausted"
@@ -79,6 +81,10 @@ const SPECS: Record<ApiErrorCode, ErrorSpec> = {
 
   not_found: { status: 404, retryable: false },
   conflict: { status: 409, retryable: false },
+
+  // A failed If-Match / If-None-Match precondition means the caller's view of the
+  // resource is stale; re-reading and retrying with the new validator can succeed.
+  precondition_failed: { status: 412, retryable: true, retryAfterSeconds: 0 },
 
   rate_limited: { status: 429, retryable: true, retryAfterSeconds: 60 },
   // A budget refills on a window boundary, so it is retryable but not soon.
