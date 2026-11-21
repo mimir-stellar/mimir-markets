@@ -129,3 +129,11 @@ comparison is correct regardless of which encoding path produced each value.
 - Rollback is a code revert, not an env toggle: there is deliberately no switch to
   restore the ambiguous concatenation. The settled-on-chain digest is the record,
   and it is not rewritten by a redeploy.
+
+## Research citation provenance view
+
+[`ResearchSourceCitations.tsx`](../components/research/ResearchSourceCitations.tsx) exposes an expandable, bounded (`max-h-60 overflow-y-auto`) detail card via [`CitationProvenanceView.tsx`](../components/research/CitationProvenanceView.tsx) backed by [`lib/research/citations.ts`](../lib/research/citations.ts):
+
+- `ResearchCitationView` carries `capturedAt`, `capturedAtIso` (ISO 8601), `digestStatus` (`"verified" | "malformed" | "missing"`), and `sourceAvailability` (`"available" | "stale" | "unavailable" | "unverified"`), alongside `contentHash` (`64`-char SHA-256 hex digest with clipboard copy state) and `status` (`CitationRowStatus`).
+- **Source availability is strictly decoupled from claim truth value**: `"available"` and `"verified"` only indicate that a snapshot was fetched and its cryptographic digest is well-formed, never asserting that a market claim is true or how it resolves on-chain.
+- Both rendered rows and callers (`citationsFromContextPack`, `citationsFromResolutionSource`) retain backward-compatible fields (`capturedAt` remains optional on resolution cards).

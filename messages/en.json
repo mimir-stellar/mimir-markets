@@ -1366,6 +1366,31 @@
       "duplicated": "Duplicate",
       "cancelled": "Cancelled",
       "dependency_failure": "Bad hash"
+    },
+    "provenance": {
+      "toggle": "Provenance",
+      "collapse": "Hide provenance",
+      "captureTime": "Capture time",
+      "unknownCaptureTime": "Capture time not recorded",
+      "relativeJustNow": "captured just now",
+      "relativeSeconds": "captured {value}s ago",
+      "relativeMinutes": "captured {value}m ago",
+      "relativeHours": "captured {value}h ago",
+      "relativeDays": "captured {value}d ago",
+      "contentDigest": "Content digest (SHA-256)",
+      "digestVerified": "32-byte cryptographic digest verified",
+      "digestMalformed": "Invalid hash format",
+      "noDigest": "No content digest provided",
+      "copyDigest": "Copy digest",
+      "copiedDigest": "Copied",
+      "sourceAvailability": "Source availability",
+      "availability_available": "Available",
+      "availability_stale": "Stale snapshot",
+      "availability_unavailable": "Unavailable",
+      "availability_unverified": "Unverified",
+      "validationStatus": "Validation status",
+      "trustTier": "Trust tier",
+      "truthSeparationNotice": "Source availability confirms evidence capture and cryptographic integrity only; it does not determine the claim's truth value or final market outcome."
     }
   },
   "contract": {
