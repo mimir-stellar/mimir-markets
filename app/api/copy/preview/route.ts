@@ -33,6 +33,7 @@ function parsePreviewInput(value: unknown, now: number): {
       ![p.maxPerPositionUsdc, p.dailyCapUsdc, p.weeklyCapUsdc, p.totalOpenExposureUsdc]
         .every(amount) ||
       ![p.minConfidenceBps, p.minPayoutBps, p.expiresAt].every(Number.isSafeInteger) ||
+      (p.revision !== undefined && (!Number.isSafeInteger(p.revision) || Number(p.revision) < 0)) ||
       p.depth !== 1 || !["active", "paused", "revoked"].includes(String(p.status)) ||
       !strings(p.allowedCategories, 100) || !strings(p.allowedModes, 10)) return null;
 

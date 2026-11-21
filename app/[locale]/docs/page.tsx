@@ -1604,7 +1604,9 @@ that schedule is unrepresentable here.`}
         <p>
           A read-only dry run is available at <code className="rounded bg-pv-surface2 px-1 text-xs">POST /api/copy/preview</code>.
           It accepts a draft permission, signal and usage snapshot, and returns the first policy block and the
-          stake in atomic USDC. The supplied snapshot is hypothetical: the response explicitly says no Soroban
+          stake in atomic USDC. Preview cache entries are bound to the permission revision and invalidated upon
+          owner policy updates or revocation, ensuring exact amount preservation between preview and execution.
+          The supplied snapshot is hypothetical: the response explicitly says no Soroban
           simulation, transaction or audit write ran. Even a policy-eligible preview is not permission to spend; funded
           execution must re-read on-chain state and obtain its own signature.
         </p>

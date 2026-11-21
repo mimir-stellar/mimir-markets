@@ -76,6 +76,7 @@ export interface SpendPermissionRecord {
   createdAt: number;
   revokedAt?: number;
   revokedReason?: string;
+  revision?: number;
 }
 
 export type PermissionRejection =
@@ -137,6 +138,17 @@ export function permissionKey(input: {
     input.allowanceAtomic.toString(), String(input.periodSeconds),
     String(input.startAt), String(input.endAt), input.salt,
   ].join("|"));
+}
+
+/**
+ * Canonical revision identifier for a delegated spend permission.
+ *
+ * Reflects the signed parameters, allowance, period, revision, and revocation state.
+ */
+export function spendPermissionRevision(permission: SpendPermissionRecord): string {
+  const rev = typeof permission.revision === "number" ? permission.revision : 0;
+  const status = permission.revokedAt ? `revoked:${permission.revokedAt}` : "active";
+  return sha256Hex(`${permission.permissionHash}|rev:${rev}|status:${status}|allowance:${permission.allowanceAtomic.toString()}`);
 }
 
 /**
@@ -241,6 +253,7 @@ export interface SpendPermissionGrant {
   extraData?: unknown;
   signature?: unknown;
   permission?: unknown;
+  revision?: unknown;
 }
 
 function asStellarAddress(value: unknown): string | null {
@@ -314,6 +327,8 @@ export function parseSpendPermissionGrant(args: {
   const salt = asBigInt(grant.salt)?.toString() ?? "0";
   const extraData = typeof grant.extraData === "string" ? grant.extraData : "";
   const expirationLedger = asSeconds(grant.expirationLedger) ?? undefined;
+  const parsedRevision = asBigInt(grant.revision);
+  const revision = parsedRevision !== null && parsedRevision >= 0n ? Number(parsedRevision) : undefined;
 
   return {
     ok: true,
@@ -322,6 +337,7 @@ export function parseSpendPermissionGrant(args: {
       agentId, account, spender: grantSpender, token, allowanceAtomic, periodSeconds,
       startAt, endAt, salt, extraData, signature,
       ...(expirationLedger !== undefined ? { expirationLedger } : {}),
+      ...(revision !== undefined ? { revision } : {}),
       // Stored verbatim: a re-verification has to hash the object the owner
       // actually signed, not one we rebuilt from parsed parts.
       permissionJson: JSON.stringify(grant.permission ?? grant),

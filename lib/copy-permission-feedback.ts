@@ -478,3 +478,34 @@ export function buildRevokeConfirmationCopy(
     cancelLabel: "Cancel",
   };
 }
+
+/**
+ * Reads live SAC allowance and balance on chain, then builds contract-backed feedback.
+ */
+export async function evaluateCopyPermissionOnchain(
+  permission: CopyPermission,
+  options: {
+    connectedWallet?: string | null;
+    spentInPeriodAtomic?: bigint;
+    freshness?: { timestamp: number; ttlMs?: number; isStale?: boolean } | null;
+    globalPaused?: boolean;
+    now?: number;
+  } = {},
+): Promise<CopyPermissionFeedbackView> {
+  const [onchainAllowanceAtomic, onchainBalanceAtomic] = await Promise.all([
+    getUsdcAllowanceUnits(permission.ownerWallet, permission.spendPermission.spender).catch(() => null),
+    getUsdcBalanceUnits(permission.ownerWallet).catch(() => null),
+  ]);
+
+  return buildCopyPermissionFeedback({
+    permission,
+    connectedWallet: options.connectedWallet,
+    onchainAllowanceAtomic,
+    onchainBalanceAtomic,
+    spentInPeriodAtomic: options.spentInPeriodAtomic,
+    freshness: options.freshness,
+    globalPaused: options.globalPaused,
+    now: options.now,
+  });
+}
+

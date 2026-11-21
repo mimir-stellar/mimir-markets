@@ -60,6 +60,8 @@ export interface CopyPermission {
   status: "active" | "revoked" | "paused";
   spendPermission: { token: string; spender: string; allowanceAtomic: bigint; periodSeconds: number };
   signedPolicyHash: string;
+  /** Monotonic policy revision counter. When absent, defaults to 0. */
+  revision?: number;
 }
 
 export interface CopyUsage {
@@ -170,6 +172,24 @@ export function copyPolicyHash(input: Omit<CopyPermission, "signedPolicyHash">):
   return sha256Hex(JSON.stringify(input, (_, value) => typeof value === "bigint" ? value.toString() : value));
 }
 
+/**
+ * Canonical revision identifier for a copy permission.
+ *
+ * Deterministically combines permissionId, monotonic revision counter (if present),
+ * lifecycle status, and the SHA-256 hash of all policy parameters (caps, allowlists,
+ * thresholds, and spend permission terms).
+ *
+ * Any policy update, cap adjustment, spend permission change, or status change
+ * (pause, revocation) produces a new revision string, invalidating previous previews.
+ */
+export function copyPermissionRevision(
+  permission: CopyPermission | Omit<CopyPermission, "signedPolicyHash">,
+): string {
+  const hash = copyPolicyHash(permission);
+  const rev = "revision" in permission && typeof permission.revision === "number" ? permission.revision : 0;
+  return sha256Hex(`${permission.permissionId}|rev:${rev}|status:${permission.status}|policy:${hash}`);
+}
+
 function parseAtomicString(value: string): bigint {
   if (!/^(0|[1-9]\d*)$/.test(value)) throw new Error("invalid atomic amount");
   return BigInt(value);
@@ -178,6 +198,7 @@ function parseAtomicString(value: string): bigint {
 /** Validate the externally supplied, owner-signed policy before storing it. */
 export function validateCopyPermission(input: Omit<CopyPermission, "signedPolicyHash">, now = Date.now()): string | null {
   if (!input.permissionId.trim() || input.permissionId.length > 128) return "invalid_permission_id";
+  if (input.revision !== undefined && (!Number.isSafeInteger(input.revision) || input.revision < 0)) return "invalid_revision";
   if (!isStellarAddress(input.ownerWallet) || !isStellarAddress(input.spendPermission.token) || !isStellarAddress(input.spendPermission.spender)) return "invalid_address";
   if (!input.executionAgentId.trim() || !input.signalAgentId.trim() || input.executionAgentId === input.signalAgentId) return "invalid_agent_pair";
   try {
@@ -412,7 +433,240 @@ export interface CopyAuditRecord {
   ownerFeeAtomic: bigint;
   skipReason?: CopySkipReason;
   createdAt: number;
+  previewId?: string;
+  permissionRevision?: string;
 }
+
+export interface CopyPreviewCacheEntry {
+  /** Unique cache identifier for this preview entry. */
+  previewId: string;
+  /** Identifier of the copy permission evaluated. */
+  permissionId: string;
+  /** Canonical revision of the copy permission at evaluation time. */
+  permissionRevision: string;
+  /** Signal identification. */
+  sourcePositionId: string;
+  signalAgentId: string;
+  claimId: number;
+  /** Policy eligibility and gate outcomes. */
+  policyEligible: boolean;
+  allowed: boolean;
+  skipReason?: CopySkipReason | null;
+  /**
+   * The exact stake amount in atomic USDC (7 decimals) determined during preview.
+   * Execution must preserve this exact amount without rounding or drift.
+   */
+  stakeAtomic: string | null;
+  /** Display USDC number corresponding to stakeAtomic. */
+  stakeUsdc: number | null;
+  /** Creation timestamp (ms). */
+  createdAt: number;
+  /** Expiry timestamp (ms) - bounded by cache TTL, signal deadline, and permission expiry. */
+  expiresAt: number;
+}
+
+export type CopyPreviewExecutionRejection =
+  | "permission_revoked"
+  | "revision_mismatch"
+  | "permission_mismatch"
+  | "signal_mismatch"
+  | "preview_expired"
+  | "policy_ineligible"
+  | "amount_mismatch";
+
+export const DEFAULT_COPY_PREVIEW_TTL_MS = 60_000;
+export const MAX_COPY_PREVIEW_CACHE_ENTRIES = 500;
+
+export function copyPreviewKey(permissionId: string, sourcePositionId: string): string {
+  return `copy_prev:${permissionId.trim()}:${sourcePositionId.trim()}`;
+}
+
+const copyPreviewCache = new Map<string, CopyPreviewCacheEntry>();
+
+export function createCopyPreviewCacheEntry(args: {
+  permission: CopyPermission;
+  signal: CopySignal;
+  decision: { allowed: boolean; stakeUsdc?: number; reason?: CopySkipReason };
+  policyEligible?: boolean;
+  now?: number;
+  ttlMs?: number;
+}): CopyPreviewCacheEntry {
+  const now = args.now ?? Date.now();
+  const ttl = args.ttlMs ?? DEFAULT_COPY_PREVIEW_TTL_MS;
+  const expiresAt = Math.min(
+    now + ttl,
+    args.signal.deadline,
+    args.permission.expiresAt,
+  );
+  let stakeAtomic: string | null = null;
+  let stakeUsdc: number | null = null;
+  if (args.decision.allowed && typeof args.decision.stakeUsdc === "number") {
+    stakeUsdc = args.decision.stakeUsdc;
+    try {
+      stakeAtomic = parseUsdcAtomic(stakeUsdc).toString();
+    } catch {
+      stakeAtomic = null;
+    }
+  } else {
+    try {
+      stakeAtomic = parseUsdcAtomic(args.signal.stakeUsdc).toString();
+      stakeUsdc = args.signal.stakeUsdc;
+    } catch {
+      stakeAtomic = null;
+      stakeUsdc = null;
+    }
+  }
+
+  const previewId = copyPreviewKey(args.permission.permissionId, args.signal.sourcePositionId);
+  return {
+    previewId,
+    permissionId: args.permission.permissionId,
+    permissionRevision: copyPermissionRevision(args.permission),
+    sourcePositionId: args.signal.sourcePositionId,
+    signalAgentId: args.signal.signalAgentId,
+    claimId: args.signal.claimId,
+    policyEligible: args.policyEligible ?? args.decision.allowed,
+    allowed: args.decision.allowed,
+    skipReason: args.decision.allowed ? null : (args.decision.reason ?? "malformed_signal"),
+    stakeAtomic,
+    stakeUsdc,
+    createdAt: now,
+    expiresAt,
+  };
+}
+
+export function getCopyPreviewCache(previewId: string, now = Date.now()): CopyPreviewCacheEntry | null {
+  const hit = copyPreviewCache.get(previewId);
+  if (!hit) return null;
+  if (now >= hit.expiresAt) {
+    copyPreviewCache.delete(previewId);
+    return null;
+  }
+  return hit;
+}
+
+export function getCopyPreviewCacheByPosition(permissionId: string, sourcePositionId: string, now = Date.now()): CopyPreviewCacheEntry | null {
+  return getCopyPreviewCache(copyPreviewKey(permissionId, sourcePositionId), now);
+}
+
+export function setCopyPreviewCache(entry: CopyPreviewCacheEntry): void {
+  copyPreviewCache.delete(entry.previewId);
+  if (copyPreviewCache.size >= MAX_COPY_PREVIEW_CACHE_ENTRIES) {
+    const oldest = copyPreviewCache.keys().next().value;
+    if (oldest !== undefined) copyPreviewCache.delete(oldest);
+  }
+  copyPreviewCache.set(entry.previewId, entry);
+}
+
+export function invalidateCopyPreview(previewId: string): boolean {
+  return copyPreviewCache.delete(previewId);
+}
+
+export function invalidateCopyPreviewsForPermission(permissionId: string): number {
+  let count = 0;
+  for (const [key, entry] of copyPreviewCache.entries()) {
+    if (entry.permissionId === permissionId) {
+      copyPreviewCache.delete(key);
+      count++;
+    }
+  }
+  return count;
+}
+
+export function clearCopyPreviewCache(): void {
+  copyPreviewCache.clear();
+}
+
+/**
+ * Validate that an intended execution strictly preserves the exact amounts
+ * and permission revision established during copy preview.
+ *
+ * Fails closed if:
+ * - The permission has been revoked or modified (revision mismatch).
+ * - The preview has expired.
+ * - The execution amounts (atomic and display) do not match the preview amounts exactly.
+ */
+export function validateCopyExecutionAgainstPreview(args: {
+  preview: CopyPreviewCacheEntry;
+  permission: CopyPermission;
+  executionStakeAtomic: bigint | string;
+  executionStakeUsdc?: number;
+  now?: number;
+}): { ok: true; stakeAtomic: bigint; stakeUsdc: number } | { ok: false; reason: CopyPreviewExecutionRejection; detail: string } {
+  const now = args.now ?? Date.now();
+
+  if (args.permission.status === "revoked") {
+    return { ok: false, reason: "permission_revoked", detail: "Copy permission has been revoked by owner" };
+  }
+  if (args.permission.permissionId !== args.preview.permissionId) {
+    return { ok: false, reason: "permission_mismatch", detail: "Preview belongs to a different copy permission" };
+  }
+  const currentRevision = copyPermissionRevision(args.permission);
+  if (currentRevision !== args.preview.permissionRevision) {
+    return { ok: false, reason: "revision_mismatch", detail: "Permission has been updated or revoked since preview was generated" };
+  }
+  if (now >= args.preview.expiresAt) {
+    return { ok: false, reason: "preview_expired", detail: "Copy preview has expired" };
+  }
+  if (!args.preview.policyEligible || !args.preview.allowed || args.preview.stakeAtomic === null || args.preview.stakeUsdc === null) {
+    return { ok: false, reason: "policy_ineligible", detail: `Preview is not policy eligible: ${args.preview.skipReason ?? "unknown"}` };
+  }
+
+  const execAtomic = typeof args.executionStakeAtomic === "string" ? BigInt(args.executionStakeAtomic) : args.executionStakeAtomic;
+  const previewAtomic = BigInt(args.preview.stakeAtomic);
+  if (execAtomic !== previewAtomic) {
+    return {
+      ok: false,
+      reason: "amount_mismatch",
+      detail: `Execution stake atomic (${execAtomic}) does not match preview stake atomic (${previewAtomic})`,
+    };
+  }
+  if (args.executionStakeUsdc !== undefined && args.executionStakeUsdc !== args.preview.stakeUsdc) {
+    return {
+      ok: false,
+      reason: "amount_mismatch",
+      detail: `Execution stake USDC (${args.executionStakeUsdc}) does not match preview stake USDC (${args.preview.stakeUsdc})`,
+    };
+  }
+
+  return { ok: true, stakeAtomic: previewAtomic, stakeUsdc: args.preview.stakeUsdc };
+}
+
+/**
+ * Evaluates copy execution bound to a pre-computed copy preview entry.
+ *
+ * Enforces that:
+ * 1. The permission revision still matches the preview.
+ * 2. The preview is still fresh and unexpired.
+ * 3. The exact stake amounts (both atomic and display) are preserved verbatim.
+ */
+export function evaluateCopyWithPreview(
+  permission: CopyPermission,
+  signal: CopySignal,
+  context: CopyExecutionContext,
+  preview: CopyPreviewCacheEntry,
+): { allowed: true; stakeUsdc: number; stakeAtomic: bigint } | { allowed: false; reason: CopySkipReason | CopyPreviewExecutionRejection } {
+  const signalAtomic = parseUsdcAtomic(signal.stakeUsdc);
+  const check = validateCopyExecutionAgainstPreview({
+    preview,
+    permission,
+    executionStakeAtomic: signalAtomic,
+    executionStakeUsdc: signal.stakeUsdc,
+    now: context.now,
+  });
+  if (!check.ok) {
+    if (check.reason === "permission_revoked") return { allowed: false, reason: "permission_revoked" };
+    return { allowed: false, reason: check.reason };
+  }
+
+  const standard = evaluateCopy(permission, signal, context);
+  if (!standard.allowed) {
+    return standard;
+  }
+
+  return { allowed: true, stakeUsdc: check.stakeUsdc, stakeAtomic: check.stakeAtomic };
+}
+
 
 /**
  * Human-readable explanation for copy-trading permission states and constraints.

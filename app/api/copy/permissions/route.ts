@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import {
-  copyGrantMessage, copyPolicyHash, copyRevokeMessage, validateCopyPermission, worstCaseCopySpend,
+  copyGrantMessage, copyPolicyHash, copyRevokeMessage, invalidateCopyPreviewsForPermission, validateCopyPermission, worstCaseCopySpend,
   type CopyPermission,
 } from "@/lib/copy-trading";
 import { getCopyPermission, listCopyExecutions, saveCopyPermission } from "@/lib/db";
@@ -165,6 +165,7 @@ export async function POST(req: Request): Promise<Response> {
 
   const record: CopyPermission = { ...permission, signedPolicyHash };
   await saveCopyPermission(record);
+  invalidateCopyPreviewsForPermission(record.permissionId);
 
   const feedback = await evaluateCopyPermissionOnchain(record);
   return jsonResponse({
@@ -221,6 +222,7 @@ export async function DELETE(req: Request): Promise<Response> {
 
   const revoked: CopyPermission = { ...permission, status: "revoked" };
   await saveCopyPermission(revoked);
+  invalidateCopyPreviewsForPermission(revoked.permissionId);
 
   const feedback = await evaluateCopyPermissionOnchain(revoked);
   return jsonResponse({
