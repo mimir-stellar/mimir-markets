@@ -197,25 +197,4 @@ Source: `contracts-soroban/mimir-squad/src/pool.rs`. Tests: `src/test_lifecycle.
   a second payout.
 - `src/test_dust_isolation.rs` isolates the same dust property for the squad pool:
   the final winner's gross is `formula + dust`, the dust is identical under either
-  claim order, an exactly dividing pool leaves none, conservation holds after every
-  claim, and preview equals payout.
-
-## Virtual baskets
-
-Source: `lib/baskets.ts`. Tests: `tests/node/baskets.test.ts`,
-`tests/node/basket-returns.test.ts`.
-
-- Weights equal exactly 10,000 bps and single-agent/category caps are enforced.
-- Paused/stale/failed-copy allocation remains idle USDC and cannot fabricate NAV.
-- Share/deposit/redemption and high-water-mark calculations use integer rounding
-  with explicit dust ownership.
-- Funded deposits remain off until the external audit and legal/eligibility gates in
-  `LAUNCH_GATE_STATUS.md` are complete.
-
-## Reentrancy
-
-There is no reentrancy guard in these contracts, and that is not an omission: the
-Soroban host rejects a call that re-enters a contract already on the call stack, so
-the EVM `nonReentrant` modifier has no counterpart to port. The ordering discipline it protected
-(state written before an external transfer) is kept anyway, because it is also what
-makes the pull paths correct.
+  claim order, an exactly dividing pool leaves none

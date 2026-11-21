@@ -1,6 +1,10 @@
 /**
  * Dedupe helpers for the market-creator worker.
  *
+ * Checkpoint binding: index checkpoints must match the configured network and
+ * contract identities before they are trusted. A mismatched checkpoint is
+ * rejected and the last trusted projection is preserved.
+ *
  * Extracted from index.ts so they can be unit-tested offline. Behaviour is
  * unchanged: the worker imports these and the tests pin the normalization and
  * filtering rules.
