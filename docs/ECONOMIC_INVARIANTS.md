@@ -49,6 +49,17 @@ Source: `contracts-soroban/mimir-market/src/fees.rs`, mirrored off-chain in
 - Exact-balance intake (`escrow::pull`) rejects fee-on-transfer and rebasing
   behaviour: the contract asserts escrow moved by exactly the requested amount and
   errors with `UnsupportedToken` otherwise.
+- Generated clients can inspect the bounded fee-policy compatibility descriptor via
+  `get_fee_policy_compatibility`, which returns `FeePolicyCompatibility` in O(1)
+  instance storage reads: `schema_version`, bounded `supported_fields`
+  (`platform_fee_bps`, `agent_owner_fee_bps`, `platform_recipient`,
+  `agent_owner_recipient`, `revision`), hard caps (`max_total_fee_bps`,
+  `bps_divisor`, `fee_timelock_seconds`, `usdc_decimals`, `min_stake`),
+  `rounding_mode` (`FeeRoundingMode::FloorPerLegParticipantRemainder`),
+  `profit_only`, `pull_based_payouts`, `exact_usdc_escrow`, and live
+  `current_revision`, `current_total_fee_bps`, and `has_pending_policy`. Uninitialized
+  contracts fail closed with `Error::NotInitialized`. Tests:
+  `src/test_fee_policy_compat.rs`.
 
 ### Principal-safe payout preview
 

@@ -1,7 +1,7 @@
 //! Value types for the Mimir market. Mirrors the structs and enums of
 //! `contracts/MimirV2.sol`.
 
-use soroban_sdk::{contracterror, contracttype, Address, BytesN, String};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, String, Symbol, Vec};
 
 // ── Limits (mirror MimirV2.sol) ──────────────────────────────────────────────
 
@@ -224,6 +224,49 @@ pub struct FeeSnapshot {
     pub agent_owner_fee_bps: u32,
     pub platform_recipient: Option<Address>,
     pub agent_owner_recipient: Option<Address>,
+}
+
+/// Current schema version returned by `get_fee_policy_compatibility`.
+pub const FEE_POLICY_COMPAT_VERSION: u32 = 1;
+
+/// Hard upper bound on the number of field identifiers returned in
+/// `FeePolicyCompatibility::supported_fields`.
+pub const FEE_POLICY_COMPAT_MAX_FIELDS: u32 = 5;
+
+/// Rounding semantics applied by `fees::quote_fees` and `fees::apply_fees`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FeeRoundingMode {
+    /// Each fee leg is `floor(profit * bps / BPS_DIVISOR)` computed
+    /// independently; the fractional remainder stays with the participant
+    /// (`owed = gross - fees_taken`), so principal is never reduced and fee
+    /// rounding leaves no dust in escrow.
+    FloorPerLegParticipantRemainder = 0,
+}
+
+/// Bounded fee-policy compatibility descriptor for generated clients.
+///
+/// Returned by `get_fee_policy_compatibility` in O(1) instance storage reads so
+/// generated clients and indexers can verify supported policy fields, hard
+/// caps, timelock, escrow scale, rounding semantics, and live/pending policy
+/// revision without mutating state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeePolicyCompatibility {
+    pub schema_version: u32,
+    pub supported_fields: Vec<Symbol>,
+    pub max_total_fee_bps: u32,
+    pub bps_divisor: i128,
+    pub fee_timelock_seconds: u64,
+    pub usdc_decimals: u32,
+    pub min_stake: i128,
+    pub rounding_mode: FeeRoundingMode,
+    pub profit_only: bool,
+    pub pull_based_payouts: bool,
+    pub exact_usdc_escrow: bool,
+    pub current_revision: u64,
+    pub current_total_fee_bps: u32,
+    pub has_pending_policy: bool,
 }
 
 // ── Claim ────────────────────────────────────────────────────────────────────
