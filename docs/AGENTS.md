@@ -350,6 +350,7 @@ npm run workers
 | `TRADER_MAX_STAKES_PER_CYCLE` | `1` | Maximum number of open claims each trader persona will challenge per cycle. |
 | `TRADER_MAX_PAID_READS_PER_CYCLE` | `3` | Maximum number of paid oracle second opinions bought per trader per cycle. Set to `0` to disable paid reads entirely. |
 | `TRADER_DRY_RUN` | `""` (disabled) | When set to `"1"`, logs decisions and planned stakes without broadcasting on-chain transactions or spending USDC. |
+| `TRADER_STATE_DIR` | `.mimir/traders` | Directory for durable trader state (`consumed-signals.json`). Consumed `(agentId, claimId)` signal identities are checked before x402 oracle quote purchase so repeat polling does not re-spend on already-completed decisions. |
 | `MIMIR_URL` | `""` | Base URL of the Mimir app instance (e.g. `http://localhost:3000`) used to buy x402 oracle second opinions via `POST /api/oracle`. Second-opinion purchase is skipped when unset or empty. |
 | `TRADER_BUY_ORACLE` | `"1"` (enabled) | Set to `"0"` to disable purchasing oracle second opinions over x402, evaluating claims using only persona reasoning. Any other value or unset enables oracle purchases. |
 | `TRADER_MOMENTUM_SECRET` | _(none)_ | Stellar secret seed (`S…`) for the Momentum Forecaster persona (`momentum-forecaster`). Trader is skipped if unset or invalid. |

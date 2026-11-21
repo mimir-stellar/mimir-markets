@@ -8,9 +8,14 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
+  FileSignalConsumptionStore,
+  buildSignalIdentity,
   filterJoinableClaims,
   shouldBuySecondOpinion,
   type JoinableClaimCandidate,
@@ -211,4 +216,139 @@ test("filterJoinableClaims: filters out claims already challenged by this trader
 
   const filtered = filterJoinableClaims(claims, challengers, TRADER_WALLET, now);
   assert.deepEqual(filtered.map((c) => c.id), [2]);
+});
+
+test("buildSignalIdentity: produces deterministic key and rejects empty inputs", () => {
+  assert.equal(buildSignalIdentity("momentum-forecaster", 42), "momentum-forecaster:42");
+  assert.equal(buildSignalIdentity("  quant-thresholder ", " 7 "), "quant-thresholder:7");
+  assert.throws(() => buildSignalIdentity("   ", 42), /non-empty agentId/);
+  assert.throws(() => buildSignalIdentity("momentum-forecaster", "   "), /valid claimId/);
+  assert.throws(() => buildSignalIdentity("momentum-forecaster", Number.NaN), /valid claimId/);
+});
+
+test("shouldBuySecondOpinion: rejects already-consumed signal identity before quote purchase", () => {
+  const signalId = buildSignalIdentity("momentum-forecaster", 42);
+  const consumed = new Set<string>();
+
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      signalId,
+      consumedSignals: consumed,
+    }),
+    true,
+  );
+
+  consumed.add(signalId);
+
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      signalId,
+      consumedSignals: consumed,
+    }),
+    false,
+  );
+
+  // Other claims or agents remain eligible
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      signalId: buildSignalIdentity("momentum-forecaster", 43),
+      consumedSignals: consumed,
+    }),
+    true,
+  );
+});
+
+test("shouldBuySecondOpinion: fails closed when consumedSignals is provided without a valid signalId", () => {
+  const consumed = new Set<string>();
+
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      signalId: "",
+      consumedSignals: consumed,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      consumedSignals: consumed,
+    }),
+    false,
+  );
+});
+
+test("FileSignalConsumptionStore: persists consumed signals across restarts and blocks repeat quote purchase", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mimir-trader-signals-"));
+  const storePath = path.join(tmpDir, "consumed-signals.json");
+  try {
+    const signalId = buildSignalIdentity("contrarian-fader", 99);
+    const firstStore = new FileSignalConsumptionStore(storePath);
+
+    assert.equal(firstStore.isConsumed(signalId), false);
+    assert.equal(
+      shouldBuySecondOpinion({
+        buySecondOpinion: true,
+        mimirUrl: "https://mimir.example.com",
+        dryRun: false,
+        claim: VALID_CLAIM,
+        signalId,
+        consumedSignals: firstStore,
+      }),
+      true,
+    );
+
+    const firstRecord = firstStore.markConsumed(signalId, "AGREE", 1_700_000_000_000);
+    // Idempotent second mark preserves original timestamp and outcome
+    const duplicateRecord = firstStore.markConsumed(signalId, "STAKED", 1_700_000_999_000);
+    assert.deepEqual(duplicateRecord, firstRecord);
+
+    // Reload in a fresh store instance (simulating repeat polling after restart)
+    const reloadedStore = new FileSignalConsumptionStore(storePath);
+    assert.equal(reloadedStore.isConsumed(signalId), true);
+    assert.equal(reloadedStore.size(), 1);
+    assert.equal(
+      shouldBuySecondOpinion({
+        buySecondOpinion: true,
+        mimirUrl: "https://mimir.example.com",
+        dryRun: false,
+        claim: VALID_CLAIM,
+        signalId,
+        consumedSignals: reloadedStore,
+      }),
+      false,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("FileSignalConsumptionStore: throws on corrupt durable store instead of silently double-spending", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mimir-trader-signals-corrupt-"));
+  const storePath = path.join(tmpDir, "consumed-signals.json");
+  try {
+    fs.writeFileSync(storePath, "{not valid json", "utf8");
+    assert.throws(() => new FileSignalConsumptionStore(storePath), /corrupt signal consumption store/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
