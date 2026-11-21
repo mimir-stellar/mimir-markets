@@ -8,6 +8,15 @@ import type { AgentTradeRow } from "@/lib/agents/performance";
 import type { AgentRecord } from "@/lib/agents/registry";
 import type { SpendPermissionRecord } from "@/lib/agents/spend-permissions";
 import type { CopyAuditRecord, CopyPermission } from "@/lib/copy-trading";
+import {
+  defaultReasonCodeForDecision,
+  isProposalReviewDecision,
+  isProposalReviewReasonCode,
+  type ProposalReviewDecision,
+  type ProposalReviewHistoryRecord,
+  type ProposalReviewReasonCode,
+  type RecordProposalReviewDecisionInput,
+} from "@/lib/proposal-review-history";
 
 /**
  * ADDRESS INVARIANT — read before touching any statement below.
@@ -608,6 +617,18 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_disposition ON market_proposals(disposition)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_review_status ON market_proposals(review_status)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_queued ON market_proposals(queued_at) WHERE review_status = 'queued'" },
+  { sql: `CREATE TABLE IF NOT EXISTS proposal_review_history (
+    id BIGSERIAL PRIMARY KEY,
+    proposal_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    recorded_at BIGINT NOT NULL,
+    superseded_by_proposal_id TEXT,
+    actor_id TEXT,
+    private_note TEXT
+  )` },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_proposal_review_history_proposal ON proposal_review_history(proposal_id, recorded_at DESC, id DESC)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_proposal_review_history_decision ON proposal_review_history(decision, recorded_at DESC)" },
   { sql: `CREATE TABLE IF NOT EXISTS market_series (
     series_id TEXT PRIMARY KEY,
     schema_version SMALLINT NOT NULL DEFAULT 1,
@@ -1687,6 +1708,123 @@ export async function attachProposalClaimId(proposalId: string, claimId: number)
     sql: "UPDATE market_proposals SET claim_id = ? WHERE proposal_id = ?",
     args: [claimId, proposalId],
   });
+}
+
+/**
+ * Append a decision entry to `proposal_review_history`.
+ *
+ * Records accepted, rejected, superseded, and expired decisions with a stable
+ * machine-readable `reasonCode`. Internal-only fields (`actorId`, `privateNote`)
+ * are stored for operator auditability and stripped from public views.
+ */
+export async function recordProposalReviewDecision(
+  input: RecordProposalReviewDecisionInput,
+): Promise<ProposalReviewHistoryRecord> {
+  if (!input.proposalId || typeof input.proposalId !== "string") {
+    throw new Error("proposalId is required");
+  }
+  if (!isProposalReviewDecision(input.decision)) {
+    throw new Error(`Invalid proposal review decision: ${String(input.decision)}`);
+  }
+  const reasonCode: ProposalReviewReasonCode =
+    input.reasonCode ?? defaultReasonCodeForDecision(input.decision);
+  if (!isProposalReviewReasonCode(reasonCode)) {
+    throw new Error(`Invalid proposal review reason code: ${String(reasonCode)}`);
+  }
+
+  const pool = await getDb();
+  const recordedAt = input.recordedAt ?? Date.now();
+  const supersededByProposalId = input.supersededByProposalId ?? null;
+  const actorId = input.actorId ?? null;
+  const privateNote = input.privateNote ?? null;
+
+  const result = await execute(pool, {
+    sql: `INSERT INTO proposal_review_history (
+            proposal_id, decision, reason_code, recorded_at,
+            superseded_by_proposal_id, actor_id, private_note
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          RETURNING id, proposal_id, decision, reason_code, recorded_at,
+                    superseded_by_proposal_id, actor_id, private_note`,
+    args: [
+      input.proposalId,
+      input.decision,
+      reasonCode,
+      recordedAt,
+      supersededByProposalId,
+      actorId,
+      privateNote,
+    ],
+  });
+
+  const row = result.rows[0] as Record<string, unknown> | undefined;
+  return {
+    id: row ? getNumber(row.id) : 0,
+    proposalId: row ? getString(row.proposal_id) : input.proposalId,
+    decision: (row ? getString(row.decision) : input.decision) as ProposalReviewDecision,
+    reasonCode: (row ? getString(row.reason_code) : reasonCode) as ProposalReviewReasonCode,
+    recordedAt: row ? getNumber(row.recorded_at) : recordedAt,
+    supersededByProposalId: row ? getNullableString(row.superseded_by_proposal_id) : supersededByProposalId,
+    actorId: row ? getNullableString(row.actor_id) : actorId,
+    privateNote: row ? getNullableString(row.private_note) : privateNote,
+  };
+}
+
+/**
+ * List proposal review history entries with optional filters and pagination.
+ *
+ * Returns full internal records; callers serving public endpoints MUST project
+ * each entry through `toPublicProposalReviewHistoryEntry`.
+ */
+export async function listProposalReviewHistory(opts: {
+  proposalId?: string | null;
+  decision?: ProposalReviewDecision | null;
+  reasonCode?: ProposalReviewReasonCode | null;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<{ entries: ProposalReviewHistoryRecord[]; limit: number; offset: number }> {
+  const pool = await getDb();
+  const limit = Math.min(Math.max(1, Math.trunc(opts.limit ?? 50)), 200);
+  const offset = Math.max(0, Math.trunc(opts.offset ?? 0));
+
+  const conditions: string[] = [];
+  const args: unknown[] = [];
+
+  if (opts.proposalId) {
+    conditions.push("proposal_id = ?");
+    args.push(opts.proposalId);
+  }
+  if (opts.decision) {
+    conditions.push("decision = ?");
+    args.push(opts.decision);
+  }
+  if (opts.reasonCode) {
+    conditions.push("reason_code = ?");
+    args.push(opts.reasonCode);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const result = await execute(pool, {
+    sql: `SELECT id, proposal_id, decision, reason_code, recorded_at,
+                 superseded_by_proposal_id, actor_id, private_note
+          FROM proposal_review_history
+          ${where}
+          ORDER BY recorded_at DESC, id DESC
+          LIMIT ? OFFSET ?`,
+    args: [...args, limit, offset],
+  });
+
+  const entries: ProposalReviewHistoryRecord[] = result.rows.map((row) => ({
+    id: getNumber(row.id),
+    proposalId: getString(row.proposal_id),
+    decision: getString(row.decision) as ProposalReviewDecision,
+    reasonCode: getString(row.reason_code) as ProposalReviewReasonCode,
+    recordedAt: getNumber(row.recorded_at),
+    supersededByProposalId: getNullableString(row.superseded_by_proposal_id),
+    actorId: getNullableString(row.actor_id),
+    privateNote: getNullableString(row.private_note),
+  }));
+
+  return { entries, limit, offset };
 }
 
 /**
