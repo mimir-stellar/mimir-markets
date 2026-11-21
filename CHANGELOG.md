@@ -6,6 +6,10 @@ why, the commit history records the what.
 
 ## [Unreleased]
 
+### Added
+
+- **Research-source disagreement report** ([#865](https://github.com/mimir-stellar/mimir-markets/issues/865)). `lib/research/disagreement.ts` compares normalized facts (number, string, boolean; JSON path or regex locators; absolute/relative tolerance) across captured research sources and reports each fact as `agree`, `disagree` or `insufficient`. Each source's cell is `value`, `missing`, `unparseable` or `unavailable`, so a failed, stale or unreadable source is never counted as a dissent. Bounded by `maxSources` (8), `maxFacts` (16), `maxBodyBytes` (512 KiB) and `maxValueChars` (200); overflow is listed as skipped and bodies never appear in the report. See `docs/RESEARCH_DISAGREEMENT.md`.
+
 ### Fixed
 
 - **The Oracle Reasoning Trace disclosure now announces its state** ([#522](https://github.com/mimir-stellar/mimir-markets/issues/522)). The `EvidenceInspector` toggle button carried no `aria-expanded` and no `aria-controls`, the expanded panel had no id and no label, and the chevron icons were read out as content — so screen-reader users could not tell whether the panel was open, nor which region the button controlled. The button now exposes `aria-expanded` / `aria-controls` (paired through `useId`), the panel is a labelled `region`, the chevrons are `aria-hidden`, and the toggle keeps a visible focus ring.

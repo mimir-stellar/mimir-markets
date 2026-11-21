@@ -60,6 +60,13 @@
  * Future: when `strict` becomes the default for production adapters, the
  * `advisory` array will become the promotion path for new finding types.
  *
+ * Cross-source comparison
+ * ───────────────────────
+ * This module judges one capture at a time. Comparing what several usable
+ * captures say about the same fact is `./disagreement.ts`
+ * (docs/RESEARCH_DISAGREEMENT.md), which treats a capture this validator marks
+ * unusable as `unavailable` rather than as a dissenting source.
+ *
  * Rollout controls
  * ────────────────
  * Set `RESEARCH_CONTENT_VALIDATION_DISABLED=1` to skip all content validation
