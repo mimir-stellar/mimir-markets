@@ -246,6 +246,13 @@ Bash
 
 ## Node test workflow (must stay green on release)
 
+Run `npm run test:node -- --help` for text help. For tools, use
+`npm run --silent test:node -- --help-json` to get a JSON object with a
+`flags` array. Each entry describes the flag name, option key and default.
+Optional fields list aliases, negated forms, a path argument, or an option
+enabled by that flag. Path defaults are repository-relative. A null cache
+directory uses `MIMIR_NODE_TEST_CACHE_DIR` or the built-in cache root.
+
 The release entry point is `npm run test:node`; `test:smoke` remains an alias
 for callers that already use it. The runner discovers all
 `tests/node/*.test.ts` files in deterministic order and explicitly preserves
