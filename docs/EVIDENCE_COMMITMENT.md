@@ -118,6 +118,31 @@ before comparison: any `0x` prefix is stripped and both sides are lowercased. Th
 matches the normalization applied by `verifyEvidenceCommitment` and ensures the
 comparison is correct regardless of which encoding path produced each value.
 
+## Proposal approval binding (market draft digest)
+
+Proposal approval is bound to an immutable canonical market draft digest so that
+execution cannot proceed against a draft whose approved fields have changed.
+
+The digest commits to the following approved draft fields:
+
+- `wording` (the market question text)
+- `source` (the resolution source commitment)
+- `stake` (integer USDC, no fractional units)
+- `deadline` (the market close timestamp)
+
+The digest is computed with the same canonical framing rules as the evidence
+commitment above (fixed key order, length-framed fields, SHA-256 bare lowercase
+hex). The review route records this digest at approval time.
+
+Execution (`POST` market creation after approval) recomputes the digest from the
+current draft and rejects the request if it does not equal the approved digest.
+Any change to `wording`, `source`, `stake` or `deadline` after approval therefore
+fails closed. Approval signatures continue to be verified through the signed
+request window in `lib/signed-window.ts`.
+
+Existing approved proposals recorded before this change have no digest and are
+rejected for execution until re-approved; no silent backfill is performed.
+
 ## Migration and rollback
 
 - Digests have a new meaning: the previous value was a hash over a plain string

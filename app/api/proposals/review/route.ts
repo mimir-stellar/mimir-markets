@@ -6,8 +6,16 @@
  * not a user-facing API, so every handler is gated on the `internal_worker` tier
  * and the shared `CRON_SECRET` — the same pattern as the cron routes. An unset
  * `CRON_SECRET` refuses rather than waving callers through.
+ *
+ * Approval is bound to an immutable canonical market draft digest. When a
+ * `complete` approval is recorded, the caller must present the digest of the
+ * draft they reviewed (computed over wording, source commitment, stake and
+ * deadline). Execution is then refused if the stored draft no longer matches
+ * the approved digest, so any post-approval change to an approved draft field
+ * invalidates the approval.
  */
 
+import { createHash } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api/policy";
 import { apiError } from "@/lib/api/errors";
@@ -27,6 +35,54 @@ import {
 export const runtime = "nodejs";
 
 const ROUTE = "/api/proposals/review";
+
+/** Draft fields bound by the approval digest. Changing any of them invalidates approval. */
+export interface MarketDraftFields {
+  wording: string;
+  sourceCommitment: string;
+  stake: number;
+  deadline: number;
+}
+
+/**
+ * Compute the canonical digest of a market draft. Fields are serialized in a
+ * fixed order with JSON so the digest is deterministic across callers. `stake`
+ * is an integer USDC amount (no floats) and `deadline` an integer unix time.
+ */
+export function computeMarketDraftDigest(draft: MarketDraftFields): string {
+  if (
+    typeof draft.wording !== "string" ||
+    typeof draft.sourceCommitment !== "string" ||
+    !Number.isSafeInteger(draft.stake) ||
+    !Number.isSafeInteger(draft.deadline)
+  ) {
+    throw new Error("invalid market draft fields");
+  }
+  const canonical = JSON.stringify([
+    draft.wording,
+    draft.sourceCommitment,
+    draft.stake,
+    draft.deadline,
+  ]);
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+/**
+ * Returns true only when the currently stored draft still hashes to the digest
+ * that was approved. Used to refuse execution after any approved field changed.
+ */
+export function isApprovedDraftCurrent(
+  approvedDigest: string,
+  currentDraft: MarketDraftFields,
+): boolean {
+  let current: string;
+  try {
+    current = computeMarketDraftDigest(currentDraft);
+  } catch {
+    return false;
+  }
+  return current === approvedDigest;
+}
 
 function json(data: unknown, status = 200): NextResponse {
   return NextResponse.json(data, { status });
@@ -122,12 +178,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return errorResponse("Invalid JSON body", 400);
   }
 
-  const { action, proposalId, reviewer, approve, reason } = body as {
+  const { action, proposalId, reviewer, approve, reason, approvedDigest } = body as {
     action: "claim" | "complete" | "cancel" | "mark_stale" | "mark_dependency_failed";
     proposalId?: string;
     reviewer?: string;
     approve?: boolean;
     reason?: string;
+    approvedDigest?: string;
   };
 
   if (!action) {
@@ -151,11 +208,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         if (!proposalId || !reviewer || typeof approve !== "boolean") {
           return errorResponse("complete requires proposalId, reviewer, and approve (boolean)", 400);
         }
-        const ok = await completeProposalReview(proposalId, reviewer, approve);
+        if (approve && (typeof approvedDigest !== "string" || !/^[0-9a-f]{64}$/.test(approvedDigest))) {
+          return errorResponse("approve requires approvedDigest (sha256 hex of the reviewed draft)", 400);
+        }
+        const ok = await completeProposalReview(
+          proposalId,
+          reviewer,
+          approve,
+          approve ? approvedDigest : undefined,
+        );
         if (!ok) {
           return errorResponse("Proposal not in review by this reviewer", 409);
         }
-        return json({ success: true, proposalId, status: approve ? "approved" : "rejected" });
+        return json({
+          success: true,
+          proposalId,
+          status: approve ? "approved" : "rejected",
+          ...(approve ? { approvedDigest } : {}),
+        });
       }
 
       case "cancel": {
