@@ -49,6 +49,7 @@
  */
 
 import {
+  Account,
   BASE_FEE,
   Operation,
   TransactionBuilder,
@@ -62,6 +63,7 @@ import {
   type StellarSigner,
 } from "./stellar";
 import { USDC_CODE, USDC_ISSUER, usdcAsset } from "./usdc";
+import { ObsoleteSigningIntentError } from "./wallet";
 
 export type TrustlineStatus =
   /** Trustline present: the account can hold and stake USDC. */
@@ -153,6 +155,32 @@ export async function readUsdcTrustline(
   }
 }
 
+export interface HorizonSubmitResult {
+  hash: string;
+}
+
+export type HorizonTransactionSubmitter = (
+  transaction: any,
+) => Promise<HorizonSubmitResult>;
+
+export interface EnsureUsdcTrustlineOptions extends ReadUsdcTrustlineOptions {
+  submitTransaction?: HorizonTransactionSubmitter;
+  server?: {
+    loadAccount: HorizonAccountLoader;
+    submitTransaction?: HorizonTransactionSubmitter;
+  };
+  /**
+   * Generation of the signing intent. When provided along with
+   * getActiveIntentGeneration, ensureUsdcTrustline verifies that the intent
+   * remains active after the wallet signs and drops obsolete results.
+   */
+  intentGeneration?: number;
+  /** Accessor returning the active intent generation to guard against stale responses. */
+  getActiveIntentGeneration?: () => number;
+  /** Accessor returning the active wallet address to guard against account switches. */
+  getActiveAddress?: () => string | null;
+}
+
 /**
  * Add the USDC trustline, signed by the connected wallet.
  *
@@ -160,11 +188,27 @@ export async function readUsdcTrustline(
  * (Soroban RPC does not accept classic-only transactions for submission in a way
  * that gains anything here). Idempotent from the caller's point of view: a
  * trustline that already exists returns immediately without prompting.
+ *
+ * When intent generation options or active address accessors are provided,
+ * late signatures from obsolete intents or switched accounts are ignored and
+ * rejected with `ObsoleteSigningIntentError`, preventing stale submissions to Horizon.
  */
 export async function ensureUsdcTrustline(
   signer: StellarSigner,
+  options: EnsureUsdcTrustlineOptions = {},
 ): Promise<{ added: boolean; hash?: string }> {
-  const existing = await readUsdcTrustline(signer.publicKey);
+  // If an active address accessor is provided and already mismatched, abort immediately
+  if (options.getActiveAddress && options.getActiveAddress() !== signer.publicKey) {
+    throw new ObsoleteSigningIntentError({
+      generation: options.intentGeneration ?? 0,
+      activeGeneration: options.getActiveIntentGeneration?.() ?? 0,
+      expectedAddress: signer.publicKey,
+      currentAddress: options.getActiveAddress(),
+      message: "Trustline signing aborted: wallet account switched before signing.",
+    });
+  }
+
+  const existing = await readUsdcTrustline(signer.publicKey, options);
   if (existing.status === "ready") return { added: false };
   if (existing.status === "unfunded") {
     throw new Error(
@@ -172,8 +216,24 @@ export async function ensureUsdcTrustline(
     );
   }
 
-  const horizon = createHorizonServer();
-  const account = await horizon.loadAccount(signer.publicKey);
+  const loadAccount =
+    options.loadAccount ??
+    options.server?.loadAccount ??
+    resolveAccountLoader(options);
+
+  const submitTx =
+    options.submitTransaction ??
+    options.server?.submitTransaction ??
+    ((tx: any) => createHorizonServer().submitTransaction(tx));
+
+  const rawAccount = await loadAccount(signer.publicKey);
+  const account =
+    typeof (rawAccount as any)?.sequenceNumber === "function"
+      ? (rawAccount as any)
+      : new Account(
+          (rawAccount as any)?.id ?? (rawAccount as any)?.account_id ?? signer.publicKey,
+          String((rawAccount as any)?.sequence ?? "1"),
+        );
 
   const transaction = new TransactionBuilder(account, {
     fee: BASE_FEE,
@@ -190,8 +250,25 @@ export async function ensureUsdcTrustline(
     address: signer.publicKey,
   });
 
+  // Verify that the signing intent is still active before submitting to Horizon.
+  // Drops late wallet responses belonging to an obsolete generation or switched account.
+  const activeGen = options.getActiveIntentGeneration?.();
+  const activeAddr = options.getActiveAddress?.();
+
+  if (
+    (options.intentGeneration !== undefined && activeGen !== undefined && activeGen !== options.intentGeneration) ||
+    (options.getActiveAddress && activeAddr !== signer.publicKey)
+  ) {
+    throw new ObsoleteSigningIntentError({
+      generation: options.intentGeneration ?? 0,
+      activeGeneration: activeGen ?? (options.intentGeneration ?? 0),
+      expectedAddress: signer.publicKey,
+      currentAddress: activeAddr ?? null,
+    });
+  }
+
   const signed = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
-  const result = await horizon.submitTransaction(signed);
+  const result = await submitTx(signed);
   return { added: true, hash: result.hash };
 }
 
