@@ -45,7 +45,9 @@ function parsePreviewInput(value: unknown, now: number): {
   // paused, revoked or expired one must instead return its lifecycle reason.
   if (validateCopyPermission({ ...unsigned, status: "active", expiresAt: Math.max(now + 1, unsigned.expiresAt) }, now)) return null;
   const permission: CopyPermission = { ...unsigned, signedPolicyHash: "" };
-
+  // The evaluated policy revision is recorded so a rejected signal keeps a
+  // stable explanation after later permission edits. Only non-secret policy
+  // fields are hashed; raw model prompts are never stored.
   if (![s.sourcePositionId, s.signalAgentId, s.category, s.mode, s.sourceAttributionId]
         .every((v) => typeof v === "string" && v.length <= 128) ||
       ![s.sourceDepth, s.claimId, s.confidenceBps, s.payoutBps, s.deadline, s.remainingSlots]
