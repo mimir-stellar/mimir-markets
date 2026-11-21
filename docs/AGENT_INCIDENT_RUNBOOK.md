@@ -4,6 +4,18 @@ Every switch, where it is enforced and how it rolls back: [`INCIDENT_KILL_SWITCH
 Every switch, where it is enforced and how it rolls back: [`INCIDENT_KILL_SWITCHES.md`](INCIDENT_KILL_SWITCHES.md). Switches take only the value `1`.
 For common contributor errors, runtime fixes, and Soroban contract error code mappings, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
+## Oracle backlog health report
+
+To inspect the oracle settlement backlog without signing or submitting anything, use the backlog health report. It summarizes, for each unresolved claim:
+
+- unresolved age (time since the claim became eligible for settlement);
+- evidence status (fetched, missing, stale or failed);
+- counts of uncertain transactions (ambiguous submission outcomes awaiting reconciliation).
+
+The report is read-only and contains no private source data, evidence payloads, or signing seeds. Only identifiers, timestamps, statuses, and counts are emitted. It never loads a signer and cannot trigger a transaction. Soroban contract state remains authoritative; the report reflects the read index and fresh `get_claim` state where available.
+
+Use it to decide whether a backlog needs attention, for example when unresolved age grows or uncertain transaction counts are non-zero. Resolve uncertain transactions by reconciling the retained transaction hash as described above, not by editing the report or the read index.
+
 1. Pause only the affected surface: `MIMIR_PAUSE_RESEARCH`, `MIMIR_PAUSE_X402_BUYING`, `MIMIR_PAUSE_COPY_EXECUTION`, or funded actions. For one actor use `RESEARCH_PAUSED_AGENT_IDS`, `MIMIR_PAUSED_X402_BUYERS`, or the wallet policy's `paused` bit. Withdrawal/read paths stay available.
 2. Owner revokes the compromised operator immediately. Nonces and outstanding sessions are invalidated; do not rotate from the operator key.
 3. Owner registers/rotates to a fresh operator wallet, re-grants the minimum capabilities and sets conservative daily/session/position limits. Never reuse or upload the old private key.

@@ -51,13 +51,23 @@ const NOT_FINAL_MARKERS = /\bpostponed\b|\bdelayed\b|\bsuspended\b|\bupcoming\b|
 const FINAL_MARKERS = /\bfinal\s*score\b|\bfinal\b|full.?time|\bft\b/i
 const LIVE_MARKERS = /\blive\b|\bin progress\b|\bquarter\b|\bhalftime\b|half.?time|\bminute\b/i
 
+/**
+ * Classify evidence text into a coarse finality state for operator reporting.
+ * Mirrors `eventLooksFinal` so the report and the settle decision never disagree.
+ */
+export type EvidenceFinalityState = 'final' | 'not_final' | 'unknown'
+
+export function classifyEvidenceFinality(text: string): EvidenceFinalityState {
+  if (text.trim().length === 0) return 'unknown'
+  if (NOT_FINAL_MARKERS.test(text)) return 'not_final'
+  if (FINAL_MARKERS.test(text)) return 'final'
+  if (LIVE_MARKERS.test(text)) return 'not_final'
+  return 'unknown'
+}
+
 /** Heuristic read of the evidence text: is the event conclusively over? */
 function eventLooksFinal(text: string): boolean {
-  if (text.trim().length === 0) return false
-  if (NOT_FINAL_MARKERS.test(text)) return false
-  if (FINAL_MARKERS.test(text)) return true
-  if (LIVE_MARKERS.test(text)) return false
-  return false
+  return classifyEvidenceFinality(text) === 'final'
 }
 
 // ---------------------------------------------------------------------------

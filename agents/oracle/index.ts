@@ -133,6 +133,12 @@ import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tier
 import { evaluateClaim as evaluateClaimPure, type EvaluateClaimDeps } from "./evaluate";
 import { RiskManager } from "../../lib/oracle-risk";
 import { isSportsEventFinal } from "./sports-finality";
+import { buildBacklogHealthReport, formatBacklogHealthReport, type BacklogClaimSnapshot } from "./backlog-health";
+
+// ── Backlog health report ─────────────────────────────────────────────────────
+// Opt-in operator report (ORACLE_BACKLOG_REPORT=1). Contains only aggregate
+// counts and ages; never raw evidence text, keys, or seeds.
+const BACKLOG_REPORT = process.env.ORACLE_BACKLOG_REPORT === "1";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
