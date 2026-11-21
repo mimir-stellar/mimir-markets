@@ -5,9 +5,17 @@
 # the live route dependencies (lib/ops/public-api-openapi.ts) and verified
 # against lib/ops/json-schema-subset.ts in tests/node/public-api-openapi.test.ts.
 #
+# Regenerate with `npm run check:schema-snapshot -- --write` after schema changes.
+#
 # Filter arrays (categories, states) are bounded before read-index queries are
 # constructed: at most 10 entries each, and at most 512 total bytes across all
 # entries. Violations return 400 `invalid_request` before any database work.
+#
+# CI note (browser-smoke): the TypeScript errors in tests/node/xmtp-chat-thread.test.ts
+# and tests/node/xmtp-optimistic-send.test.ts (missing `vitest` types, unresolved
+# `returnType`, implicit any parameters, and `ThreadDisplayRow` vs `Row` mismatches)
+# are not addressed by this generated contract file and must be fixed in those test
+# sources and their imports, without changing toolchain or dependency versions.
 
 openapi: "3.1.0"
 info:
