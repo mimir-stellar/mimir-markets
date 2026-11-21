@@ -62,6 +62,7 @@ import {
   type StellarSigner,
 } from "./stellar";
 import { USDC_CODE, USDC_ISSUER, usdcAsset } from "./usdc";
+import { isUncertainSubmissionError } from "./wallet-submission-recovery";
 
 export type TrustlineStatus =
   /** Trustline present: the account can hold and stake USDC. */
@@ -161,10 +162,53 @@ export async function readUsdcTrustline(
  * that gains anything here). Idempotent from the caller's point of view: a
  * trustline that already exists returns immediately without prompting.
  */
+export interface HorizonTrustlineServer {
+  loadAccount: (address: string) => Promise<Horizon.AccountResponse>;
+  submitTransaction: (
+    transaction: ReturnType<typeof TransactionBuilder.fromXDR>,
+  ) => Promise<{ hash: string }>;
+}
+
+export interface EnsureUsdcTrustlineOptions {
+  /** Optional Horizon server override for testing or custom transports. */
+  server?: HorizonTrustlineServer;
+  /** Optional trustline reader override for testing. */
+  readTrustline?: (address: string) => Promise<TrustlineState>;
+}
+
+/**
+ * Thrown when a signed USDC trustline transaction was submitted to Horizon,
+ * but a transport/timeout error left the on-chain outcome uncertain.
+ *
+ * Exposes the deterministic transaction `hash` and explicitly sets
+ * `canResubmit = false` so wallet flows reconcile instead of prompting the
+ * user to resubmit a possibly successful transaction.
+ */
+export class UncertainTrustlineSubmissionError extends Error {
+  readonly hash: string;
+  readonly status = "uncertain-submission" as const;
+  readonly canResubmit = false as const;
+
+  constructor(hash: string, cause?: unknown) {
+    super(
+      `USDC trustline transaction ${hash} may have already succeeded on Stellar. Do not resubmit; reconcile status first.`,
+      cause !== undefined ? { cause } : undefined,
+    );
+    this.name = "UncertainTrustlineSubmissionError";
+    this.hash = hash;
+  }
+}
+
 export async function ensureUsdcTrustline(
   signer: StellarSigner,
+  options: EnsureUsdcTrustlineOptions = {},
 ): Promise<{ added: boolean; hash?: string }> {
-  const existing = await readUsdcTrustline(signer.publicKey);
+  const existing = options.readTrustline
+    ? await options.readTrustline(signer.publicKey)
+    : await readUsdcTrustline(
+        signer.publicKey,
+        options.server ? { loadAccount: (addr) => options.server!.loadAccount(addr) } : {},
+      );
   if (existing.status === "ready") return { added: false };
   if (existing.status === "unfunded") {
     throw new Error(
@@ -172,7 +216,7 @@ export async function ensureUsdcTrustline(
     );
   }
 
-  const horizon = createHorizonServer();
+  const horizon = options.server ?? createHorizonServer();
   const account = await horizon.loadAccount(signer.publicKey);
 
   const transaction = new TransactionBuilder(account, {
@@ -191,8 +235,18 @@ export async function ensureUsdcTrustline(
   });
 
   const signed = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
-  const result = await horizon.submitTransaction(signed);
-  return { added: true, hash: result.hash };
+  const hash = signed.hash().toString("hex");
+  try {
+    const result = await horizon.submitTransaction(signed);
+    return { added: true, hash: result.hash || hash };
+  } catch (cause) {
+    if (isUncertainSubmissionError(cause)) {
+      throw new UncertainTrustlineSubmissionError(hash, cause);
+    }
+    throw cause;
+  }
+
+
 }
 
 
