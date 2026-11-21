@@ -37,6 +37,8 @@ import {
   buildVSCacheFreshness,
   makeContractFreshness,
   type VSCacheFreshness,
+  type ProjectionCompleteness,
+  CURRENT_PROJECTION_GENERATION,
 } from "@/lib/vs-freshness";
 import {
   getContractEvents,
@@ -325,20 +327,64 @@ function getReferenceUpdatedAt(
   return mutableReference ?? anyReference ?? null;
 }
 
+export async function getProjectionCompleteness(): Promise<ProjectionCompleteness> {
+  try {
+    const [storedLedger, storedGaps, storedGeneration] = await Promise.all([
+      getSyncMeta(CLAIM_EVENTS_CURSOR_KEY).catch(() => null),
+      getSyncMeta("projection_known_gaps").catch(() => null),
+      getSyncMeta("projection_generation").catch(() => null),
+    ]);
+
+    const validatedLedger = validateCursorValue(storedLedger, CLAIM_EVENTS_CURSOR_KEY, "vs-index");
+    const trustedLedger =
+      validatedLedger !== null && validatedLedger > 0
+        ? validatedLedger
+        : isMarketConfigured()
+        ? getDeployLedger()
+        : null;
+
+    const validatedGaps = validateCursorValue(storedGaps, "projection_known_gaps", "vs-index");
+    const knownGaps = validatedGaps !== null && validatedGaps >= 0 ? validatedGaps : 0;
+
+    const validatedGen = validateCursorValue(storedGeneration, "projection_generation", "vs-index");
+    const projectionGeneration =
+      validatedGen !== null && validatedGen > 0 ? validatedGen : CURRENT_PROJECTION_GENERATION;
+
+    return {
+      trustedLedger,
+      knownGaps,
+      projectionGeneration,
+    };
+  } catch {
+    return {
+      trustedLedger: isMarketConfigured() ? getDeployLedger() : null,
+      knownGaps: 0,
+      projectionGeneration: CURRENT_PROJECTION_GENERATION,
+    };
+  }
+}
+
 async function buildListCacheFreshness(rows: ClaimRow[]) {
-  const lastSyncAt = Number((await getSyncMeta("last_sync_at")) ?? "0");
+  const [lastSyncAtRaw, projection] = await Promise.all([
+    getSyncMeta("last_sync_at"),
+    getProjectionCompleteness(),
+  ]);
+  const lastSyncAt = Number(lastSyncAtRaw ?? "0");
   return buildVSCacheFreshness({
     updatedAtMs: getReferenceUpdatedAt(rows, lastSyncAt > 0 ? lastSyncAt : null),
     freshnessWindowMs: LIST_FRESHNESS_MS,
     source: "index",
+    projection,
   });
 }
 
-function buildDetailCacheFreshness(row: ClaimRow | null) {
+async function buildDetailCacheFreshness(row: ClaimRow | null) {
+  const projection = await getProjectionCompleteness();
   return buildVSCacheFreshness({
     updatedAtMs: row?.updated_at ?? null,
     freshnessWindowMs: DETAIL_FRESHNESS_MS,
     source: "index",
+    projection,
   });
 }
 
@@ -894,6 +940,7 @@ export async function getVsFeedSnapshot(
       const refreshedHasMore = refreshedRows.length > limit;
       const refreshedPaginatedRows = refreshedHasMore ? refreshedRows.slice(0, limit) : refreshedRows;
       const refreshedNextCursor = refreshedHasMore ? refreshedPaginatedRows[refreshedPaginatedRows.length - 1].id : null;
+      const projection = await getProjectionCompleteness();
     
       return {
         items: refreshedPaginatedRows.map((row) => claimRowToVSData(row)),
@@ -901,6 +948,7 @@ export async function getVsFeedSnapshot(
           updatedAtMs: Date.now(),
           freshnessWindowMs: LIST_FRESHNESS_MS,
           source: "index",
+          projection,
         }),
         nextCursor: refreshedNextCursor,
       };
@@ -933,6 +981,11 @@ export async function getVsFeedSnapshot(
         updatedAtMs: null,
         freshnessWindowMs: LIST_FRESHNESS_MS,
         source: "index",
+        projection: {
+          trustedLedger: null,
+          knownGaps: 0,
+          projectionGeneration: CURRENT_PROJECTION_GENERATION,
+        },
       }),
     };
   }
@@ -1016,6 +1069,7 @@ export async function getVsDetailSnapshot(vsId: number): Promise<VSDetailSnapsho
             updatedAtMs: lastSyncAt > 0 ? lastSyncAt : null,
             freshnessWindowMs: LIST_FRESHNESS_MS,
             source: "index",
+            projection: await getProjectionCompleteness(),
           }),
         };
       }
@@ -1032,6 +1086,11 @@ export async function getVsDetailSnapshot(vsId: number): Promise<VSDetailSnapsho
         updatedAtMs: null,
         freshnessWindowMs: DETAIL_FRESHNESS_MS,
         source: "index",
+        projection: {
+          trustedLedger: null,
+          knownGaps: 0,
+          projectionGeneration: CURRENT_PROJECTION_GENERATION,
+        },
       }),
     };
   }
@@ -1042,6 +1101,11 @@ export async function getVsDetailSnapshot(vsId: number): Promise<VSDetailSnapsho
       updatedAtMs: null,
       freshnessWindowMs: DETAIL_FRESHNESS_MS,
       source: "index",
+      projection: {
+        trustedLedger: null,
+        knownGaps: 0,
+        projectionGeneration: CURRENT_PROJECTION_GENERATION,
+      },
     }),
   };
 }
@@ -1066,6 +1130,8 @@ export async function getUserVsSnapshot(
         ({ row }) => row.is_final === 0 && !isFresh(row.updated_at, LIST_FRESHNESS_MS)
       );
 
+    const projection = await getProjectionCompleteness();
+
     if (storedItems.length > 0 && !shouldRefresh) {
       return {
         items: storedItems,
@@ -1073,6 +1139,7 @@ export async function getUserVsSnapshot(
           updatedAtMs: getReferenceUpdatedAt(storedRows),
           freshnessWindowMs: LIST_FRESHNESS_MS,
           source: "index",
+          projection,
         }),
       };
     }
@@ -1087,6 +1154,7 @@ export async function getUserVsSnapshot(
           updatedAtMs: getReferenceUpdatedAt(storedRows),
           freshnessWindowMs: LIST_FRESHNESS_MS,
           source: "index",
+          projection,
         }),
       };
     }
@@ -1107,6 +1175,7 @@ export async function getUserVsSnapshot(
             updatedAtMs: getReferenceUpdatedAt(storedRows),
             freshnessWindowMs: LIST_FRESHNESS_MS,
             source: "index",
+            projection,
           }),
         };
       }
@@ -1118,6 +1187,7 @@ export async function getUserVsSnapshot(
         updatedAtMs: getReferenceUpdatedAt(storedRows),
         freshnessWindowMs: LIST_FRESHNESS_MS,
         source: "index",
+        projection,
       }),
     };
   } catch {
@@ -1141,6 +1211,11 @@ export async function getUserVsSnapshot(
         updatedAtMs: null,
         freshnessWindowMs: LIST_FRESHNESS_MS,
         source: "index",
+        projection: {
+          trustedLedger: null,
+          knownGaps: 0,
+          projectionGeneration: CURRENT_PROJECTION_GENERATION,
+        },
       }),
     };
   }

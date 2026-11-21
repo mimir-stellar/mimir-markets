@@ -333,6 +333,28 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
         minimum: 1,
         description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads).",
       },
+      projection: {
+        type: "object",
+        description: "Projection completeness metadata for the snapshot (`lib/vs-freshness.ts`).",
+        required: ["trustedLedger", "knownGaps", "projectionGeneration"],
+        additionalProperties: false,
+        properties: {
+          trustedLedger: {
+            type: ["integer", "null"],
+            description: "Highest verified ledger sequence folded into the projection, or null when unavailable.",
+          },
+          knownGaps: {
+            type: "integer",
+            minimum: 0,
+            description: "Count of known gaps or missing event spans in the projection.",
+          },
+          projectionGeneration: {
+            type: "integer",
+            minimum: 1,
+            description: "Active schema/projection generation version.",
+          },
+        },
+      },
     },
   };
 
