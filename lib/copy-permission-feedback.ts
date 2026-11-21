@@ -81,6 +81,12 @@ export interface CopyPermissionFeedbackInput {
   onchainBalanceAtomic?: bigint | null;
   /** Amount spent in current period (atomic units). */
   spentInPeriodAtomic?: bigint;
+  /**
+   * Sum of stakes in open (unclosed) copy positions, in atomic USDC at 7 decimals.
+   * When supplied, exposed in the feedback view so callers can distinguish
+   * principal at risk from realized (settled) loss.
+   */
+  principalAtRiskAtomic?: bigint;
   /** Cache freshness metadata. */
   freshness?: { timestamp: number; ttlMs?: number; isStale?: boolean } | null;
   /** Upstream fetch in flight. */
@@ -119,6 +125,8 @@ export interface CopyPermissionFeedbackView {
   totalOpenExposureAtomic: string | null;
   maxRealizedLossAtomic: string | null;
   signedAllowanceAtomic: string | null;
+  /** Principal in open (unclosed) copy positions, in atomic USDC (7 decimals). Null when not supplied. */
+  principalAtRiskAtomic: string | null;
   /** Live contract-backed amounts in atomic USDC (7 decimals) */
   onchainAllowanceAtomic: string | null;
   onchainBalanceAtomic: string | null;
@@ -164,6 +172,7 @@ function emptyFeedback(
     totalOpenExposureAtomic: null,
     maxRealizedLossAtomic: null,
     signedAllowanceAtomic: null,
+    principalAtRiskAtomic: null,
     onchainAllowanceAtomic: null,
     onchainBalanceAtomic: null,
     remainingAllowanceAtomic: null,
@@ -394,12 +403,11 @@ export function buildCopyPermissionFeedback(
     status = "invalid";
     reasonCode = "allowance_insufficient";
     detail = onchainAllowance === 0n
-      ? "On-chain allowance is zero."
-      : "On-chain allowance is below the per-position bound.";
+      ? "On-chain USDC allowance is zero; the spender cannot execute copies until allowance is raised."
+      : "On-chain USDC allowance is less than the per-position stake cap.";
   } else if (!hasSufficientBalance) {
-    status = "invalid";
-    reasonCode = "balance_insufficient";
-    detail = "On-chain USDC balance is below the per-position bound.";
+    status = "ready";
+    detail = "On-chain USDC balance is below the per-position stake cap; execution may fail until balance is topped up.";
   }
 
   return emptyFeedback(status, reasonCode, detail, {
@@ -413,8 +421,9 @@ export function buildCopyPermissionFeedback(
     totalOpenExposureAtomic: totalOpenExposureAtomic.toString(),
     maxRealizedLossAtomic: p.maxRealizedLossAtomic,
     signedAllowanceAtomic: signedAllowance.toString(),
-    onchainAllowanceAtomic: onchainAllowance !== null ? onchainAllowance.toString() : null,
-    onchainBalanceAtomic: onchainBalance !== null ? onchainBalance.toString() : null,
+    principalAtRiskAtomic: input.principalAtRiskAtomic !== undefined ? input.principalAtRiskAtomic.toString() : null,
+    onchainAllowanceAtomic: onchainAllowance === null ? null : onchainAllowance.toString(),
+    onchainBalanceAtomic: onchainBalance === null ? null : onchainBalance.toString(),
     remainingAllowanceAtomic: remaining.toString(),
     hasSufficientAllowance,
     hasSufficientBalance,
@@ -428,4 +437,92 @@ export function buildCopyPermissionFeedback(
     expiresAt: p.expiresAt,
     createdAt: p.createdAt ?? null,
   });
+}
+
+/**
+ * Build permission feedback synchronously from the record alone, without a live
+ * Soroban RPC round-trip. Used by the grant/revoke API route immediately after
+ * persisting the record, before an on-chain read is available.
+ *
+ * On-chain fields (`onchainAllowanceAtomic`, `onchainBalanceAtomic`) are omitted,
+ * so the resulting status will be `dependency_failure` for an active permission —
+ * the client is expected to follow up with a live read. For revoked/paused/expired
+ * permissions the lifecycle status is returned immediately without a chain call.
+ */
+export async function evaluateCopyPermissionOnchain(
+  permission: CopyPermission,
+): Promise<CopyPermissionFeedbackView> {
+  return buildCopyPermissionFeedback({
+    permission,
+    configuredUsdc: getUsdcSacId() ?? undefined,
+    configuredSpender: configuredSpender() ?? undefined,
+    now: Date.now(),
+    // No chain read available yet; the client will refresh with live state.
+    onchainAllowanceAtomic: null,
+  });
+}
+
+/**
+ * Spend-permission explanation used by the revoke confirmation dialog.
+ *
+ * Revoking a copy permission is owner-signed and stops Mimir from executing
+ * further copies, but it does not revoke the underlying on-chain USDC SAC
+ * spend allowance. That allowance must be revoked separately through the
+ * agent API's `revokeSpend` flow. This module exposes the shared copy for
+ * the confirmation dialog and any other surface that needs to explain the
+ * revocation semantics.
+ */
+export interface RevokeConfirmationCopy {
+  /** Title for the confirmation dialog. */
+  title: string;
+  /** Short summary of the action being confirmed. */
+  summary: string;
+  /** What stops when the permission is revoked. */
+  stops: string[];
+  /** What does not stop and must be revoked separately. */
+  doesNotStop: string[];
+  /** Link to the spend-permission explanation. */
+  spendPermissionHeleHhref: string;
+  /** Label for the spend-permission link. */
+  spendPermissionHelpLabel: string;
+  /** Label for the confirm button. */
+  confirmLabel: string;
+  /** Label for the cancel button. */
+  cancelLabel: string;
+}
+
+const SPEND_PERMISSION_HELP_HREF = "/docs/spend-permissions";
+
+/**
+ * Builds the confirmation copy for the revoke copy permission dialog.
+ *
+ * This is a pure helper so the copy can be unit tested independently of the
+ * dialog component and the wallet signing flow. The dialog must not call
+ * `Delete /api/copy/permissions` or request a wallet signature until the
+ * user confirms.
+ */
+export function buildRevokeConfirmationCopy(
+  options: { permissionId?: string | null } = {},
+): RevokeConfirmationCopy {
+  const id = options.permissionId ?? null;
+  const summary = id
+    ? `Revoke copy execution permission ${id}? This requires an owner wallet signature.`
+    : "Revoke this copy execution permission? This requires an owner wallet signature.";
+
+  return {
+    title: "Revoke copy permission?",
+    summary,
+    stops: [
+      "Mimir will stop executing further copies for this permission.",
+      "New copy execution requests will be rejected immediately.",
+    ],
+    doesNotStop: [
+      "This does not revoke the on-chain USDC spend allowance.",
+      "To remove the spender's ability to move USDC, revoke the spend permission separately.",
+    ],
+    spendPermissionHeleHhref: SPEND_PERMISSION_HELP_HREF,
+    spendPermissionHelpLabel: "Learn how to revoke the spend permission",
+    confirmLabel: "Revoke permission",
+    cancelLabel: "Cancel",
+  };
 }
