@@ -21,11 +21,18 @@ interface RecordedQuery {
 }
 
 const recorded: RecordedQuery[] = [];
+let nextQueryResult:
+  | ((sql: string, args: unknown[]) => { rows: Array<Record<string, unknown>>; rowCount: number } | undefined)
+  | null = null;
 
 function installFakePool(): void {
   const record = async (sql: string, args: unknown[] = []) => {
     if (!/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql.trim())) {
       recorded.push({ sql, args });
+    }
+    if (nextQueryResult) {
+      const custom = nextQueryResult(sql, args);
+      if (custom) return custom;
     }
     return { rows: [] as Array<Record<string, unknown>>, rowCount: 1 };
   };
@@ -58,6 +65,7 @@ function lastSql(): string {
 
 function reset(): void {
   recorded.length = 0;
+  nextQueryResult = null;
 }
 
 type ReviewStatus = "queued" | "in_review" | "approved" | "rejected" | "cancelled" | "stale" | "dependency_failed";
@@ -441,4 +449,262 @@ test("GET handler falls back to defaults on non-numeric limit/offset", async () 
   const body = await res.json();
   assert.equal(body.limit, 50);
   assert.equal(body.offset, 0);
+});
+
+// -----------------------------------------------------------------------------
+// Effective proposal expiry, canonical UTC time, policy revision, absent vs expired
+// -----------------------------------------------------------------------------
+
+test("resolveProposalExpiry uses canonical UTC time and policy revision and chooses earliest bound", async () => {
+  const {
+    DEFAULT_PROPOSAL_REVIEW_TTL_MS,
+    MAX_PROPOSAL_REVIEW_TTL_MS,
+    PROPOSAL_EXPIRY_POLICY_REVISION,
+    resolveProposalExpiry,
+    resolveProposalReviewTtlMs,
+  } = await import("../../lib/signed-window");
+
+  const nowMs = Date.UTC(2026, 10, 19, 8, 0, 0); // 2026-11-19T08:00:00.000Z
+  const queuedAtMs = Date.UTC(2026, 10, 19, 6, 0, 0); // 2026-11-19T06:00:00.000Z
+
+  // Case 1: market deadline (4h after queue) is earlier than the 24h review window
+  const earlyDeadlineSec = Math.floor(Date.UTC(2026, 10, 19, 10, 0, 0) / 1000);
+  const byDeadline = resolveProposalExpiry(
+    baseProposalRow({
+      created_at: queuedAtMs,
+      queued_at: queuedAtMs,
+      deadline: earlyDeadlineSec,
+      review_status: "queued",
+    }),
+    { now: nowMs },
+  );
+  assert.equal(byDeadline.status, "active");
+  assert.equal(byDeadline.exists, true);
+  assert.equal(byDeadline.expired, false);
+  assert.equal(byDeadline.expirySource, "market_deadline");
+  assert.equal(byDeadline.effectiveExpiresAt, earlyDeadlineSec * 1000);
+  assert.equal(byDeadline.effectiveExpiresAtUtc, "2026-11-19T10:00:00.000Z");
+  assert.equal(byDeadline.effectiveExpiry, "2026-11-19T10:00:00.000Z");
+  assert.equal(byDeadline.evaluatedAtUtc, "2026-11-19T08:00:00.000Z");
+  assert.equal(byDeadline.policyRevision, PROPOSAL_EXPIRY_POLICY_REVISION);
+  assert.equal(byDeadline.remainingMs, 2 * 3600 * 1000);
+
+  // Case 2: 72h market deadline is later than the 24h review window -> review window wins
+  const farDeadlineSec = Math.floor(Date.UTC(2026, 10, 22, 6, 0, 0) / 1000);
+  const byWindow = resolveProposalExpiry(
+    baseProposalRow({
+      created_at: queuedAtMs,
+      queued_at: queuedAtMs,
+      deadline: farDeadlineSec,
+      review_status: "queued",
+    }),
+    { now: nowMs, policyRevision: "proposal-expiry:v2" },
+  );
+  assert.equal(byWindow.status, "active");
+  assert.equal(byWindow.expirySource, "review_window");
+  assert.equal(byWindow.effectiveExpiresAt, queuedAtMs + DEFAULT_PROPOSAL_REVIEW_TTL_MS);
+  assert.equal(byWindow.effectiveExpiresAtUtc, "2026-11-20T06:00:00.000Z");
+  assert.equal(byWindow.deadlineAtUtc, "2026-11-22T06:00:00.000Z");
+  assert.equal(byWindow.policyRevision, "proposal-expiry:v2");
+
+  // TTL resolution guards against malformed or oversized inputs
+  assert.equal(resolveProposalReviewTtlMs(undefined), DEFAULT_PROPOSAL_REVIEW_TTL_MS);
+  assert.equal(resolveProposalReviewTtlMs("invalid"), DEFAULT_PROPOSAL_REVIEW_TTL_MS);
+  assert.equal(resolveProposalReviewTtlMs("-500"), DEFAULT_PROPOSAL_REVIEW_TTL_MS);
+  assert.equal(resolveProposalReviewTtlMs(0), DEFAULT_PROPOSAL_REVIEW_TTL_MS);
+  assert.equal(resolveProposalReviewTtlMs(1.5), DEFAULT_PROPOSAL_REVIEW_TTL_MS);
+  assert.equal(resolveProposalReviewTtlMs(999_999_999_999), MAX_PROPOSAL_REVIEW_TTL_MS);
+});
+
+test("resolveProposalExpiry distinguishes an absent proposal from an expired one and enforces the exact expiry boundary", async () => {
+  const { resolveProposalExpiry } = await import("../../lib/signed-window");
+
+  const nowMs = Date.UTC(2026, 10, 19, 12, 0, 0);
+  const absent = resolveProposalExpiry(null, { now: nowMs });
+  assert.equal(absent.status, "absent");
+  assert.equal(absent.state, "absent");
+  assert.equal(absent.exists, false);
+  assert.equal(absent.expired, false);
+  assert.equal(absent.isExpired, false);
+  assert.equal(absent.code, "proposal_not_found");
+  assert.equal(absent.effectiveExpiresAt, null);
+  assert.equal(absent.effectiveExpiresAtUtc, null);
+  assert.equal(absent.evaluatedAtUtc, "2026-11-19T12:00:00.000Z");
+
+  const boundarySec = Math.floor(nowMs / 1000);
+  const rowAtBoundary = baseProposalRow({
+    created_at: nowMs - 3600_000,
+    queued_at: nowMs - 3600_000,
+    deadline: boundarySec,
+    review_status: "queued",
+  });
+
+  // 1 ms before effective expiry -> active
+  const oneMsBefore = resolveProposalExpiry(rowAtBoundary, { now: boundarySec * 1000 - 1 });
+  assert.equal(oneMsBefore.status, "active");
+  assert.equal(oneMsBefore.exists, true);
+  assert.equal(oneMsBefore.expired, false);
+  assert.equal(oneMsBefore.code, null);
+  assert.equal(oneMsBefore.remainingMs, 1);
+
+  // At exact effective expiry -> expired
+  const atBoundary = resolveProposalExpiry(rowAtBoundary, { now: boundarySec * 1000 });
+  assert.equal(atBoundary.status, "expired");
+  assert.equal(atBoundary.exists, true);
+  assert.equal(atBoundary.expired, true);
+  assert.equal(atBoundary.code, "proposal_expired");
+  assert.equal(atBoundary.remainingMs, 0);
+  assert.equal(atBoundary.effectiveExpiresAtUtc, "2026-11-19T12:00:00.000Z");
+});
+
+test("GET /api/proposals/review exposes effective proposal expiry, canonical UTC timestamps, and policyRevision", async () => {
+  reset();
+  process.env.CRON_SECRET = "test-secret";
+  const queuedAtMs = Date.UTC(2026, 10, 19, 8, 0, 0);
+  const deadlineSec = Math.floor(Date.UTC(2026, 10, 19, 14, 0, 0) / 1000);
+  const sampleRow = baseProposalRow({
+    proposal_id: "prop-live-1",
+    created_at: queuedAtMs,
+    queued_at: queuedAtMs,
+    deadline: deadlineSec,
+    review_status: "queued",
+  });
+
+  nextQueryResult = () => ({ rows: [sampleRow], rowCount: 1 });
+
+  const { GET } = await import("../../app/api/proposals/review/route");
+  const req = new Request("http://localhost/api/proposals/review?status=queued", {
+    headers: { authorization: "Bearer test-secret" },
+  }) as unknown as Request;
+  const res = await GET(req as never);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+
+  assert.equal(body.policyRevision, "proposal-expiry:v1");
+  assert.match(body.evaluatedAtUtc, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.equal(body.proposals.length, 1);
+  const item = body.proposals[0];
+  assert.equal(item.proposal_id, "prop-live-1");
+  assert.equal(item.effectiveExpiresAt, deadlineSec * 1000);
+  assert.equal(item.effectiveExpiresAtUtc, "2026-11-19T14:00:00.000Z");
+  assert.equal(item.effective_expires_at_utc, "2026-11-19T14:00:00.000Z");
+  assert.equal(item.policyRevision, "proposal-expiry:v1");
+  assert.equal(item.expirySource, "market_deadline");
+});
+
+test("API route distinguishes an absent proposal (404) from an expired proposal (409) and an active proposal (200)", async () => {
+  reset();
+  process.env.CRON_SECRET = "test-secret";
+  const { GET, POST, PATCH } = await import("../../app/api/proposals/review/route");
+
+  // 1. Absent proposal -> 404 proposal_not_found with status="absent" and expired=false
+  nextQueryResult = () => ({ rows: [], rowCount: 0 });
+
+  const absentGet = await GET(
+    new Request("http://localhost/api/proposals/review?proposalId=missing-prop", {
+      headers: { authorization: "Bearer test-secret" },
+    }) as never,
+  );
+  assert.equal(absentGet.status, 404);
+  const absentGetBody = await absentGet.json();
+  assert.equal(absentGetBody.error.code, "proposal_not_found");
+  assert.equal(absentGetBody.status, "absent");
+  assert.equal(absentGetBody.expiryStatus, "absent");
+  assert.equal(absentGetBody.exists, false);
+  assert.equal(absentGetBody.expired, false);
+  assert.equal(absentGetBody.effectiveExpiresAt, null);
+  assert.equal(absentGetBody.effectiveExpiresAtUtc, null);
+  assert.equal(absentGetBody.policyRevision, "proposal-expiry:v1");
+  assert.match(absentGetBody.evaluatedAtUtc, /Z$/);
+
+  const absentClaim = await POST(
+    new Request("http://localhost/api/proposals/review", {
+      method: "POST",
+      headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim", proposalId: "missing-prop", reviewer: "rev1" }),
+    }) as never,
+  );
+  assert.equal(absentClaim.status, 404);
+  const absentClaimBody = await absentClaim.json();
+  assert.equal(absentClaimBody.error.code, "proposal_not_found");
+  assert.equal(absentClaimBody.status, "absent");
+  assert.equal(absentClaimBody.exists, false);
+  assert.equal(absentClaimBody.expired, false);
+
+  // 2. Expired proposal -> 409 proposal_expired with status="expired", expired=true, and canonical UTC expiry
+  const pastDeadlineSec = Math.floor(Date.UTC(2020, 0, 1, 0, 0, 0) / 1000);
+  const expiredRow = baseProposalRow({
+    proposal_id: "expired-prop",
+    created_at: Date.UTC(2019, 11, 31, 12, 0, 0),
+    queued_at: Date.UTC(2019, 11, 31, 12, 0, 0),
+    deadline: pastDeadlineSec,
+    review_status: "queued",
+  });
+  nextQueryResult = () => ({ rows: [expiredRow], rowCount: 1 });
+
+  const expiredClaim = await POST(
+    new Request("http://localhost/api/proposals/review", {
+      method: "POST",
+      headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim", proposalId: "expired-prop", reviewer: "rev1" }),
+    }) as never,
+  );
+  assert.equal(expiredClaim.status, 409);
+  const expiredClaimBody = await expiredClaim.json();
+  assert.equal(expiredClaimBody.error.code, "proposal_expired");
+  assert.equal(expiredClaimBody.status, "expired");
+  assert.equal(expiredClaimBody.expiryStatus, "expired");
+  assert.equal(expiredClaimBody.exists, true);
+  assert.equal(expiredClaimBody.expired, true);
+  assert.equal(expiredClaimBody.effectiveExpiresAt, pastDeadlineSec * 1000);
+  assert.equal(expiredClaimBody.effectiveExpiresAtUtc, "2020-01-01T00:00:00.000Z");
+  assert.equal(expiredClaimBody.policyRevision, "proposal-expiry:v1");
+  assert.match(expiredClaimBody.evaluatedAtUtc, /Z$/);
+
+  const expiredPatch = await PATCH(
+    new Request("http://localhost/api/proposals/review", {
+      method: "PATCH",
+      headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+      body: JSON.stringify({ proposalId: "expired-prop", status: "approved", reviewer: "rev1" }),
+    }) as never,
+  );
+  assert.equal(expiredPatch.status, 409);
+  const expiredPatchBody = await expiredPatch.json();
+  assert.equal(expiredPatchBody.error.code, "proposal_expired");
+  assert.equal(expiredPatchBody.expired, true);
+
+  // 3. Active proposal -> 200 with effective expiry metadata in response
+  const nowMs = Date.now();
+  const futureDeadlineSec = Math.floor(nowMs / 1000) + 3600;
+  const activeRow = baseProposalRow({
+    proposal_id: "active-prop",
+    created_at: nowMs,
+    queued_at: nowMs,
+    deadline: futureDeadlineSec,
+    review_status: "queued",
+  });
+  nextQueryResult = () => ({ rows: [activeRow], rowCount: 1 });
+
+  const activeClaim = await POST(
+    new Request("http://localhost/api/proposals/review", {
+      method: "POST",
+      headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+      body: JSON.stringify({ action: "claim", proposalId: "active-prop", reviewer: "rev1" }),
+    }) as never,
+  );
+  assert.equal(activeClaim.status, 200);
+  const activeClaimBody = await activeClaim.json();
+  assert.equal(activeClaimBody.success, true);
+  assert.equal(activeClaimBody.proposalId, "active-prop");
+  assert.equal(activeClaimBody.status, "in_review");
+  assert.equal(activeClaimBody.expiryStatus, "active");
+  assert.equal(activeClaimBody.exists, true);
+  assert.equal(activeClaimBody.expired, false);
+  assert.equal(activeClaimBody.effectiveExpiresAt, futureDeadlineSec * 1000);
+  assert.equal(
+    activeClaimBody.effectiveExpiresAtUtc,
+    new Date(futureDeadlineSec * 1000).toISOString(),
+  );
+  assert.equal(activeClaimBody.policyRevision, "proposal-expiry:v1");
+  assert.match(activeClaimBody.evaluatedAtUtc, /Z$/);
 });
