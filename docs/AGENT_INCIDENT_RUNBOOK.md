@@ -4,6 +4,16 @@ Every switch, where it is enforced and how it rolls back: [`INCIDENT_KILL_SWITCH
 Every switch, where it is enforced and how it rolls back: [`INCIDENT_KILL_SWITCHES.md`](INCIDENT_KILL_SWITCHES.md). Switches take only the value `1`.
 For common contributor errors, runtime fixes, and Soroban contract error code mappings, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
+## Trader position reconciliation after restart
+
+On restart, the trader worker compares its durable stake intents against positions observed on chain before issuing any new stake. Soroban contract state is authoritative; the Postgres read index is not consulted for this decision.
+
+- Intents confirmed on chain are marked settled locally and are not re-submitted.
+- Intents with no matching chain position and no uncertain submission are eligible for the normal policy path.
+- Intents whose submission outcome is uncertain (timeout, dropped response, unknown transaction hash) are preserved as `uncertain` and are never re-staked automatically. Reconcile the retained transaction hash and fresh chain state, then resolve the intent manually.
+
+To roll back this behavior, deploy the previous trader worker. Persisted intent records are additive and can be ignored by older code; no contract migration is required.
+
 1. Pause only the affected surface: `MIMIR_PAUSE_RESEARCH`, `MIMIR_PAUSE_X402_BUYING`, `MIMIR_PAUSE_COPY_EXECUTION`, or funded actions. For one actor use `RESEARCH_PAUSED_AGENT_IDS`, `MIMIR_PAUSED_X402_BUYERS`, or the wallet policy's `paused` bit. Withdrawal/read paths stay available.
 2. Owner revokes the compromised operator immediately. Nonces and outstanding sessions are invalidated; do not rotate from the operator key.
 3. Owner registers/rotates to a fresh operator wallet, re-grants the minimum capabilities and sets conservative daily/session/position limits. Never reuse or upload the old private key.
