@@ -16,6 +16,7 @@
  *
  * Redirects are followed MANUALLY (`redirect: "manual"`) — the whole point is to
  * re-validate each hop, which `fetch`'s automatic following makes impossible.
+ * Captured redirect chains can be evaluated offline via `diagnoseRedirectPolicy`.
  */
 
 import { lookup } from "node:dns/promises";
@@ -501,4 +502,16 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
     return { ok: true, ...success };
   }
 }
+
+// ── Offline redirect diagnostics export ───────────────────────────────────────
+
+export {
+  diagnoseRedirectPolicy,
+  redactUrlIdentity,
+  type HopPolicyVerdict,
+  type RedirectDiagnosticsOpts,
+  type RedirectHopDiagnostic,
+  type RedirectPolicyDiagnostics,
+} from "./content-validation";
+
 
