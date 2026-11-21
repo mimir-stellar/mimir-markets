@@ -31,7 +31,7 @@ paths:
         - name: refresh
           in: query
           required: false
-          description: "Set to `\"1\"` to force a chain-to-index reconciliation before returning. Any other non-empty value is rejected with 400 `invalid_request`."
+          description: "Set to `\"1\"` to force a chain-to-index reconciliation before returning. Any other non-empty value is rejected with 400 `invalid_request`. Repeating this parameter with conflicting scalar values (for example `refresh=1&refresh=0`) is rejected with 400 `invalid_request` and a field-level error on `refresh`; the server never silently picks the first or last value."
           schema:
             type: string
             enum:
@@ -39,14 +39,14 @@ paths:
         - name: cursor
           in: query
           required: false
-          description: "Positive integer claim ID cursor (`id < cursor`)."
+          description: "Positive integer claim ID cursor (`id < cursor`). Repeating `cursor` with conflicting values is rejected with 400 `invalid_request` and a field-level error on `cursor`."
           schema:
             type: integer
             minimum: 1
         - name: limit
           in: query
           required: false
-          description: "Page size between 1 and 100 (defaults to 50)."
+          description: "Page size between 1 and 100 (defaults to 50). Repeating `limit` with conflicting values is rejected with 400 `invalid_request` and a field-level error on `limit`."
           schema:
             type: integer
             minimum: 1
