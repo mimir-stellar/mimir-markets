@@ -54,10 +54,23 @@ import {
   labelFor,
   shapeWalletOptions,
   subtitleFor,
+  checkWalletSigningCapability,
+  getWalletCapabilityReport,
   supportsAuthEntrySigning,
-  supportsMessageSigning,
+  type WalletCapabilityCheckResult,
+  type WalletCapabilityReport,
+  type WalletSigningMethod,
+
   type ShapedWallet,
 } from "./wallet-connectors";
+
+export {
+  checkWalletSigningCapability,
+  getWalletCapabilityReport,
+  type WalletCapabilityCheckResult,
+  type WalletCapabilityReport,
+  type WalletSigningMethod,
+};
 import { walletRowLabel } from "./wallet-aria";
 
 /** Remembering the last wallet turns a five-row decision into one tap on return. */
@@ -222,6 +235,18 @@ export interface WalletContextValue {
   /** The connected wallet cannot co-sign auth entries. */
   canSignAuthEntries: boolean;
 
+  /** Explicit signing capability report for the currently selected connector. */
+  capabilities: WalletCapabilityReport;
+
+  /**
+   * Check whether the selected connector supports the required signing method
+   * before starting a transaction. Returns a safe unsupported-method result
+   * without requesting a signature from the wallet.
+   */
+  checkTransactionCapability: (
+    requiredMethod?: WalletSigningMethod,
+  ) => WalletCapabilityCheckResult;
+
   /** Set when the wallet reports a different network than Mimir submits to. */
   networkWarning: string | null;
 
@@ -333,6 +358,9 @@ const Ctx = createContext<WalletContextValue>({
   walletName: null,
   canSignMessages: false,
   canSignAuthEntries: false,
+  capabilities: getWalletCapabilityReport(null, null),
+  checkTransactionCapability: (requiredMethod = "signTransaction") =>
+    checkWalletSigningCapability(null, requiredMethod, null),
   networkWarning: null,
   wallets: [],
   pendingTrustlineIntent: null,
@@ -623,6 +651,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // memoised `signer` does not change identity on every render.
   const addressRef = useRef<string | null>(null);
   addressRef.current = address;
+  const walletIdRef = useRef<string | null>(null);
+  walletIdRef.current = walletId;
+  const walletNameRef = useRef<string | null>(null);
+  walletNameRef.current = walletName;
 
   /**
    * Restore a previous session without prompting.
@@ -814,6 +846,14 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const signAuthEntry = useCallback<SignAuthEntry>(
     async (authEntry, opts) => {
       // An auth-entry signature must never proceed after the wallet has
+      const capability = checkWalletSigningCapability(
+        walletIdRef.current,
+        "signAuthEntry",
+        walletNameRef.current,
+      );
+      if (!capability.supported) {
+        throw new Error(capability.reason);
+      }
       // disconnected or the provider state has been cleared.
       if (!addressRef.current) {
         throw new Error(NO_WALLET);
@@ -843,6 +883,14 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const signMessage = useCallback(async (message: string) => {
     // Off-chain signatures are still wallet actions and must not use a stale
+    const capability = checkWalletSigningCapability(
+      walletIdRef.current,
+      "signMessage",
+      walletNameRef.current,
+    );
+    if (!capability.supported) {
+      throw new Error(capability.reason);
+    }
     // address after disconnect.
     if (!addressRef.current) {
       throw new Error(NO_WALLET);
@@ -960,6 +1008,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     // The signing callbacks read this ref directly, so this prevents a stale
     // wallet address from being used during the disconnect transition.
     addressRef.current = null;
+    walletIdRef.current = null;
+    walletNameRef.current = null;
 
     setAddress(null);
     setWalletId(null);
@@ -1021,6 +1071,21 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [options, recentId, connectWallet],
   );
 
+  const capabilities = useMemo(
+    () => getWalletCapabilityReport(walletId, walletName),
+    [walletId, walletName],
+  );
+
+  const checkTransactionCapability = useCallback(
+    (requiredMethod: WalletSigningMethod = "signTransaction") =>
+      checkWalletSigningCapability(
+        walletIdRef.current,
+        requiredMethod,
+        walletNameRef.current,
+      ),
+    [],
+  );
+
   const value = useMemo<WalletContextValue>(
     () => ({
       address,
@@ -1034,8 +1099,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       signMessage,
       signer,
       walletName,
-      canSignMessages: supportsMessageSigning(walletId),
-      canSignAuthEntries: supportsAuthEntrySigning(walletId),
+      canSignMessages: capabilities.methods.signMessage,
+      canSignAuthEntries: capabilities.methods.signAuthEntry,
+      capabilities,
+      checkTransactionCapability,
       networkWarning,
       transactionState,
       wallets,
@@ -1053,7 +1120,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       signMessage,
       signer,
       walletName,
-      walletId,
+      capabilities,
+      checkTransactionCapability,
       networkWarning,
       transactionState,
       wallets,
