@@ -7,7 +7,7 @@ import { getFeePolicy } from "@/lib/contract";
 import { FEE_SCHEDULE } from "@/lib/fees";
 import Skeleton from "@/components/ui/Skeleton";
 
-export type FeeBreakdownContext = "agent" | "basket" | "follow";
+export type FeeBreakdownContext = "agent" | "basket" | "follow" | "preflight";
 
 export function FeeBreakdown({
   context,

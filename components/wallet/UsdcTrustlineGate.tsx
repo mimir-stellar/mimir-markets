@@ -127,6 +127,47 @@ export function useUsdcTrustline(): UsdcTrustline {
   };
 }
 
+export function UsdcPreflightPreview({
+  fees,
+  reserveReady,
+  usdcExposure,
+}: {
+  fees: string;
+  reserveReady: boolean;
+  usdcExposure: bigint;
+}) {
+  const t = useTranslations("wallet");
+  return (
+    <div
+      className="border border-pv-ink/[0.12] bg-pv-ink/[0.03] p-4"
+      role="status"
+      aria-live="polite"
+      data-testid="preflight-preview"
+    >
+      <h3 className="font-mono text-[10px] uppercase tracking-wider text-pv-muted">
+        {t("preflightTitle")}
+      </h3>
+      <p className="mt-1 text-[11px] text-pv-muted">{t("preflightNotExecuted")}</p>
+      <dl className="mt-2 space-y-1 text-[12px] text-pv-muted">
+        <div>
+          <dt className="inline">{t("preflightFees")}: </dt>
+          <dd className="inline">{fees} XLM</dd>
+        </div>
+        <div>
+          <dt className="inline">{t("preflightReserve")}: </dt>
+          <dd className="inline">
+            {reserveReady ? t("preflightReserveReady") : t("preflightReserveShort")}
+          </dd>
+        </div>
+        <div>
+          <dt className="inline">{t("preflightExposure")}: </dt>
+          <dd className="inline">{usdcExposure.toString()} USDC (integer units)</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
 function UsdcTrustlineGateView({
   trustline,
   className = "",
