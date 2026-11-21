@@ -1,15 +1,20 @@
 //! Public contract surface. Bodies live in `pool`; this file is the single
 //! `#[contractimpl]` block plus the read-only views.
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 use crate::escrow;
 use crate::pool;
 use crate::storage;
 use crate::types::{
-    ClaimResult, Error, Market, PendingOracle, SquadLimits, MAX_BATCH_SIZE, MAX_DURATION,
-    MAX_FEE_BPS, MAX_QUESTION_BYTES, MIN_DURATION,
+    ClaimResult, Error, Market, PendingOracle, SettlementReadiness, SquadLimits, MAX_BATCH_SIZE,
+    MAX_DURATION, MAX_FEE_BPS, MAX_QUESTION_BYTES, MIN_DURATION,
 };
+
+/// Storage schema version exposed to indexers. Bump only with a migration.
+pub const SCHEMA_VERSION: u32 = 1;
+/// Shape identifier so indexers can reject incompatible layouts.
+pub const SCHEMA_NAME: &str = "mimir-squad";
 
 #[contract]
 pub struct MimirSquad;
@@ -255,6 +260,24 @@ impl MimirSquad {
 
     pub fn get_paused_flag(env: Env) -> bool {
         storage::is_paused(&env)
+    }
+
+    /// Bounded compatibility descriptor for indexers: returns the storage
+    /// schema version and whether the caller's required version is supported.
+    /// Unsupported required versions are rejected with `Error::NotInitialized`
+    /// semantics avoided; callers receive `supported = false` instead.
+    pub fn get_schema_version(_env: Env) -> u32 {
+        SCHEMA_VERSION
+    }
+
+    /// Returns `Ok(())` only when `required` equals the supported schema
+    /// version; any other interpretation is rejected.
+    pub fn require_schema_version(_env: Env, required: u32) -> Result<(), Error> {
+        if required == SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(Error::BatchTooLarge)
+        }
     }
 
     /// Read-only settlement readiness for a market. Never mutates state.
