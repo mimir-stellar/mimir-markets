@@ -54,7 +54,7 @@ describe('sortDecodedMessagesBySentAt', () => {
   });
 
   it('handles empty array', () => {
-    expect(sortDecodedMessagesBySentAt([])).toEqual([]);
+    expect(sortDecodedMessagesBySentAt([] as any)).toEqual([]);
   });
 });
 
