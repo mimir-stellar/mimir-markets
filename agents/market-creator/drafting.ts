@@ -17,6 +17,124 @@ export interface ClaimCandidate {
   [key: string]: unknown;
 }
 
+/**
+ * Reasons a drafted candidate can be rejected before transaction attempts.
+ * Stable identifiers: consumers may key on these strings.
+ */
+export type CandidateRejectionReason =
+  | "missing_fields"
+  | "unsafe_crypto_threshold"
+  | "source_fetch_failed"
+  | "duplicate_question";
+
+/**
+ * Per-source retry bookkeeping for rejected source fetches.
+ * `nextEligibleAt` is an epoch-ms timestamp before which the source must not be retried.
+ */
+export interface SourceRetryState {
+  sourceUrl: string;
+  reason: CandidateRejectionReason;
+  attempts: number;
+  nextEligibleAt: number;
+}
+
+export interface RetryQueueOptions {
+  /** Maximum number of tracked sources; oldest entries are evicted beyond this. */
+  maxEntries?: number;
+  /** Base backoff in ms; doubled per attempt. */
+  baseBackoffMs?: number;
+  /** Upper bound on backoff in ms. */
+  maxBackoffMs?: number;
+  /** Maximum attempts before a source is dropped from the queue. */
+  maxAttempts?: number;
+  /** Clock injection for deterministic tests. */
+  now?: () => number;
+}
+
+const DEFAULT_RETRY_OPTIONS = {
+  maxEntries: 100,
+  baseBackoffMs: 60_000,
+  maxBackoffMs: 3_600_000,
+  maxAttempts: 5,
+} as const;
+
+/**
+ * Bounded retry queue for rejected source fetches. Tracks a stable reason and
+ * next eligibility per source so that low-quality or unreachable sources are
+ * not re-attempted immediately.
+ */
+export class SourceRetryQueue {
+  private readonly entries = new Map<string, SourceRetryState>();
+  private readonly maxEntries: number;
+  private readonly baseBackoffMs: number;
+  private readonly maxBackoffMs: number;
+  private readonly maxAttempts: number;
+  private readonly now: () => number;
+
+  constructor(options: RetryQueueOptions = {}) {
+    this.maxEntries = options.maxEntries ?? DEFAULT_RETRY_OPTIONS.maxEntries;
+    this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_RETRY_OPTIONS.baseBackoffMs;
+    this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_RETRY_OPTIONS.maxBackoffMs;
+    this.maxAttempts = options.maxAttempts ?? DEFAULT_RETRY_OPTIONS.maxAttempts;
+    this.now = options.now ?? (() => Date.now());
+  }
+
+  /** Record a rejection for a source and compute its next eligibility. */
+  recordRejection(sourceUrl: string, reason: CandidateRejectionReason): SourceRetryState {
+    const prev = this.entries.get(sourceUrl);
+    const attempts = (prev?.attempts ?? 0) + 1;
+    const backoff = Math.min(
+      this.baseBackoffMs * 2 ** (attempts - 1),
+      this.maxBackoffMs,
+    );
+    const state: SourceRetryState = {
+      sourceUrl,
+      reason,
+      attempts,
+      nextEligibleAt: this.now() + backoff,
+    };
+    this.entries.delete(sourceUrl);
+    this.entries.set(sourceUrl, state);
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
+    return state;
+  }
+
+  /** True when the source may be fetched again now. */
+  isEligible(sourceUrl: string): boolean {
+    const state = this.entries.get(sourceUrl);
+    if (!state) return true;
+    if (state.attempts >= this.maxAttempts) return false;
+    return this.now() >= state.nextEligibleAt;
+  }
+
+  get(sourceUrl: string): SourceRetryState | undefined {
+    return this.entries.get(sourceUrl);
+  }
+
+  clear(sourceUrl: string): void {
+    this.entries.delete(sourceUrl);
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+}
+
+/**
+ * Drop candidates whose source is currently ineligible for retry. Candidates
+ * are never sent on to transaction attempts while their source is backed off.
+ */
+export function filterByRetryEligibility(
+  candidates: readonly ClaimCandidate[],
+  queue: SourceRetryQueue,
+): ClaimCandidate[] {
+  return candidates.filter((candidate) => queue.isEligible(candidate.resolutionUrl));
+}
+
 export interface DraftingContext {
   /** Source material the LLM should read from. */
   sourceText: string;
@@ -142,6 +260,19 @@ export async function draftClaimCandidates(
   const raw = await completer(prompt);
   const parsed = parseDraftedCandidates(raw);
   return filterUnsafeCryptoThresholds(parsed);
+}
+
+/**
+ * Drafting variant that also consults a retry queue: candidates whose source
+ * is backed off are excluded so low-quality drafts never reach transaction attempts.
+ */
+export async function draftClaimCandidatesWithRetry(
+  completer: LlmCompleter,
+  context: DraftingContext,
+  queue: SourceRetryQueue,
+): Promise<ClaimCandidate[]> {
+  const drafted = await draftClaimCandidates(completer, context);
+  return filterByRetryEligibility(drafted, queue);
 }
 
 /**

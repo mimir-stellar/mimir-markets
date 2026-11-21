@@ -29,6 +29,118 @@ export interface CandidateLike {
   [key: string]: unknown;
 }
 
+/**
+ * Stable reason codes recorded when a source fetch is rejected. Reasons are
+ * short, machine-readable tokens so they can be aggregated and tested.
+ */
+export type RetryReason =
+  | "fetch_failed"
+  | "low_quality_draft"
+  | "duplicate"
+  | "unknown";
+
+export interface RetryEntry {
+  sourceKey: string;
+  reason: RetryReason;
+  attempts: number;
+  /** Epoch ms before which the source must not be retried. */
+  nextEligibleAt: number;
+}
+
+export interface RetryQueueOptions {
+  /** Maximum number of tracked sources; oldest entries are evicted first. */
+  maxEntries?: number;
+  /** Base backoff in ms; grows exponentially with attempts. */
+  baseBackoffMs?: number;
+  /** Upper bound on backoff in ms. */
+  maxBackoffMs?: number;
+  /** Maximum attempts before a source is dropped from the queue. */
+  maxAttempts?: number;
+  /** Clock injection for deterministic tests. */
+  now?: () => number;
+}
+
+/**
+ * Bounded retry queue tracking rejected source fetches, their stable reasons
+ * and when each source next becomes eligible for retry.
+ */
+export class CreatorRetryQueue {
+  private readonly entries = new Map<string, RetryEntry>();
+  private readonly maxEntries: number;
+  private readonly baseBackoffMs: number;
+  private readonly maxBackoffMs: number;
+  private readonly maxAttempts: number;
+  private readonly now: () => number;
+
+  constructor(options: RetryQueueOptions = {}) {
+    this.maxEntries = options.maxEntries ?? 100;
+    this.baseBackoffMs = options.baseBackoffMs ?? 60_000;
+    this.maxBackoffMs = options.maxBackoffMs ?? 3_600_000;
+    this.maxAttempts = options.maxAttempts ?? 5;
+    this.now = options.now ?? (() => Date.now());
+  }
+
+  /** Record a rejected fetch for a source and schedule its next eligibility. */
+  recordRejection(sourceKey: string, reason: RetryReason): RetryEntry {
+    const prev = this.entries.get(sourceKey);
+    const attempts = (prev?.attempts ?? 0) + 1;
+    const backoff = Math.min(
+      this.baseBackoffMs * 2 ** (attempts - 1),
+      this.maxBackoffMs,
+    );
+    const entry: RetryEntry = {
+      sourceKey,
+      reason,
+      attempts,
+      nextEligibleAt: this.now() + backoff,
+    };
+    // Re-insert so Map order reflects recency for eviction.
+    this.entries.delete(sourceKey);
+    this.entries.set(sourceKey, entry);
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
+    return entry;
+  }
+
+  /** Whether a source may be retried now. Unknown sources are eligible. */
+  isEligible(sourceKey: string): boolean {
+    const entry = this.entries.get(sourceKey);
+    if (!entry) return true;
+    if (entry.attempts >= this.maxAttempts) return false;
+    return this.now() >= entry.nextEligibleAt;
+  }
+
+  get(sourceKey: string): RetryEntry | undefined {
+    return this.entries.get(sourceKey);
+  }
+
+  /** Clear a source after a successful fetch. */
+  clear(sourceKey: string): void {
+    this.entries.delete(sourceKey);
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+}
+
+/**
+ * Returns true when a draft is of sufficient quality to be submitted in a
+ * transaction. Low-quality drafts are kept out of transaction attempts.
+ */
+export function isSubmittableCandidate(candidate: CandidateLike): boolean {
+  const question = normaliseQuestion(candidate.question ?? candidate.title);
+  if (question.length < 10) return false;
+  if (!candidate.resolutionUrl || !candidate.resolutionUrl.trim()) return false;
+  if (!candidate.deadline || !Number.isFinite(Date.parse(candidate.deadline))) {
+    return false;
+  }
+  return true;
+}
+
 function normaliseQuestion(question: string | undefined): string {
   if (!question) return "";
   return question
