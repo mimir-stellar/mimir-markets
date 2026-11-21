@@ -9,7 +9,9 @@
 //! escrow empties instead of stranding atomic units.
 //!
 //! These tests pin the dust amount, the final challenger's entitlement, quote /
-//! payout parity, and conservation across the whole pull sequence.
+//! payout parity, and conservation across the whole pull sequence. Expected
+//! values are derived from the pool inputs with independent integer arithmetic
+//! (`share`, `dust_for`), not by reading contract output back.
 
 extern crate std;
 
@@ -20,6 +22,15 @@ use crate::types::WinnerSide;
 /// test does not simply restate the contract's arithmetic.
 fn share(stake: i128, creator_stake: i128, total_challenger_stake: i128) -> i128 {
     stake * creator_stake / total_challenger_stake
+}
+
+/// Expected dust for `n` equal challengers of `stake` each against `creator_stake`:
+/// total inflow minus the sum of every truncated formula gross.
+fn dust_for(n: i128, stake: i128, creator_stake: i128) -> i128 {
+    let total_challenger_stake = n * stake;
+    let inflow = creator_stake + total_challenger_stake;
+    let formula = stake + share(stake, creator_stake, total_challenger_stake);
+    inflow - n * formula
 }
 
 /// A pool-mode claim with a 10 USDC creator and three equal 3 USDC challengers.
@@ -57,7 +68,8 @@ fn the_final_challenger_receives_their_formula_share_plus_the_exact_dust() {
     let total_challenger_stake = 9 * USDC;
     let inflow = creator_stake + total_challenger_stake;
     let formula = 3 * USDC + share(3 * USDC, creator_stake, total_challenger_stake);
-    let dust = inflow - 3 * formula;
+    let dust = dust_for(3, 3 * USDC, creator_stake);
+    assert_eq!(dust, inflow - 3 * formula);
     assert!(dust > 0, "the fixture must truncate or it proves nothing");
 
     assert_eq!(f.client().get_claim(&id).remaining_escrow, inflow);
@@ -90,7 +102,8 @@ fn the_dust_amount_is_identical_whichever_order_challengers_pull_in() {
     let total_challenger_stake = 9 * USDC;
     let inflow = creator_stake + total_challenger_stake;
     let formula = 3 * USDC + share(3 * USDC, creator_stake, total_challenger_stake);
-    let dust = inflow - 3 * formula;
+    let dust = dust_for(3, 3 * USDC, creator_stake);
+    assert_eq!(dust, inflow - 3 * formula);
 
     // Pull in a different order than the roster was built in. The recipient of
     // the dust changes; the amount does not.
@@ -132,6 +145,7 @@ fn no_dust_when_pool_shares_divide_exactly() {
         &f.zero_hash(),
     );
 
+    assert_eq!(dust_for(3, 3 * USDC, 9 * USDC), 0);
     let expected = 6 * USDC; // stake 3 + share 3
     assert_eq!(f.client().claim_challenger_payout(&c1, &id), expected);
     assert_eq!(f.client().claim_challenger_payout(&c2, &id), expected);
@@ -150,7 +164,8 @@ fn conservation_holds_at_every_pull_with_a_fee_configured() {
     let total_challenger_stake = 9 * USDC;
     let inflow = creator_stake + total_challenger_stake;
     let formula = 3 * USDC + share(3 * USDC, creator_stake, total_challenger_stake);
-    let dust = inflow - 3 * formula;
+    let dust = dust_for(3, 3 * USDC, creator_stake);
+    assert_eq!(dust, inflow - 3 * formula);
 
     let mut paid = 0i128;
     for challenger in [&c1, &c2] {
@@ -182,7 +197,8 @@ fn an_unclaimed_final_share_keeps_the_dust_in_escrow() {
     let total_challenger_stake = 9 * USDC;
     let inflow = creator_stake + total_challenger_stake;
     let formula = 3 * USDC + share(3 * USDC, creator_stake, total_challenger_stake);
-    let dust = inflow - 3 * formula;
+    let dust = dust_for(3, 3 * USDC, creator_stake);
+    assert_eq!(dust, inflow - 3 * formula);
 
     // Only one of the three challengers pulls. The escrow keeps the other two
     // shares and the dust; nothing is overpaid.

@@ -133,6 +133,11 @@ fn challengers_win_pool_mode_is_pro_rata_and_conserved() {
 
 /// Pool-mode shares truncate. The final claimant absorbs the remainder, so the
 /// escrow empties completely instead of stranding dust.
+///
+/// Expected values are derived here from integer arithmetic on the fixture
+/// stakes, independent of the contract's settlement code: each non-final
+/// claimant's share is floor(stake * pool / total_stake), and the final claimant
+/// receives whatever remains.
 #[test]
 fn pool_mode_truncation_dust_is_absorbed_by_the_last_claimant() {
     let f = Fixture::new(0, 0);

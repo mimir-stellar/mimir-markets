@@ -73,6 +73,40 @@ pub fn push(env: &Env, usdc: &Address, to: &Address, amount: i128) {
     client.transfer(&env.current_contract_address(), to, &amount);
 }
 
+/// Split `total` atomic USDC across `shares` (basis points summing to 10_000).
+///
+/// Each recipient receives `floor(total * share / 10_000)`. Any indivisible
+/// remainder is assigned to the final recipient so the allocations always sum
+/// exactly to `total`, preserving escrow conservation for tiny stakes.
+pub fn allocate_exact(total: i128, shares: &[u32]) -> Result<soroban_sdk::Vec<i128>, Error> {
+    if total < 0 || shares.is_empty() {
+        return Err(Error::ZeroStake);
+    }
+    let mut sum: u32 = 0;
+    for s in shares {
+        sum = sum.checked_add(*s).ok_or(Error::ZeroStake)?;
+    }
+    if sum != 10_000 {
+        return Err(Error::ZeroStake);
+    }
+    let mut out = soroban_sdk::Vec::new(&soroban_sdk::Env::default());
+    let mut allocated: i128 = 0;
+    let last = shares.len() - 1;
+    for (i, s) in shares.iter().enumerate() {
+        let amt = if i == last {
+            total - allocated
+        } else {
+            total
+                .checked_mul(*s as i128)
+                .ok_or(Error::ZeroStake)?
+                / 10_000
+        };
+        allocated += amt;
+        out.push_back(amt);
+    }
+    Ok(out)
+}
+
 pub fn balance(env: &Env, usdc: &Address) -> i128 {
     token::TokenClient::new(env, usdc).balance(&env.current_contract_address())
 }
