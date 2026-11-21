@@ -2,40 +2,39 @@ import { describe, it, expect, vi } from "vitest";
 import { cachedFor } from "@/lib/server/ttl-cache";
 
 describe("cachedFor", () => {
-  it("memoizes successful results within the TTL", () => {
+  it("memoizes successful results within the TTL", async () => {
     const fn = vi.fn(async (a: number) => a * 2);
     const cached = cachedFor(fn, 1000);
 
-    return Promise.all([cached(2), cached(2)]).then(([a, b]) => {
-      expect(a).to.Be(4);
-      expect(b).to.Be(4);
-      expect(fn).to.HaveBeenCalledTimes(1);
-    });
+    const [a, b] = await Promise.all([cached(2), cached(2)]);
+    expect(a).toBe(4);
+    expect(b).toBe(4);
+    expect(fn).toHaveBeenCalledTimes(1);
   });
 
   it("re-invokes fn after a rejection", async () => {
     const fn = vi.fn();
-    fn.mockRejectedOnce(new Error("boom"));
-    fn.mockResolvedOnce("ok");
+    fn.mockRejectedValueOnce(new Error("boom"));
+    fn.mockResolvedValueOnce("ok");
     const cached = cachedFor(fn, 1000);
 
-    await expect(cached()).toReject();
-    await expect(cached()).toResolve("ok");
-    expect(fn).to.HaveBeenCalledTimes(2);
+    await expect(cached()).rejects.toThrow("boom");
+    await expect(cached()).resolves.toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(2);
   });
 
   it("evicts expired entries on access", async () => {
     vi.useFakeTimers();
     try {
-      const fn = vi.fn().mockResolved("value");
+      const fn = vi.fn().mockResolvedValue("value");
       const cached = cachedFor(fn, 1000);
 
       await cached("a");
-      expect(fn).to.HaveBeenCalledTimes(1);
+      expect(fn).toHaveBeenCalledTimes(1);
 
-      vi.advanceTimersBy(1001);
+      vi.advanceTimersByTime(1001);
       await cached("a");
-      expect(fn).to.HaveBeenCalledTimes(2);
+      expect(fn).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
@@ -58,7 +57,7 @@ describe("cachedFor", () => {
     }
 
     // Keys 0-6 were evicted, so they re-invoke fn; keys 7-9 are cached.
-    expect(fn.mock.calls.length).to.Be(10 + 7);
+    expect(fn.mock.calls.length).toBe(10 + 7);
   });
 });
 
@@ -76,7 +75,7 @@ function controlledClock(start = 1000) {
   };
 }
 
-test("cached-for returns the memoized value on a hit within the ttl", async () => {
+it("cached-for returns the memoized value on a hit within the ttl", async () => {
   const clock = controlledClock();
   try {
     let calls = 0;
@@ -85,16 +84,16 @@ test("cached-for returns the memoized value on a hit within the ttl", async () =
       return id * 10;
     }, 5000);
 
-    assert.strictEqual(await read(2), 20);
+    expect(await read(2)).toBe(20);
     clock.advance(4999);
-    assert.strictEqual(await read(2), 20);
-    assert.strictEqual(calls, 1, "function should only run once within ttl");
+    expect(await read(2)).toBe(20);
+    expect(calls).toBe(1);
   } finally {
     clock.restore();
   }
 });
 
-test("cached-for re-invokes the function after the ttl expires", async () => {
+it("cached-for re-invokes the function after the ttl expires", async () => {
   const clock = controlledClock();
   try {
     let calls = 0;
@@ -103,16 +102,16 @@ test("cached-for re-invokes the function after the ttl expires", async () => {
       return id + calls;
     }, 1000);
 
-    assert.strictEqual(await read(1), 2);
+    expect(await read(1)).toBe(2);
     clock.advance(1000);
-    assert.strictEqual(await read(1), 3);
-    assert.strictEqual(calls, 2, "function should re-run after ttl");
+    expect(await read(1)).toBe(3);
+    expect(calls).toBe(2);
   } finally {
     clock.restore();
   }
 });
 
-test("cached-for keys entries by json-stringified arguments", async () => {
+it("cached-for keys entries by json-stringified arguments", async () => {
   const clock = controlledClock();
   try {
     const calls = new Map<string, number>();
@@ -122,21 +121,19 @@ test("cached-for keys entries by json-stringified arguments", async () => {
       return args.id * 100;
     }, 5000);
 
-    assert.strictEqual(await read({ id: 1 }), 100);
-    assert.strictEqual(await read({ id: 2 }), 200);
-    // Distinct args must not collide.
-    assert.strictEqual(calls.get(JSON.stringify({ id: 1 })), 1);
-    assert.strictEqual(calls.get(JSON.stringify({ id: 2 })), 1);
+    expect(await read({ id: 1 })).toBe(100);
+    expect(await read({ id: 2 })).toBe(200);
+    expect(calls.get(JSON.stringify({ id: 1 }))).toBe(1);
+    expect(calls.get(JSON.stringify({ id: 2 }))).toBe(1);
 
-    // Repeating the first args hits the cache instead of re-running.
-    assert.strictEqual(await read({ id: 1 }), 100);
-    assert.strictEqual(calls.get(JSON.stringify({ id: 1 })), 1);
+    expect(await read({ id: 1 })).toBe(100);
+    expect(calls.get(JSON.stringify({ id: 1 }))).toBe(1);
   } finally {
     clock.restore();
   }
 });
 
-test("cached-for shares one in-flight promise among concurrent callers", async () => {
+it("cached-for shares one in-flight promise among concurrent callers", async () => {
   const clock = controlledClock();
   try {
     let calls = 0;
@@ -152,12 +149,12 @@ test("cached-for shares one in-flight promise among concurrent callers", async (
     const a = read(7);
     const b = read(7);
     const c = read(7);
-    assert.strictEqual(calls, 1, "concurrent callers should share one call");
+    expect(calls).toBe(1);
 
     resolve(42);
     const results = await Promise.all([a, b, c]);
-    assert.deepStrictEqual(results, [42, 42, 42]);
-    assert.strictEqual(calls, 1);
+    expect(results).toEqual([42, 42, 42]);
+    expect(calls).toBe(1);
   } finally {
     clock.restore();
   }

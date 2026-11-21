@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   sortDecodedMessagesBySentAt,
   getDecodedMessageText,
@@ -101,7 +101,7 @@ describe('classifyXmtpThreadError', () => {
   });
 
   it('classifies generic Error', () => {
-    const out = classifyXmtpThreadError(new Error('boom'));
+    const out: any = classifyXmtpThreadError(new Error('boom'));
     expect(typeof out).toBe('string');
     expect(out.length).toBeGreaterThan(0);
   });

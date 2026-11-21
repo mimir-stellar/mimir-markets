@@ -16,6 +16,8 @@ pub enum DataKey {
     MarketCount,
     AccruedFees,
     Market(u64),
+    /// (market) -> monotonically increasing revision, bumped only after a successful mutation.
+    Revision(u64),
     /// Global pause flag. When set, state-mutating entry points that are not
     /// withdrawals are rejected. Withdrawals (claim, claim_parked_payout)
     /// MUST remain available while paused.
@@ -180,6 +182,26 @@ pub fn get_market_opt(env: &Env, id: u64) -> Option<Market> {
 pub fn set_market(env: &Env, id: u64, market: &Market) {
     let key = DataKey::Market(id);
     env.storage().persistent().set(&key, market);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
+}
+
+// ── Revisions ────────────────────────────────────────────────────────────────
+
+/// Current squad market revision. Zero when no successful mutation has occurred.
+pub fn revision_of(env: &Env, id: u64) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Revision(id))
+        .unwrap_or(0)
+}
+
+/// Write a revision. Callers must only invoke this after a mutation has succeeded,
+/// so that rejected invocations leave the revision unchanged.
+pub fn set_revision(env: &Env, id: u64, value: u64) {
+    let key = DataKey::Revision(id);
+    env.storage().persistent().set(&key, &value);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);

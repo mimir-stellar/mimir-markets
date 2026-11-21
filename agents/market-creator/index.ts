@@ -237,6 +237,28 @@ const CREATOR_ADDR   = CREATOR.address;
 const CREATOR_PAYER  = payingWalletFor(CREATOR);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+export function cryptoThresholdReason(candidate: ClaimCandidate, event: CryptoEvent): string | null {
+  if (!Number.isFinite(event.priceUsd) || event.priceUsd <= 0) {
+    return `missing live CoinGecko price for ${event.symbol}`;
+  }
+
+  const text = [
+    candidate.question,
+    candidate.settlementRule,
+  ].join("\n");
+  const thresholds = extractUsdThresholds(text);
+  if (thresholds.length === 0) return "no explicit USD price threshold found";
+
+  const low = event.priceUsd * CRYPTO_MIN_THRESHOLD_RATIO;
+  const high = event.priceUsd * CRYPTO_MAX_THRESHOLD_RATIO;
+  const realistic = thresholds.some((threshold) => threshold >= low && threshold <= high);
+  if (!realistic) {
+    const rendered = thresholds.map((threshold) => `$${formatUsd(threshold)}`).join(", ");
+    return `${rendered} outside live ${event.symbol} guard ($${formatUsd(low)}-$${formatUsd(high)}, current=$${formatUsd(event.priceUsd)})`;
+  }
+
+  return null;
+}
 
 // ── Source fetchers ───────────────────────────────────────────────────────────
 

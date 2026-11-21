@@ -14,8 +14,10 @@ type Row = {
   [key: string]: unknown;
 };
 
+type NormalizeInput = string | null | undefined;
+
 describe("normalizeXmtpMessageId", () => {
-  const cases: Array<[string | null | undefined, string | null]> = [
+  const cases: Array<[NormalizeInput, string | null]> = [
     ["abc123", "abc123"],
     ["  abc123  ", "abc123"],
     ["ABC123", "abc123"],
