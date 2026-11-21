@@ -68,3 +68,25 @@ test("one second past the grace window settles even with live evidence", () => {
 test("exactly at the grace boundary is not past grace and still defers", () => {
   assert.equal(isSportsEventFinal(claim(), "Live: 2nd quarter", graceBoundary), false);
 });
+
+// ── Evidence acquisition failure classes ──────────────────────────────
+
+test("unavailable evidence defers and is not treated as final", () => {
+  assert.equal(isSportsEventFinal(claim(), undefined as unknown as string, withinGrace), false);
+});
+
+test("stale evidence defers rather than settling inside grace", () => {
+  assert.equal(isSportsEventFinal(claim(), "Live: 2nd quarter, 6:12 remaining", withinGrace), false);
+});
+
+test("malformed evidence defers and is not treated as final", () => {
+  assert.equal(isSportsEventFinal(claim(), null as unknown as string, withinGrace), false);
+});
+
+test("unsupported evidence category defers and is not treated as final", () => {
+  assert.equal(isSportsEventFinal(claim(), "Cricket: Test match, day 3 stumps", withinGrace), false);
+});
+
+test("dependency failure at grace boundary still defers, not settled", () => {
+  assert.equal(isSportsEventFinal(claim(), undefined as unknown as string, graceBoundary), false);
+});

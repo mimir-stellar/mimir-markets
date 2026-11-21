@@ -264,6 +264,23 @@ If self-resolving council was used and `COUNCIL_BONUS_USDC` > 0:
 
 ---
 
+### Evidence Acquisition Failure Classes
+
+Evidence acquisition failures are recorded in oracle decision journals using bounded codes. Each code is a fixed, low-cardinality identifier so journal entries remain comparable across runs.
+
+| Failure Class Code | Condition | Journal Behavior | On-Chain Impact |
+|---|---|---|---|
+| `evidence_unavailable` | Source unreachable, 5xx, timeout, or all fetch routes exhausted | Recorded; claim deferred to next poll | None |
+| `evidence_stale` | Retrieved evidence older than `MAX_EVIDENCE_AGE_MS` (15 minutes) | Recorded; claim deferred and re-fetched | None |
+| `evidence_malformed` | Evidence body empty, undecodable, or contains unpaired UTF-16 surrogates | Recorded; claim deferred | None |
+| `evidence_unsupported` | Source format or content type not supported by any fetcher route | Recorded; claim deferred | None |
+
+Dependency-driven failures (`evidence_unavailable`, `evidence_stale`) follow the existing conservative skip-and-retry behavior. They are never converted into settled verdicts or refunds. `evidence_malformed` and `evidence_unsupported` likewise defer the claim rather than producing an `UNRESOLVABLE` outcome.
+
+Journal entries carry only the bounded code, the claim ID, the fetcher kind when known, and a timestamp. They do not include raw evidence text.
+
+---
+
 ## Environment Configuration Knobs
 
 Every environment variable read directly or indirectly by `agents/oracle/index.ts`:

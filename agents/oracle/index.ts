@@ -33,6 +33,11 @@
  *  - The evidence hash is SHA-256 (`env.crypto().sha256()`'s client-side twin),
  *    not keccak256, so a contract could verify it.
  *
+ * Evidence acquisition failure classes (unavailable / stale / malformed /
+ * unsupported) are recorded as bounded codes in the decision journal. Dependency
+ * failures keep the conservative skip-and-retry behavior and never become settled
+ * verdicts.
+ *
  * Run: npx tsx agents/oracle/index.ts
  * Env: ORACLE_SECRET, NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID
  *      + one of: GEMINI_API_KEY (preferred) OR ANTHROPIC_API_KEY
