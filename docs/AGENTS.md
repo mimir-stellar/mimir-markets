@@ -261,6 +261,10 @@ a dependency, runtime, or runner change therefore misses the cache. Use
 cache problem. CI caches the same directory, but the manifest and versioned
 path prevent stale entries from being trusted.
 
+Before discovering tests or creating a cache, the runner checks the Node version
+against the `engines.node` range in `package.json`. If the version is unsupported,
+run `nvm install` and `nvm use` in the repository root, then retry.
+
 The runner uses a strict child-environment allowlist. It does not load
 `.env.local` and does not pass production seeds, Stellar credentials, LLM keys,
 database URLs, or arbitrary environment variables. Database-backed tests skip
