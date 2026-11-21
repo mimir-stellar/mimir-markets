@@ -8,13 +8,21 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Account, Keypair } from "@stellar/stellar-sdk";
 
 import {
+  ensureUsdcTrustline,
+  isRejection,
+  isTransportUnavailable,
   readUsdcTrustline,
+  toWalletError,
+  WalletError,
   type HorizonAccount,
   type HorizonBalanceLine,
   type TrustlineStatus,
 } from "../../lib/stellar-trustline";
+import type { StellarSigner } from "../../lib/stellar";
+import { actionLabel, statusDescription } from "../../lib/wallet-aria";
 import { USDC_CODE, USDC_ISSUER } from "../../lib/usdc";
 import { evaluateUsdcTrustlineGate, usdcTrustlineGateFixture } from "../../lib/usdcTrustlineGate";
 
@@ -270,5 +278,231 @@ test("every TrustlineStatus value is produced by at least one fixture", async ()
   assert.deepEqual(
     [...produced].sort(),
     ["missing", "ready", "unfunded", "unknown"],
+  );
+});
+
+// ── Wallet Rejection vs Unavailable Transport Coverage ───────────────────────
+
+test("isRejection: correctly classifies user cancellation across error shapes", () => {
+  assert.equal(isRejection(new Error("User rejected the transaction")), true);
+  assert.equal(isRejection(new Error("Transaction was declined by user")), true);
+  assert.equal(isRejection(new Error("User closed the modal")), true);
+  assert.equal(isRejection(new Error("Request cancelled")), true);
+  assert.equal(isRejection(new Error("Signature denied")), true);
+  assert.equal(isRejection({ message: "User declined" }), true);
+  assert.equal(isRejection({ code: 4001, message: "User rejected request" }), true);
+  assert.equal(isRejection(new WalletError("User cancelled", "rejected")), true);
+  assert.equal(isRejection("user cancelled signing"), true);
+
+  // Non-rejections must not match
+  assert.equal(isRejection(new Error("Connection refused")), false);
+  assert.equal(isRejection(new Error("Wallet transport unavailable")), false);
+  assert.equal(isRejection(null), false);
+  assert.equal(isRejection(undefined), false);
+});
+
+test("isTransportUnavailable: correctly identifies unreachable or missing wallet transport", () => {
+  assert.equal(isTransportUnavailable(new Error("Wallet transport unavailable")), true);
+  assert.equal(isTransportUnavailable(new Error("Freighter extension not found")), true);
+  assert.equal(isTransportUnavailable(new Error("Wallet is not installed")), true);
+  assert.equal(isTransportUnavailable(new Error("Device disconnected")), true);
+  assert.equal(isTransportUnavailable(new Error("Hardware wallet disconnected")), true);
+  assert.equal(isTransportUnavailable(new Error("Module not available")), true);
+  assert.equal(isTransportUnavailable(new Error("Failed to connect to wallet")), true);
+  assert.equal(isTransportUnavailable({ code: -32000, message: "Transport closed" }), true);
+  assert.equal(isTransportUnavailable(new WalletError("Not installed", "unavailable")), true);
+
+  // Non-transport errors
+  assert.equal(isTransportUnavailable(new Error("Contract simulation reverted")), false);
+  assert.equal(isTransportUnavailable(null), false);
+});
+
+test("boundary: user rejection takes priority over transport errors if both mentioned", () => {
+  // If the user actively rejected during a transport prompt, it is a rejection, not transport failure
+  const mixedErr = new Error("User rejected wallet transport connection prompt");
+  assert.equal(isRejection(mixedErr), true);
+  assert.equal(isTransportUnavailable(mixedErr), false);
+
+  const walletErr = toWalletError(mixedErr, "connect");
+  assert.equal(walletErr.code, "rejected");
+});
+
+test("toWalletError: shapes distinct WalletError instances with proper codes", () => {
+  const rejection = toWalletError(new Error("User cancelled"), "sign");
+  assert.equal(rejection instanceof WalletError, true);
+  assert.equal(rejection.code, "rejected");
+  assert.match(rejection.message, /User cancelled/i);
+
+  const transport = toWalletError(new Error("Wallet transport unavailable"), "connect");
+  assert.equal(transport instanceof WalletError, true);
+  assert.equal(transport.code, "unavailable");
+  assert.match(transport.message, /transport unavailable/i);
+
+  const generic = toWalletError(new Error("Internal timeout"), "transact");
+  assert.equal(generic instanceof WalletError, true);
+  assert.equal(generic.code, "error");
+  assert.match(generic.message, /Internal timeout/i);
+
+  const empty = toWalletError({}, "sign");
+  assert.equal(empty.code, "error");
+  assert.equal(empty.message, "Could not sign.");
+});
+
+test("ensureUsdcTrustline: NEVER retries automatically when user rejects signature", async () => {
+  const kp = Keypair.random();
+  const publicKey = kp.publicKey();
+  const missingFixture = horizonAccountFixture([NATIVE_BALANCE_LINE], publicKey);
+  const mockAccount = new Account(publicKey, "12345");
+
+  let signCalls = 0;
+  let retryCalls = 0;
+
+  const signer: StellarSigner = {
+    publicKey,
+    signTransaction: async () => {
+      signCalls += 1;
+      throw new Error("User declined transaction in wallet extension");
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      await ensureUsdcTrustline(signer, {
+        maxRetries: 3,
+        onRetry: () => {
+          retryCalls += 1;
+        },
+        loadAccount: async () => missingFixture,
+        server: {
+          loadAccount: async () => mockAccount as any,
+          submitTransaction: async () => ({ hash: "tx_hash_1" }),
+        },
+      });
+    },
+    (err: unknown) => {
+      assert(err instanceof Error);
+      assert.equal(isRejection(err), true);
+      assert.equal((err as WalletError).code, "rejected");
+      return true;
+    },
+  );
+
+  // CRITICAL: signTransaction must have been called EXACTLY ONCE, zero retries
+  assert.equal(signCalls, 1, "User rejection must never trigger automatic retries");
+  assert.equal(retryCalls, 0, "onRetry hook must not be called on user rejection");
+});
+
+test("ensureUsdcTrustline: retries transient transport errors and succeeds on recovery", async () => {
+  const kp = Keypair.random();
+  const publicKey = kp.publicKey();
+  const missingFixture = horizonAccountFixture([NATIVE_BALANCE_LINE], publicKey);
+  const mockAccount = new Account(publicKey, "12345");
+
+  let signCalls = 0;
+  let retryCalls = 0;
+
+  const signer: StellarSigner = {
+    publicKey,
+    signTransaction: async (xdr) => {
+      signCalls += 1;
+      if (signCalls === 1) {
+        throw new Error("Wallet transport disconnected");
+      }
+      return { signedTxXdr: xdr, signerAddress: publicKey };
+    },
+  };
+
+  const result = await ensureUsdcTrustline(signer, {
+    maxRetries: 2,
+    onRetry: (attempt, err) => {
+      retryCalls += 1;
+      assert.equal(attempt, 1);
+      assert.equal(isTransportUnavailable(err), true);
+    },
+    loadAccount: async () => missingFixture,
+    server: {
+      loadAccount: async () => mockAccount as any,
+      submitTransaction: async () => ({ hash: "tx_success_recovered" }),
+    },
+  });
+
+  assert.equal(signCalls, 2, "Should attempt retry on transient transport failure");
+  assert.equal(retryCalls, 1, "Should have triggered onRetry hook once");
+  assert.deepEqual(result, { added: true, hash: "tx_success_recovered" });
+});
+
+test("ensureUsdcTrustline: exhausts retries on persistent transport failure and throws unavailable error", async () => {
+  const kp = Keypair.random();
+  const publicKey = kp.publicKey();
+  const missingFixture = horizonAccountFixture([NATIVE_BALANCE_LINE], publicKey);
+  const mockAccount = new Account(publicKey, "12345");
+
+  let signCalls = 0;
+  let retryCalls = 0;
+
+  const signer: StellarSigner = {
+    publicKey,
+    signTransaction: async () => {
+      signCalls += 1;
+      throw new Error("Wallet extension not found");
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      await ensureUsdcTrustline(signer, {
+        maxRetries: 2,
+        onRetry: () => {
+          retryCalls += 1;
+        },
+        loadAccount: async () => missingFixture,
+        server: {
+          loadAccount: async () => mockAccount as any,
+          submitTransaction: async () => ({ hash: "never" }),
+        },
+      });
+    },
+    (err: unknown) => {
+      assert(err instanceof Error);
+      assert.equal(isTransportUnavailable(err), true);
+      assert.equal((err as WalletError).code, "unavailable");
+      return true;
+    },
+  );
+
+  assert.equal(signCalls, 3, "Initial attempt plus 2 retries");
+  assert.equal(retryCalls, 2, "2 retries before giving up");
+});
+
+test("evaluateUsdcTrustlineGate: distinguishes user rejection from unavailable transport", () => {
+  const rejectedGate = evaluateUsdcTrustlineGate(
+    usdcTrustlineGateFixture({ failureKind: "rejected" }),
+  );
+  assert.equal(rejectedGate.allowed, false);
+  assert.equal(rejectedGate.status, "rejected");
+  assert.equal(rejectedGate.messageKey, "trustlineRejected");
+
+  const transportGate = evaluateUsdcTrustlineGate(
+    usdcTrustlineGateFixture({ failureKind: "transport_unavailable" }),
+  );
+  assert.equal(transportGate.allowed, false);
+  assert.equal(transportGate.status, "transport_unavailable");
+  assert.equal(transportGate.messageKey, "trustlineTransportUnavailable");
+});
+
+test("wallet-aria: distinguishes rejected from transport_unavailable action states", () => {
+  const rejectedBtn = actionLabel("add_trustline", "rejected");
+  assert.equal(rejectedBtn, "Trustline signature rejected in wallet");
+
+  const transportBtn = actionLabel("add_trustline", "transport_unavailable");
+  assert.equal(transportBtn, "USDC trustline setup — wallet transport unavailable");
+
+  const rejectedDesc = statusDescription("add_trustline", "rejected");
+  assert.equal(rejectedDesc, "The transaction was rejected in your wallet. You can try again.");
+
+  const transportDesc = statusDescription("add_trustline", "transport_unavailable");
+  assert.equal(
+    transportDesc,
+    "Wallet transport is unavailable. Make sure your wallet extension is installed, active, and connected.",
   );
 });

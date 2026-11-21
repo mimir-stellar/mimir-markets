@@ -151,31 +151,104 @@ async function loadKit(): Promise<Kit> {
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
+export type WalletErrorCode = "rejected" | "unavailable" | "error";
+
+/**
+ * Structured wallet error preserving classification code, original cause,
+ * and user-actionable diagnostics.
+ */
+export class WalletError extends Error {
+  readonly code: WalletErrorCode;
+  readonly cause?: unknown;
+
+  constructor(message: string, code: WalletErrorCode, cause?: unknown) {
+    super(message);
+    this.name = "WalletError";
+    this.code = code;
+    this.cause = cause;
+  }
+}
+
+/**
+ * Returns true if the message or error corresponds to a user cancellation or rejection.
+ */
+export function isRejection(messageOrError: unknown): boolean {
+  if (!messageOrError) return false;
+  if (typeof messageOrError === "object" && messageOrError !== null && "code" in messageOrError) {
+    if ((messageOrError as { code?: unknown }).code === "rejected") return true;
+  }
+  const message =
+    messageOrError instanceof Error
+      ? messageOrError.message
+      : typeof messageOrError === "object" && messageOrError !== null && "message" in messageOrError
+        ? String((messageOrError as { message?: unknown }).message ?? "")
+        : String(messageOrError);
+  return /reject|denied|cancel|closed the modal|user declined|declined/i.test(message);
+}
+
+/**
+ * Returns true if the message or error indicates that the wallet transport
+ * or extension is unavailable, not installed, disconnected, or unreachable.
+ */
+export function isTransportUnavailable(messageOrError: unknown): boolean {
+  if (!messageOrError) return false;
+  if (typeof messageOrError === "object" && messageOrError !== null && "code" in messageOrError) {
+    if ((messageOrError as { code?: unknown }).code === "unavailable") return true;
+  }
+  const message =
+    messageOrError instanceof Error
+      ? messageOrError.message
+      : typeof messageOrError === "object" && messageOrError !== null && "message" in messageOrError
+        ? String((messageOrError as { message?: unknown }).message ?? "")
+        : String(messageOrError);
+
+  if (isRejection(message)) return false;
+
+  return /not installed|not available|unavailable|wallet not found|extension not found|module not found|no provider|cannot connect to wallet|transport.*(?:error|closed|unavailable|disconnected|failed)|device.*disconnected|hardware.*disconnected|unreachable|not connected|failed to connect/i.test(
+    message,
+  );
+}
+
 /**
  * The kit rejects with plain `{ code, message }` objects, not `Error`s, so a
  * `catch (e) { e.message }` at a call site reads `undefined`. Everything crossing
- * out of this module becomes a real `Error` with a message worth showing.
+ * out of this module becomes a real `WalletError` with a message worth showing
+ * and an explicit error code.
  */
-function toWalletError(cause: unknown, action: string): Error {
-  if (cause instanceof Error) return cause;
+export function toWalletError(cause: unknown, action: string): WalletError {
+  if (cause instanceof WalletError) return cause;
 
-  if (cause && typeof cause === "object") {
+  let message = "";
+  let kitCode: number | undefined;
+
+  if (cause instanceof Error) {
+    message = cause.message;
+  } else if (cause && typeof cause === "object") {
     const kitError = cause as {
       code?: number;
       message?: string;
       ext?: string;
     };
-
+    kitCode = kitError.code;
     if (typeof kitError.message === "string" && kitError.message) {
-      return new Error(kitError.message);
+      message = kitError.message;
     }
+  } else if (typeof cause === "string") {
+    message = cause;
   }
 
-  return new Error(`Could not ${action}.`);
-}
+  if (!message) {
+    message = `Could not ${action}.`;
+  }
 
-function isRejection(message: string): boolean {
-  return /reject|denied|cancel|closed the modal|user declined/i.test(message);
+  let code: WalletErrorCode = "error";
+  if (isRejection(message) || kitCode === 4001) {
+    code = "rejected";
+  } else if (isTransportUnavailable(message) || kitCode === -32000 || kitCode === -32001) {
+    code = "unavailable";
+  }
+
+  return new WalletError(message, code, cause);
 }
 
 // ── Context ───────────────────────────────────────────────────────────────────
@@ -187,8 +260,8 @@ export interface WalletContextValue {
   isConnecting: boolean;
   connect: () => Promise<void>;
   disconnect: () => void;
-  /** "rejected" for a user-cancelled attempt, "error" otherwise, else null. */
-  error: string | null;
+  /** "rejected" for user cancellation, "unavailable" for transport failure, "error" otherwise, else null. */
+  error: WalletErrorCode | string | null;
 
   /**
    * SEP-43 transaction signing, shaped as `@stellar/stellar-sdk`'s
@@ -356,7 +429,9 @@ export type TransactionState =
   | "invalid"
   | "stale"
   | "disconnected"
-  | "dependency-failure";
+  | "dependency-failure"
+  | "rejected"
+  | "transport-unavailable";
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
 
@@ -523,9 +598,11 @@ function WalletPickerModal({
             ? "Connecting to wallet — please check your wallet extension"
             : error === "rejected"
               ? "Connection rejected in wallet"
-              : error
-                ? "Could not connect. Try another wallet."
-                : ""}
+              : error === "unavailable"
+                ? "Wallet transport unavailable — please check your wallet extension or install it"
+                : error
+                  ? "Could not connect. Try another wallet."
+                  : ""}
         </div>
 
         <div className="mb-1 flex items-center justify-between">
@@ -593,7 +670,9 @@ function WalletPickerModal({
           <p role="alert" className="mt-3 text-xs text-pv-danger">
             {error === "rejected"
               ? "Connection rejected in wallet."
-              : "Could not connect. Try another wallet."}
+              : error === "unavailable"
+                ? "Wallet transport unavailable. Make sure your wallet is installed, unlocked, and connected."
+                : "Could not connect. Try another wallet."}
           </p>
         )}
       </div>
@@ -800,8 +879,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         const err = toWalletError(cause, "sign this transaction");
 
         if (/network|passphrase/i.test(err.message)) {
-          throw new Error(
+          throw new WalletError(
             `${err.message} — check that your wallet is set to Stellar ${STELLAR_NETWORK}.`,
+            err.code,
+            cause,
           );
         }
 
@@ -941,7 +1022,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         setPickerOpen(false);
       } catch (cause) {
         const err = toWalletError(cause, "connect");
-        setError(isRejection(err.message) ? "rejected" : "error");
+        setError(err.code);
       } finally {
         setIsConnecting(false);
       }

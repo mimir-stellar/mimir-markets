@@ -1091,6 +1091,7 @@
   "wallet": {
     "noWallet": "No Stellar wallet found. Install Freighter, xBull, Lobstr or Hana.",
     "rejected": "Connection rejected",
+    "transportUnavailable": "Wallet transport unavailable",
     "error": "Connection error",
     "balancesTitle": "Balances and payouts",
     "balancesHint": "The contract never pushes funds it cannot deliver. Anything parked for you waits here until you pull it.",
@@ -1119,7 +1120,8 @@
     "trustlineMissingHint": "Stellar accounts hold an asset only after they trust its issuer. Add the USDC trustline once before your first stake.",
     "trustlineAdd": "Add USDC trustline",
     "trustlineAdding": "Confirm in wallet...",
-    "trustlineRejected": "Trustline signature rejected in your wallet."
+    "trustlineRejected": "Trustline signature rejected in your wallet.",
+    "trustlineTransportUnavailable": "Wallet transport unavailable. Check that your wallet extension is active."
   },
   "fees": {
     "loadFailed": "Could not read the fee schedule from the network.",

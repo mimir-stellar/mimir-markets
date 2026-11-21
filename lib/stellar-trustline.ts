@@ -49,6 +49,7 @@
  */
 
 import {
+  Account,
   BASE_FEE,
   Operation,
   TransactionBuilder,
@@ -62,6 +63,21 @@ import {
   type StellarSigner,
 } from "./stellar";
 import { USDC_CODE, USDC_ISSUER, usdcAsset } from "./usdc";
+import {
+  isRejection,
+  isTransportUnavailable,
+  toWalletError,
+  WalletError,
+  type WalletErrorCode,
+} from "./wallet";
+
+export {
+  isRejection,
+  isTransportUnavailable,
+  toWalletError,
+  WalletError,
+  type WalletErrorCode,
+};
 
 export type TrustlineStatus =
   /** Trustline present: the account can hold and stake USDC. */
@@ -109,6 +125,43 @@ export type HorizonAccountLoader = (address: string) => Promise<HorizonAccount>;
 export interface ReadUsdcTrustlineOptions {
   loadAccount?: HorizonAccountLoader;
   server?: { loadAccount: HorizonAccountLoader };
+}
+
+export interface HorizonSubmitResult {
+  hash: string;
+}
+
+export type HorizonTransactionSubmitter = (
+  transaction: any,
+) => Promise<HorizonSubmitResult>;
+
+export interface EnsureUsdcTrustlineOptions extends ReadUsdcTrustlineOptions {
+  submitTransaction?: HorizonTransactionSubmitter;
+  server?: {
+    loadAccount: HorizonAccountLoader;
+    submitTransaction?: HorizonTransactionSubmitter;
+  };
+  /**
+   * Maximum automatic retry attempts for transient transport or network errors.
+   * User-rejected signatures are NEVER retried automatically.
+   */
+  maxRetries?: number;
+  /**
+   * Delay in milliseconds between retry attempts (default 0).
+   */
+  retryDelayMs?: number;
+  /**
+   * Hook called when an automatic retry is attempted.
+   */
+  onRetry?: (attempt: number, error: unknown) => void;
+}
+
+function resolveTransactionSubmitter(
+  options: EnsureUsdcTrustlineOptions,
+): HorizonTransactionSubmitter {
+  if (options.submitTransaction) return options.submitTransaction;
+  if (options.server?.submitTransaction) return options.server.submitTransaction;
+  return (tx) => createHorizonServer().submitTransaction(tx);
 }
 
 function resolveAccountLoader(
@@ -163,8 +216,9 @@ export async function readUsdcTrustline(
  */
 export async function ensureUsdcTrustline(
   signer: StellarSigner,
+  options: EnsureUsdcTrustlineOptions = {},
 ): Promise<{ added: boolean; hash?: string }> {
-  const existing = await readUsdcTrustline(signer.publicKey);
+  const existing = await readUsdcTrustline(signer.publicKey, options);
   if (existing.status === "ready") return { added: false };
   if (existing.status === "unfunded") {
     throw new Error(
@@ -172,10 +226,18 @@ export async function ensureUsdcTrustline(
     );
   }
 
-  const horizon = createHorizonServer();
-  const account = await horizon.loadAccount(signer.publicKey);
+  const loadAccount = resolveAccountLoader(options);
+  const account = await loadAccount(signer.publicKey);
 
-  const transaction = new TransactionBuilder(account, {
+  const sourceAccount =
+    typeof (account as any).sequenceNumber === "function"
+      ? (account as any)
+      : new Account(
+          (account as any).id || (account as any).account_id || signer.publicKey,
+          String((account as any).sequence || "1"),
+        );
+
+  const transaction = new TransactionBuilder(sourceAccount, {
     fee: BASE_FEE,
     networkPassphrase: NETWORK_PASSPHRASE,
   })
@@ -185,14 +247,39 @@ export async function ensureUsdcTrustline(
     .setTimeout(180)
     .build();
 
-  const { signedTxXdr } = await signer.signTransaction(transaction.toXDR(), {
-    networkPassphrase: NETWORK_PASSPHRASE,
-    address: signer.publicKey,
-  });
+  const maxRetries = options.maxRetries ?? 0;
+  let attempt = 0;
 
-  const signed = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
-  const result = await horizon.submitTransaction(signed);
-  return { added: true, hash: result.hash };
+  while (true) {
+    try {
+      const { signedTxXdr } = await signer.signTransaction(transaction.toXDR(), {
+        networkPassphrase: NETWORK_PASSPHRASE,
+        address: signer.publicKey,
+      });
+
+      const signed = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
+      const submitTx = resolveTransactionSubmitter(options);
+      const result = await submitTx(signed);
+      return { added: true, hash: result.hash };
+    } catch (cause) {
+      // User rejection: avoid retrying automatically.
+      if (isRejection(cause)) {
+        throw toWalletError(cause, "sign this transaction");
+      }
+
+      // Transient transport error: retry if attempts remain
+      if (attempt < maxRetries) {
+        attempt += 1;
+        options.onRetry?.(attempt, cause);
+        if (options.retryDelayMs && options.retryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, options.retryDelayMs));
+        }
+        continue;
+      }
+
+      throw toWalletError(cause, "sign or submit this transaction");
+    }
+  }
 }
 
 
