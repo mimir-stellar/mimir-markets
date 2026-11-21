@@ -202,13 +202,17 @@ Source: `contracts-soroban/mimir-squad/src/pool.rs`. Tests: `src/test_lifecycle.
 
 ## Virtual baskets
 
-Source: `lib/baskets.ts`. Tests: `tests/node/baskets.test.ts`,
-`tests/node/basket-returns.test.ts`.
+Source: `lib/baskets.ts`, `lib/mirror-queue.ts`, `lib/server/mirror-queue.ts`. Tests: `tests/node/baskets.test.ts`,
+`tests/node/basket-returns.test.ts`, `tests/node/basket-rebalance-mirror-race.test.ts`.
 
 - Weights equal exactly 10,000 bps and single-agent/category caps are enforced.
 - Paused/stale/failed-copy allocation remains idle USDC and cannot fabricate NAV.
 - Share/deposit/redemption and high-water-mark calculations use integer rounding
   with explicit dust ownership.
+- Mirror-queue suggestions are user-signed intents, never custodial stakes:
+  repeated subscriptions and overlapping baskets are deduplicated by `claimId`,
+  basket rebalances update only unmirrored open claims, and late position
+  observations exclude claims already staked by the subscriber.
 - Funded deposits remain off until the external audit and legal/eligibility gates in
   `LAUNCH_GATE_STATUS.md` are complete.
 
