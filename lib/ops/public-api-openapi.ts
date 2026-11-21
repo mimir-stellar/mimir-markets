@@ -46,8 +46,19 @@ import {
   statusFor,
   type ApiErrorCode,
 } from "@/lib/api/errors";
+import {
+  CAPABILITIES_CACHE_CONTROL,
+  CAPABILITIES_ROUTE,
+  buildCapabilityDocument,
+} from "@/lib/api/capabilities";
 import { TIER_POLICIES } from "@/lib/api/policy";
 import { DEFAULT_RULES } from "@/lib/api/rate-limit";
+import {
+  API_SCHEMA_VERSION,
+  CAPABILITY_SCHEMA_VERSION,
+  SCHEMA_VERSION_HEADER,
+  SUPPORTED_CAPABILITY_SCHEMA_VERSIONS,
+} from "@/lib/api/schema";
 import { DEFAULT_BASKET_POLICY } from "@/lib/baskets";
 import { getSeedChallengeOpportunities } from "@/lib/challengeOpportunitySeeds";
 import {
@@ -120,6 +131,7 @@ const EXAMPLE_TIMESTAMP_S = Math.floor(EXAMPLE_SIGNED_AT_MS / 1000);
  * Every public read endpoint documented in `docs/openapi-public-v1.yaml`.
  */
 export const PUBLIC_READ_PATHS = [
+  "/api/capabilities",
   "/api/vs",
   "/api/vs/{id}",
   "/api/vs/{id}/reasoning",
@@ -145,6 +157,16 @@ export interface PublicEndpointMetadata {
 }
 
 export const PUBLIC_ENDPOINT_METADATA: Record<PublicReadPath, PublicEndpointMetadata> = {
+  "/api/capabilities": {
+    path: "/api/capabilities",
+    operationId: "getApiCapabilities",
+    summary: "Fetch the versioned public API capability discovery document.",
+    cacheControl: CAPABILITIES_CACHE_CONTROL,
+    rateLimited: true,
+    rateLimitRouteKey: CAPABILITIES_ROUTE,
+    responseSchemaName: "CapabilityDocumentResponse",
+    statuses: [200, 400, 429],
+  },
   "/api/vs": {
     path: "/api/vs",
     operationId: "listVsFeed",
@@ -760,8 +782,251 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
     },
   };
 
+  const CapabilityRateLimitRuleSchema: Record<string, unknown> = {
+    type: "object",
+    required: ["dimension", "limit", "windowMs"],
+    additionalProperties: false,
+    properties: {
+      dimension: { type: "string", enum: ["ip", "wallet", "agent", "route"] },
+      limit: { type: "integer", minimum: 1 },
+      windowMs: { type: "integer", minimum: 1 },
+    },
+  };
+
+  const CapabilityRateLimitTierSchema: Record<string, unknown> = {
+    type: "object",
+    required: ["tier", "dimensions", "rules"],
+    additionalProperties: false,
+    properties: {
+      tier: {
+        type: "string",
+        enum: ["public_read", "authenticated_user", "registered_agent", "api_key_agent"],
+      },
+      dimensions: {
+        type: "array",
+        items: { type: "string", enum: ["ip", "wallet", "agent", "route"] },
+      },
+      rules: {
+        type: "array",
+        items: CapabilityRateLimitRuleSchema,
+      },
+    },
+  };
+
+  const CapabilityEndpointPaymentSchema: Record<string, unknown> = {
+    type: "object",
+    required: [
+      "protocol",
+      "scheme",
+      "network",
+      "asset",
+      "priceUsd",
+      "priceAtomic",
+      "recipientMode",
+    ],
+    additionalProperties: false,
+    properties: {
+      protocol: { type: "string", const: "x402-v2" },
+      scheme: { type: "string", const: "exact" },
+      network: { type: "string", pattern: "^stellar:[a-z0-9-]+$" },
+      asset: { type: "string", minLength: 61, maxLength: 61 },
+      priceUsd: { type: "string", minLength: 2, maxLength: 32 },
+      priceAtomic: { type: "string", pattern: "^[1-9]\\d*$" },
+      recipientMode: { type: "string", enum: ["platform", "persona"] },
+      passPlan: { type: "string", enum: ["council"] },
+    },
+  };
+
+  const CapabilityEndpointSchema: Record<string, unknown> = {
+    type: "object",
+    required: [
+      "id",
+      "path",
+      "methods",
+      "category",
+      "summary",
+      "auth",
+      "paymentRequired",
+      "rateLimit",
+      "schemaVersion",
+      "cacheControl",
+    ],
+    additionalProperties: false,
+    properties: {
+      id: { type: "string", minLength: 1, maxLength: 100 },
+      path: { type: "string", minLength: 1, maxLength: 200 },
+      methods: {
+        type: "array",
+        items: { type: "string", enum: ["GET", "POST", "PATCH", "DELETE"] },
+      },
+      category: {
+        type: "string",
+        enum: ["discovery", "public_read", "paid_x402", "agent_api"],
+      },
+      summary: { type: "string", minLength: 1, maxLength: 300 },
+      auth: {
+        type: "string",
+        enum: [
+          "none",
+          "none_or_invite",
+          "x402",
+          "x402_or_pass",
+          "signed_envelope_or_api_key",
+        ],
+      },
+      paymentRequired: { type: "boolean" },
+      payment: CapabilityEndpointPaymentSchema,
+      rateLimit: {
+        type: "object",
+        required: ["tier", "dimensions", "routeKey"],
+        additionalProperties: false,
+        properties: {
+          tier: {
+            type: "string",
+            enum: ["public_read", "authenticated_user", "registered_agent", "api_key_agent"],
+          },
+          dimensions: {
+            type: "array",
+            items: { type: "string", enum: ["ip", "wallet", "agent", "route"] },
+          },
+          routeKey: { type: "string", minLength: 1, maxLength: 200 },
+        },
+      },
+      schemaVersion: { type: ["string", "integer"], minLength: 1, minimum: 1 },
+      cacheControl: { type: "string", minLength: 1, maxLength: 120 },
+    },
+  };
+
+  const CapabilityDocumentResponseSchema: Record<string, unknown> = {
+    type: "object",
+    description: "Response payload for `GET /api/capabilities` (`lib/api/capabilities.ts`).",
+    required: [
+      "schemaVersion",
+      "apiSchemaVersion",
+      "supportedSchemaVersions",
+      "discoveryPath",
+      "service",
+      "network",
+      "asset",
+      "paymentProtocol",
+      "rateLimits",
+      "endpoints",
+    ],
+    additionalProperties: false,
+    properties: {
+      schemaVersion: { type: "string", enum: [...SUPPORTED_CAPABILITY_SCHEMA_VERSIONS] },
+      apiSchemaVersion: { type: "integer", const: API_SCHEMA_VERSION },
+      supportedSchemaVersions: {
+        type: "array",
+        items: { type: "string", enum: [...SUPPORTED_CAPABILITY_SCHEMA_VERSIONS] },
+      },
+      discoveryPath: { type: "string", const: CAPABILITIES_ROUTE },
+      service: {
+        type: "object",
+        required: ["name", "domain", "agentApiVersion", "schemaVersionHeader"],
+        additionalProperties: false,
+        properties: {
+          name: { type: "string", const: "Mimir" },
+          domain: { type: "string", const: "prediction-market" },
+          agentApiVersion: { type: "string", const: "v1" },
+          schemaVersionHeader: { type: "string", const: SCHEMA_VERSION_HEADER },
+        },
+      },
+      network: {
+        type: "object",
+        required: ["caip2", "network", "passphrase", "addressKinds", "nativeFeeAsset"],
+        additionalProperties: false,
+        properties: {
+          caip2: { type: "string", pattern: "^stellar:[a-z0-9-]+$" },
+          network: { type: "string", pattern: "^[a-z0-9-]+$" },
+          passphrase: { type: "string", minLength: 1 },
+          addressKinds: {
+            type: "array",
+            items: { type: "string", enum: ["G", "C"] },
+          },
+          nativeFeeAsset: {
+            type: "object",
+            required: ["code", "decimals"],
+            additionalProperties: false,
+            properties: {
+              code: { type: "string", const: "XLM" },
+              decimals: { type: "integer", const: 7 },
+            },
+          },
+        },
+      },
+      asset: {
+        type: "object",
+        required: ["code", "symbol", "issuer", "asset", "decimals", "minStakeUsdc"],
+        additionalProperties: false,
+        properties: {
+          code: { type: "string", const: "USDC" },
+          symbol: { type: "string", const: "USDC" },
+          issuer: { type: "string", pattern: STELLAR_ADDRESS_PATTERN },
+          asset: { type: "string", minLength: 61, maxLength: 61 },
+          decimals: { type: "integer", const: 7 },
+          minStakeUsdc: { type: "number", minimum: 1 },
+        },
+      },
+      paymentProtocol: {
+        type: "object",
+        required: [
+          "protocol",
+          "version",
+          "scheme",
+          "network",
+          "asset",
+          "proofKind",
+          "maxAgeMs",
+          "headers",
+        ],
+        additionalProperties: false,
+        properties: {
+          protocol: { type: "string", const: "x402" },
+          version: { type: "integer", const: 2 },
+          scheme: { type: "string", const: "exact" },
+          network: { type: "string", pattern: "^stellar:[a-z0-9-]+$" },
+          asset: { type: "string", minLength: 61, maxLength: 61 },
+          proofKind: { type: "string", const: "stellar-payment-v1" },
+          maxAgeMs: { type: "integer", minimum: 1 },
+          headers: {
+            type: "object",
+            required: ["paymentRequired", "paymentSignature", "paymentResponse"],
+            additionalProperties: false,
+            properties: {
+              paymentRequired: { type: "string", const: "PAYMENT-REQUIRED" },
+              paymentSignature: { type: "string", const: "PAYMENT-SIGNATURE" },
+              paymentResponse: { type: "string", const: "PAYMENT-RESPONSE" },
+            },
+          },
+        },
+      },
+      rateLimits: {
+        type: "object",
+        required: [
+          "publicRead",
+          "authenticatedUser",
+          "registeredAgent",
+          "apiKeyAgent",
+        ],
+        additionalProperties: false,
+        properties: {
+          publicRead: CapabilityRateLimitTierSchema,
+          authenticatedUser: CapabilityRateLimitTierSchema,
+          registeredAgent: CapabilityRateLimitTierSchema,
+          apiKeyAgent: CapabilityRateLimitTierSchema,
+        },
+      },
+      endpoints: {
+        type: "array",
+        items: CapabilityEndpointSchema,
+      },
+    },
+  };
+
   return {
     ApiError: ApiErrorSchema,
+    CapabilityDocumentResponse: CapabilityDocumentResponseSchema,
     ReasoningInvalidClaimError,
     VSCacheFreshness,
     ClaimChallenger,
@@ -1210,7 +1475,47 @@ export function buildPublicEndpointExamples(): PublicEndpointExample[] {
     headers: { "Cache-Control": "no-store" },
   };
 
+  const capabilitiesOk: PublicEndpointExample = {
+    path: "/api/capabilities",
+    status: 200,
+    name: "capabilitiesDocument",
+    summary: "Versioned capability discovery document for Mimir public, x402, and agent APIs.",
+    schemaName: "CapabilityDocumentResponse",
+    body: buildCapabilityDocument({ usdcIssuer: SYNTHETIC_WALLETS.owner }),
+    headers: {
+      "Cache-Control": CAPABILITIES_CACHE_CONTROL,
+      [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION),
+    },
+  };
+
   return [
+    // /api/capabilities
+    capabilitiesOk,
+    apiErrorExample(
+      "/api/capabilities",
+      "unsupportedVersion",
+      "Requested capability schema version is not supported.",
+      "unsupported_version",
+      "unsupported capability schemaVersion: mimir.capabilities.v2",
+      { field: "schemaVersion", headers: { "Cache-Control": "no-store" } },
+    ),
+    apiErrorExample(
+      "/api/capabilities",
+      "conflictingParams",
+      "Duplicate or conflicting scalar version query parameter.",
+      "invalid_request",
+      "duplicate scalar query parameter 'version'",
+      { field: "version", headers: { "Cache-Control": "no-store" } },
+    ),
+    apiErrorExample(
+      "/api/capabilities",
+      "rateLimited",
+      "Public read rate limit exceeded.",
+      "rate_limited",
+      "ip limit exceeded; retry in 60s",
+      { headers: { "Cache-Control": "no-store" } },
+    ),
+
     // /api/vs
     vsFeedOk,
     apiErrorExample("/api/vs", "invalidLimit", "Query parameter validation failure (`refresh`, `cursor`, or `limit`).", "invalid_request", "limit must be between 1 and 100", { field: "limit" }),
@@ -1344,6 +1649,37 @@ export function buildPublicOpenApiDocument(): YamlValue {
   );
 
   const paths: Record<string, YamlValue> = {
+    "/api/capabilities": {
+      get: {
+        operationId: PUBLIC_ENDPOINT_METADATA["/api/capabilities"].operationId,
+        summary: PUBLIC_ENDPOINT_METADATA["/api/capabilities"].summary,
+        description: [
+          "Returns a deterministic, privacy-safe capability discovery document describing supported schema versions, Stellar network metadata, public USDC asset metadata, x402 v2 payment parameters, rate-limit tiers, and reviewed public/x402/agent endpoint capabilities.",
+          "",
+          "Accepts optional `?schemaVersion=` or `?version=` query selection and rejects unsupported, malformed, or conflicting duplicate scalar query parameters with HTTP 400. Unsupported HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`) return HTTP 405.",
+        ].join("\n"),
+        "x-mimir-cache-control": PUBLIC_ENDPOINT_METADATA["/api/capabilities"].cacheControl,
+        "x-mimir-access-tier": "public_read",
+        "x-mimir-rate-limit-route": CAPABILITIES_ROUTE,
+        parameters: [
+          {
+            name: "version",
+            in: "query",
+            required: false,
+            description: `Capability version alias (\`1\`, \`v1\`, or \`${CAPABILITY_SCHEMA_VERSION}\`).`,
+            schema: { type: "string", enum: ["1", "v1", CAPABILITY_SCHEMA_VERSION] },
+          },
+          {
+            name: "schemaVersion",
+            in: "query",
+            required: false,
+            description: `Canonical capability document schema version (\`${CAPABILITY_SCHEMA_VERSION}\`).`,
+            schema: { type: "string", enum: [...SUPPORTED_CAPABILITY_SCHEMA_VERSIONS] },
+          },
+        ],
+        responses: buildResponsesForPath("/api/capabilities", examples, schemas),
+      },
+    },
     "/api/vs": {
       get: {
         operationId: PUBLIC_ENDPOINT_METADATA["/api/vs"].operationId,

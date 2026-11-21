@@ -360,3 +360,190 @@ export const AGENT_API_REQUEST_SPEC: ShapeSpec = {
 export function validateAgentApiRequest(payload: unknown): ShapeResult {
   return checkShape(payload, AGENT_API_REQUEST_SPEC);
 }
+
+// ── Capability Discovery Schema Versioning ────────────────────────────────────
+
+export const CAPABILITY_SCHEMA_VERSION = "mimir.capabilities.v1" as const;
+
+export const SUPPORTED_CAPABILITY_SCHEMA_VERSIONS = [
+  CAPABILITY_SCHEMA_VERSION,
+] as const;
+
+export type CapabilitySchemaVersion =
+  (typeof SUPPORTED_CAPABILITY_SCHEMA_VERSIONS)[number];
+
+export type CapabilityVersionReason =
+  | "unsupported_version"
+  | "malformed_version"
+  | "conflicting_version";
+
+export interface CapabilityVersionVerdict {
+  ok: boolean;
+  schemaVersion?: CapabilitySchemaVersion;
+  reason?: CapabilityVersionReason;
+  field?: "version" | "schemaVersion";
+  detail?: string;
+}
+
+const CAPABILITY_SCHEMA_VERSION_RE = /^mimir\.capabilities\.v(0|[1-9]\d*)$/;
+const CAPABILITY_VERSION_ALIAS_RE = /^v?(0|[1-9]\d*)$/;
+
+function parseCapabilitySchemaVersionValue(raw: string): CapabilityVersionVerdict {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      reason: "malformed_version",
+      field: "schemaVersion",
+      detail: "schemaVersion must not be empty",
+    };
+  }
+  if (!CAPABILITY_SCHEMA_VERSION_RE.test(trimmed)) {
+    return {
+      ok: false,
+      reason: "malformed_version",
+      field: "schemaVersion",
+      detail: `schemaVersion must match ${CAPABILITY_SCHEMA_VERSION} format`,
+    };
+  }
+  if (
+    !(SUPPORTED_CAPABILITY_SCHEMA_VERSIONS as readonly string[]).includes(trimmed)
+  ) {
+    return {
+      ok: false,
+      reason: "unsupported_version",
+      field: "schemaVersion",
+      detail: `unsupported capability schemaVersion: ${trimmed}`,
+    };
+  }
+  return { ok: true, schemaVersion: trimmed as CapabilitySchemaVersion };
+}
+
+function parseCapabilityVersionAliasValue(raw: string): CapabilityVersionVerdict {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      reason: "malformed_version",
+      field: "version",
+      detail: "version must not be empty",
+    };
+  }
+  if (
+    trimmed === CAPABILITY_SCHEMA_VERSION ||
+    trimmed === "1" ||
+    trimmed === "v1"
+  ) {
+    return { ok: true, schemaVersion: CAPABILITY_SCHEMA_VERSION };
+  }
+  if (
+    CAPABILITY_SCHEMA_VERSION_RE.test(trimmed) ||
+    CAPABILITY_VERSION_ALIAS_RE.test(trimmed)
+  ) {
+    return {
+      ok: false,
+      reason: "unsupported_version",
+      field: "version",
+      detail: `unsupported capability version: ${trimmed}`,
+    };
+  }
+  return {
+    ok: false,
+    reason: "malformed_version",
+    field: "version",
+    detail: `malformed capability version: ${trimmed}`,
+  };
+}
+
+/**
+ * Resolve and validate `?version=` and `?schemaVersion=` query parameters for
+ * the capability discovery endpoint.
+ *
+ * Enforces strict scalar-parameter semantics (duplicate scalar keys are
+ * rejected rather than silently taking the first value), refuses unknown or
+ * newer versions rather than coercing them, and rejects conflicting values when
+ * both parameters are supplied.
+ */
+export function resolveCapabilityVersionQuery(
+  searchParams: URLSearchParams,
+): CapabilityVersionVerdict {
+  const versions = searchParams.getAll("version");
+  if (versions.length > 1) {
+    return {
+      ok: false,
+      reason: "conflicting_version",
+      field: "version",
+      detail: "duplicate scalar query parameter 'version'",
+    };
+  }
+
+  const schemaVersions = searchParams.getAll("schemaVersion");
+  if (schemaVersions.length > 1) {
+    return {
+      ok: false,
+      reason: "conflicting_version",
+      field: "schemaVersion",
+      detail: "duplicate scalar query parameter 'schemaVersion'",
+    };
+  }
+
+  const schemaVerdict =
+    schemaVersions.length === 1
+      ? parseCapabilitySchemaVersionValue(schemaVersions[0]!)
+      : undefined;
+  const versionVerdict =
+    versions.length === 1
+      ? parseCapabilityVersionAliasValue(versions[0]!)
+      : undefined;
+
+  if (schemaVerdict && !schemaVerdict.ok) {
+    return schemaVerdict;
+  }
+  if (versionVerdict && !versionVerdict.ok) {
+    return versionVerdict;
+  }
+
+  if (
+    schemaVerdict?.schemaVersion &&
+    versionVerdict?.schemaVersion &&
+    schemaVerdict.schemaVersion !== versionVerdict.schemaVersion
+  ) {
+    return {
+      ok: false,
+      reason: "conflicting_version",
+      field: "schemaVersion",
+      detail: "version and schemaVersion query parameters conflict",
+    };
+  }
+
+  return {
+    ok: true,
+    schemaVersion:
+      schemaVerdict?.schemaVersion ??
+      versionVerdict?.schemaVersion ??
+      CAPABILITY_SCHEMA_VERSION,
+  };
+}
+
+/** Top-level shape spec for the public capability discovery document. */
+export const CAPABILITY_DOCUMENT_SPEC: ShapeSpec = {
+  schemaVersion: {
+    type: "string",
+    required: true,
+    oneOf: SUPPORTED_CAPABILITY_SCHEMA_VERSIONS,
+  },
+  apiSchemaVersion: {
+    type: "integer",
+    required: true,
+    min: API_SCHEMA_VERSION,
+    max: API_SCHEMA_VERSION,
+  },
+  supportedSchemaVersions: { type: "array", required: true },
+  discoveryPath: { type: "string", required: true, oneOf: ["/api/capabilities"] },
+  service: { type: "object", required: true },
+  network: { type: "object", required: true },
+  asset: { type: "object", required: true },
+  paymentProtocol: { type: "object", required: true },
+  rateLimits: { type: "object", required: true },
+  endpoints: { type: "array", required: true },
+};

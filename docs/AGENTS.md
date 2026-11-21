@@ -5,7 +5,7 @@ CAIP-2 stellar:testnet).
 
 See docs/STELLAR_NETWORK.md for the one-page architecture reference.
 
-See docs/PUBLIC_API.md for the public read endpoints (`/api/vs`, `/api/vs/[id]`, `/api/vs/[id]/reasoning`, `/api/vs/user/[address]`, `/api/challenge-opportunities`, `/api/performance/[address]`, `/api/baskets`, `/api/payments/revenue`, `/api/health`), their params, response shapes, error envelope, `Cache-Control` headers, and rate-limit tier (`public_read`). Private claims require the `invite` parameter.
+See `docs/openapi-public-v1.yaml` (generated from `lib/ops/public-api-openapi.ts`) and `docs/PUBLIC_API.md` (when present) for the public read endpoints (`/api/capabilities`, `/api/vs`, `/api/vs/[id]`, `/api/vs/[id]/reasoning`, `/api/vs/user/[address]`, `/api/challenge-opportunities`, `/api/performance/[address]`, `/api/baskets`, `/api/payments/revenue`, `/api/health`), their params, response shapes, error envelope, `Cache-Control` headers, and rate-limit tier (`public_read`). Private claims require the `invite` parameter. `GET /api/capabilities` serves the versioned (`mimir.capabilities.v1`) capability discovery document covering supported schema versions, Stellar network/USDC asset metadata, and reviewed public/x402/agent endpoints with strict secret/admin redaction.
 
 Repository layout
 Path	Purpose
@@ -100,6 +100,9 @@ environment behavior.
 | `tests/node/node-test-runner.test.ts` | Regression tests for runner safety, cache invalidation, failure handling, and coverage publication |
 | `scripts/lib/browser-smoke-env.mjs` | The smoke harness's strict env allowlist (what a smoke build may see) |
 | `tests/browser/` + `playwright.config.ts` | Playwright browser smoke suite (run via `npm run smoke:browser`) |
+| `lib/api/capabilities.ts` | Pure, deterministic capability discovery builder, validator, and strict secret/admin allowlist serializer (`mimir.capabilities.v1`) |
+| `app/api/capabilities/route.ts` | Public capability discovery route (`GET /api/capabilities`), query version negotiation (`?version=` / `?schemaVersion=`), `public_read` rate-limiting, and `405` method guards |
+| `docs/openapi-public-v1.yaml` | Generated OpenAPI 3.1 contract for public read endpoints (`lib/ops/public-api-openapi.ts`) |
 | `docs/PUBLIC_API.md` | Reference for the public read endpoints: params, response shape, errors, cache headers, rate-limit tier |
 
 ## Browser smoke flow (must stay green on release)
