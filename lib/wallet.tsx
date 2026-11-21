@@ -178,6 +178,38 @@ function isRejection(message: string): boolean {
   return /reject|denied|cancel|closed the modal|user declined/i.test(message);
 }
 
+// ── Session Revision Helpers ────────────────────────────────────────────────
+
+/**
+ * Exact case-sensitive account identity check.
+ * Stellar strkeys are case-sensitive base32 strings; identity comparisons
+ * must never lowercase or normalize character case.
+ */
+export function isSameAccountIdentity(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) {
+    return a === b;
+  }
+  return a === b;
+}
+
+/**
+ * Returns true if an account, network, or connector transition should
+ * increment the nonsecret session revision.
+ */
+export function shouldIncrementSessionRevision(
+  current: { address: string | null; walletId: string | null; network: string | null },
+  next: { address: string | null; walletId: string | null; network: string | null },
+): boolean {
+  return (
+    !isSameAccountIdentity(current.address, next.address) ||
+    current.walletId !== next.walletId ||
+    (current.network !== null && next.network !== null && current.network !== next.network)
+  );
+}
+
 // ── Context ───────────────────────────────────────────────────────────────────
 
 export interface WalletContextValue {
@@ -231,6 +263,14 @@ export interface WalletContextValue {
    * stale, disconnected, or dependency-failure states.
    */
   transactionState: TransactionState | null;
+
+  /**
+   * Monotonic nonsecret session revision counter.
+   * Increments whenever the connected account identity, network, or connector changes,
+   * allowing dependent balance and read hooks to invalidate their caches without
+   * leaking credentials or triggering on unrelated transaction signing intents.
+   */
+  sessionRevision: number;
 
   /** Rows for the picker modal, already ordered. */
   wallets: ModalWallet[];
@@ -310,6 +350,7 @@ const NO_WALLET = "Connect a Stellar wallet first.";
 
 const Ctx = createContext<WalletContextValue>({
   transactionState: null,
+  sessionRevision: 0,
   address: null,
   isConnected: false,
   isConnecting: false,
@@ -613,6 +654,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // Exposed through the context for lifecycle feedback UI; nothing in the
   // provider drives it yet, so it stays `null` until a write flow sets it.
   const [transactionState] = useState<TransactionState | null>(null);
+  const [sessionRevision, setSessionRevision] = useState(0);
+  const sessionRevisionRef = useRef(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerLoading, setPickerLoading] = useState(false);
   const [options, setOptions] = useState<ShapedWallet[]>([]);
@@ -623,6 +666,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // memoised `signer` does not change identity on every render.
   const addressRef = useRef<string | null>(null);
   addressRef.current = address;
+  const walletIdRef = useRef<string | null>(null);
+  walletIdRef.current = walletId;
+  const networkRef = useRef<string | null>(null);
 
   /**
    * Restore a previous session without prompting.
@@ -666,8 +712,25 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
         if (cancelled || !restored) return;
 
+        const prevAddress = addressRef.current;
+        const prevWalletId = walletIdRef.current;
+        const newWalletId = kit.selectedModule.productId;
+
+        addressRef.current = restored;
+        walletIdRef.current = newWalletId;
+
+        if (
+          shouldIncrementSessionRevision(
+            { address: prevAddress, walletId: prevWalletId, network: networkRef.current },
+            { address: restored, walletId: newWalletId, network: networkRef.current },
+          )
+        ) {
+          sessionRevisionRef.current += 1;
+          setSessionRevision(sessionRevisionRef.current);
+        }
+
         setAddress(restored);
-        setWalletId(kit.selectedModule.productId);
+        setWalletId(newWalletId);
         setWalletName(kit.selectedModule.productName);
       } catch {
         // No persisted session, or nothing selected. Stay disconnected.
@@ -690,6 +753,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!address) {
       setNetworkWarning(null);
+      networkRef.current = null;
       return;
     }
 
@@ -701,6 +765,14 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         const { networkPassphrase } = await kit.getNetwork();
 
         if (cancelled || !networkPassphrase) return;
+
+        const prevNetwork = networkRef.current;
+        networkRef.current = networkPassphrase;
+
+        if (prevNetwork !== null && prevNetwork !== networkPassphrase) {
+          sessionRevisionRef.current += 1;
+          setSessionRevision(sessionRevisionRef.current);
+        }
 
         setNetworkWarning(
           networkPassphrase === NETWORK_PASSPHRASE
@@ -932,8 +1004,25 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         // should be asked, because this is the click that asked for it.
         const { address: connected } = await kit.fetchAddress();
 
+        const prevAddress = addressRef.current;
+        const prevWalletId = walletIdRef.current;
+        const newWalletId = kit.selectedModule.productId;
+
+        addressRef.current = connected;
+        walletIdRef.current = newWalletId;
+
+        if (
+          shouldIncrementSessionRevision(
+            { address: prevAddress, walletId: prevWalletId, network: networkRef.current },
+            { address: connected, walletId: newWalletId, network: networkRef.current },
+          )
+        ) {
+          sessionRevisionRef.current += 1;
+          setSessionRevision(sessionRevisionRef.current);
+        }
+
         setAddress(connected);
-        setWalletId(kit.selectedModule.productId);
+        setWalletId(newWalletId);
         setWalletName(kit.selectedModule.productName);
 
         rememberWallet(id);
@@ -956,10 +1045,20 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, [refreshOptions]);
 
   const disconnect = useCallback(() => {
-    // Clear the ref synchronously before doing any asynchronous kit work.
-    // The signing callbacks read this ref directly, so this prevents a stale
+    const prevAddress = addressRef.current;
+    const prevWalletId = walletIdRef.current;
+
+    // Clear the refs synchronously before doing any asynchronous kit work.
+    // The signing callbacks read addressRef directly, so this prevents a stale
     // wallet address from being used during the disconnect transition.
     addressRef.current = null;
+    walletIdRef.current = null;
+    networkRef.current = null;
+
+    if (prevAddress !== null || prevWalletId !== null) {
+      sessionRevisionRef.current += 1;
+      setSessionRevision(sessionRevisionRef.current);
+    }
 
     setAddress(null);
     setWalletId(null);
@@ -1038,6 +1137,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       canSignAuthEntries: supportsAuthEntrySigning(walletId),
       networkWarning,
       transactionState,
+      sessionRevision,
       wallets,
       pendingTrustlineIntent,
       requestTrustlineThen,
@@ -1056,6 +1156,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       walletId,
       networkWarning,
       transactionState,
+      sessionRevision,
       wallets,
       pendingTrustlineIntent,
       requestTrustlineThen,
@@ -1080,4 +1181,37 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
 export function useWallet(): WalletContextValue {
   return useContext(Ctx);
+}
+
+/**
+ * Hook returning the active nonsecret wallet session revision.
+ * Dependent balance and read hooks can include this in their dependency array
+ * to automatically invalidate reads whenever the connected account, network,
+ * or connector changes.
+ */
+export function useWalletSessionRevision(): number {
+  return useWallet().sessionRevision;
+}
+
+export interface WalletSession {
+  revision: number;
+  address: string | null;
+  walletId: string | null;
+  network: string;
+}
+
+/**
+ * Hook returning a high-level representation of the active wallet session.
+ */
+export function useWalletSession(): WalletSession {
+  const { sessionRevision, address, walletName } = useWallet();
+  return useMemo(
+    () => ({
+      revision: sessionRevision,
+      address,
+      walletId: walletName,
+      network: STELLAR_NETWORK,
+    }),
+    [sessionRevision, address, walletName],
+  );
 }

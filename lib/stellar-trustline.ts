@@ -49,6 +49,7 @@
  */
 
 import {
+  Account,
   BASE_FEE,
   Operation,
   TransactionBuilder,
@@ -109,6 +110,65 @@ export type HorizonAccountLoader = (address: string) => Promise<HorizonAccount>;
 export interface ReadUsdcTrustlineOptions {
   loadAccount?: HorizonAccountLoader;
   server?: { loadAccount: HorizonAccountLoader };
+  /**
+   * Wallet session revision. When provided, allows cached read contexts to be
+   * invalidated when the wallet session revision increments.
+   */
+  sessionRevision?: number;
+  /**
+   * Explicitly enable or bypass caching for synthetic tests or callers.
+   */
+  useCache?: boolean;
+}
+
+/**
+ * Cached read context for trustline status.
+ * Keyed by exact case-sensitive account address.
+ */
+export interface TrustlineReadContext {
+  readonly address: string;
+  readonly state: TrustlineState;
+  readonly sessionRevision?: number;
+  readonly cachedAt: number;
+}
+
+const trustlineReadCache = new Map<string, TrustlineReadContext>();
+
+/**
+ * Invalidate trustline read context.
+ *
+ * Preserves exact case-sensitive account identity: invalidating by address
+ * purges only the affected account's read context while preserving other accounts.
+ * Calling without arguments clears all cached read contexts (e.g. on network switch).
+ *
+ * @param target - Optional exact case-sensitive account address or invalidation criteria.
+ */
+export function invalidateTrustlineRead(
+  target?: string | { address?: string; sessionRevision?: number },
+): void {
+  if (typeof target === "string") {
+    trustlineReadCache.delete(target);
+    return;
+  }
+  if (target?.address) {
+    trustlineReadCache.delete(target.address);
+    return;
+  }
+  trustlineReadCache.clear();
+}
+
+/**
+ * Inspect the current size of the trustline read context cache (for tests).
+ */
+export function getTrustlineReadCacheSize(): number {
+  return trustlineReadCache.size;
+}
+
+/**
+ * Clear the entire trustline read context cache (for tests).
+ */
+export function clearTrustlineReadCache(): void {
+  trustlineReadCache.clear();
 }
 
 function resolveAccountLoader(
@@ -126,12 +186,31 @@ function resolveAccountLoader(
  * Horizon rather than the SAC balance read in `lib/usdc.ts`: that helper folds
  * "no trustline", "no account" and "RPC hiccup" all into `null`, and this is the
  * one place where telling them apart is the whole point.
+ *
+ * Caches read contexts keyed by exact case-sensitive account address, invalidated
+ * when the wallet session revision increments or when invalidateTrustlineRead is called.
  */
 export async function readUsdcTrustline(
   address: string,
   options: HorizonAccountLoader | ReadUsdcTrustlineOptions = {},
 ): Promise<TrustlineState> {
   if (!isAccountAddress(address)) return { status: "unknown", balance: null };
+
+  const opts: ReadUsdcTrustlineOptions =
+    typeof options === "function" ? { loadAccount: options } : options;
+  const isCustomLoader = Boolean(opts.loadAccount || opts.server?.loadAccount);
+  const cacheEnabled = opts.useCache ?? !isCustomLoader;
+
+  if (cacheEnabled) {
+    const cached = trustlineReadCache.get(address);
+    if (
+      cached &&
+      (opts.sessionRevision === undefined || cached.sessionRevision === opts.sessionRevision)
+    ) {
+      return cached.state;
+    }
+  }
+
   const loadAccount = resolveAccountLoader(options);
   try {
     const account = await loadAccount(address);
@@ -141,16 +220,55 @@ export async function readUsdcTrustline(
         balance.asset_code === USDC_CODE &&
         balance.asset_issuer === USDC_ISSUER,
     );
-    if (!line) return { status: "missing", balance: null };
-    return { status: "ready", balance: Number(line.balance) };
+    const result: TrustlineState = !line
+      ? { status: "missing", balance: null }
+      : { status: "ready", balance: Number(line.balance) };
+
+    if (cacheEnabled) {
+      trustlineReadCache.set(address, {
+        address,
+        state: result,
+        sessionRevision: opts.sessionRevision,
+        cachedAt: Date.now(),
+      });
+    }
+
+    return result;
   } catch (cause) {
     // Horizon answers a missing account with 404. Anything else is a transport
     // problem and must not be reported as a missing trustline — that would show
     // an "add trustline" button to someone who already has one.
     const status = (cause as { response?: { status?: number } })?.response?.status;
-    if (status === 404) return { status: "unfunded", balance: null };
-    return { status: "unknown", balance: null };
+    const result: TrustlineState =
+      status === 404 ? { status: "unfunded", balance: null } : { status: "unknown", balance: null };
+
+    if (cacheEnabled && status === 404) {
+      trustlineReadCache.set(address, {
+        address,
+        state: result,
+        sessionRevision: opts.sessionRevision,
+        cachedAt: Date.now(),
+      });
+    }
+
+    return result;
   }
+}
+
+export interface HorizonSubmitResult {
+  hash: string;
+}
+
+export type HorizonTransactionSubmitter = (
+  transaction: any,
+) => Promise<HorizonSubmitResult>;
+
+export interface EnsureUsdcTrustlineOptions extends ReadUsdcTrustlineOptions {
+  submitTransaction?: HorizonTransactionSubmitter;
+  server?: {
+    loadAccount: HorizonAccountLoader;
+    submitTransaction?: HorizonTransactionSubmitter;
+  };
 }
 
 /**
@@ -163,8 +281,9 @@ export async function readUsdcTrustline(
  */
 export async function ensureUsdcTrustline(
   signer: StellarSigner,
+  options: EnsureUsdcTrustlineOptions = {},
 ): Promise<{ added: boolean; hash?: string }> {
-  const existing = await readUsdcTrustline(signer.publicKey);
+  const existing = await readUsdcTrustline(signer.publicKey, options);
   if (existing.status === "ready") return { added: false };
   if (existing.status === "unfunded") {
     throw new Error(
@@ -172,8 +291,19 @@ export async function ensureUsdcTrustline(
     );
   }
 
-  const horizon = createHorizonServer();
-  const account = await horizon.loadAccount(signer.publicKey);
+  const loadAccount =
+    options.loadAccount ??
+    options.server?.loadAccount ??
+    ((address: string) => createHorizonServer().loadAccount(address));
+
+  const rawAccount = await loadAccount(signer.publicKey);
+  const account =
+    typeof (rawAccount as any)?.sequenceNumber === "function"
+      ? (rawAccount as any)
+      : new Account(
+          (rawAccount as any)?.id ?? (rawAccount as any)?.account_id ?? signer.publicKey,
+          String((rawAccount as any)?.sequence ?? "1"),
+        );
 
   const transaction = new TransactionBuilder(account, {
     fee: BASE_FEE,
@@ -191,7 +321,13 @@ export async function ensureUsdcTrustline(
   });
 
   const signed = TransactionBuilder.fromXDR(signedTxXdr, NETWORK_PASSPHRASE);
-  const result = await horizon.submitTransaction(signed);
+  const submitTx =
+    options.submitTransaction ??
+    options.server?.submitTransaction ??
+    ((tx: any) => createHorizonServer().submitTransaction(tx));
+
+  const result = await submitTx(signed);
+  invalidateTrustlineRead(signer.publicKey);
   return { added: true, hash: result.hash };
 }
 
