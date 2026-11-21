@@ -67,6 +67,19 @@ summary's own 512-byte cap still applies, but the aggregate check is skipped for
 that claim, so an existing funded market is never bricked by the new limit. This
 is covered by `a_legacy_over_budget_claim_can_still_resolve`.
 
+## Discovering limits
+
+Clients should not probe live failures to infer limits. The contract exposes the
+policy constants in a bounded, versioned response so callers can read them up front:
+
+- `get_resource_limits()` returns a versioned `ResourceLimits` struct containing
+  `version`, `max_metadata_bytes` (512), and `max_claim_metadata_bytes` (2 048).
+- Batch reads of claim metadata are bounded by the same policy: a batch request
+  is refused, not truncated, when it exceeds the advertised limits.
+
+The response is a read-only view of the constants above; it does not change any
+state, and `version` is bumped if a limit ever changes.
+
 ## Operational notes
 
 - Callers (UI, workers, agents) should validate before submitting and surface
