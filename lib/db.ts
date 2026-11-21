@@ -1474,6 +1474,18 @@ export function getBigInt(value: unknown): bigint {
   return 0n;
 }
 
+export const REVIEW_STATUSES = [
+  "queued",
+  "in_review",
+  "approved",
+  "rejected",
+  "cancelled",
+  "stale",
+  "dependency_failed",
+] as const;
+
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
 export interface MarketProposalRow {
   proposal_id: string;
   created_at: number;
@@ -1496,7 +1508,7 @@ export interface MarketProposalRow {
   blocked_by: string | null;
   claim_id: number | null;
   /** Explicit review queue state. */
-  review_status: "queued" | "in_review" | "approved" | "rejected" | "cancelled" | "stale" | "dependency_failed";
+  review_status: ReviewStatus;
   /** When the proposal entered the review queue. */
   queued_at: number | null;
   /** When review was claimed by a reviewer. */
@@ -1678,6 +1690,59 @@ export async function markProposalDependencyFailed(proposalId: string, reason: s
     args: [Date.now(), reason, proposalId],
   });
   return (result.rowCount ?? 0) > 0;
+}
+
+export interface ListProposalsOptions {
+  status?: ReviewStatus | null;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListProposalsResult {
+  proposals: MarketProposalRow[];
+  limit: number;
+  offset: number;
+}
+
+/**
+ * List proposals for review with optional status filtering and pagination.
+ */
+export async function listProposalsForReview(
+  opts: ListProposalsOptions = {}
+): Promise<ListProposalsResult> {
+  const pool = await getDb();
+  let limit = typeof opts.limit === "number" && Number.isFinite(opts.limit) ? Math.trunc(opts.limit) : 50;
+  limit = Math.max(1, Math.min(200, limit));
+  let offset = typeof opts.offset === "number" && Number.isFinite(opts.offset) ? Math.trunc(opts.offset) : 0;
+  offset = Math.max(0, offset);
+
+  let sql = "SELECT * FROM market_proposals";
+  const args: unknown[] = [];
+  if (opts.status) {
+    sql += " WHERE review_status = ?";
+    args.push(opts.status);
+  }
+  sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  args.push(limit, offset);
+
+  const result = await execute(pool, { sql, args });
+  return {
+    proposals: result.rows as unknown as MarketProposalRow[],
+    limit,
+    offset,
+  };
+}
+
+/**
+ * Fetch a single proposal by its proposal_id.
+ */
+export async function getProposal(proposalId: string): Promise<MarketProposalRow | null> {
+  const pool = await getDb();
+  const result = await execute(pool, {
+    sql: "SELECT * FROM market_proposals WHERE proposal_id = ?",
+    args: [proposalId],
+  });
+  return (result.rows[0] as unknown as MarketProposalRow) ?? null;
 }
 
 /** Link a published claim back to the proposal that produced it. */
