@@ -47,3 +47,10 @@ USDC; XLM appears only for fees and reserve.
 Verification: focused tests cover a complete timeline, a skipped execution
 (expired deadline / over-allowance), and confirmation that secret fields are
 redacted from the response.
+
+- Allowance reconciliation: `lib/copy-allowance-reconciliation.ts` compares the
+  owner-signed copy policy, the authoritative Soroban SAC allowance (and
+  optional `SpendPermissionRecord`), and observed rolling consumption to emit a
+  read-only discrepancy report (`mode: "read_only"`, `remediationApplied: false`)
+  before any remediation action is taken. Malformed or non-atomic inputs fail
+  closed with a `malformed_input` critical discrepancy.
