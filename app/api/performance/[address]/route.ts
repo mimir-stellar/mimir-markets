@@ -12,6 +12,9 @@ export async function GET(
   const cursor = request.nextUrl.searchParams.get("cursor") ?? undefined;
   return handlePerformanceGet(address, {
     ip: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined,
+    // Freshness metadata (trusted ledger, observation time, known gaps) is
+    // attached by the shared response schema in lib/api/schema.ts so that
+    // feed, detail and performance endpoints report it identically.
     cursor,
   });
 }

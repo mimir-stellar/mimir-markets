@@ -4,6 +4,10 @@
 # parameter, cache header, rate-limit rule, and example below is derived from
 # the live route dependencies (lib/ops/public-api-openapi.ts) and verified
 # against lib/ops/json-schema-subset.ts in tests/node/public-api-openapi.test.ts.
+#
+# Observation freshness: indexed market reads expose a shared `observation`
+# block (trusted ledger, observation time, known gaps) with identical meaning
+# across feed, detail, and performance endpoints.
 
 openapi: "3.1.0"
 info:
@@ -64,8 +68,11 @@ paths:
                   - items
                   - count
                   - cache
+                  - observation
                 additionalProperties: false
                 properties:
+                  observation:
+                    $ref: "#/components/schemas/ObservationFreshness"
                   items:
                     type: array
                     items:

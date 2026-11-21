@@ -6,6 +6,10 @@
  * not a user-facing API, so every handler is gated on the `internal_worker` tier
  * and the shared `CRON_SECRET` — the same pattern as the cron routes. An unset
  * `CRON_SECRET` refuses rather than waving callers through.
+ *
+ * Observation freshness (trusted ledger, observation time, known gaps) is
+ * exposed through the shared response schema so the review queue reports the
+ * same meaning as the feed, detail and performance endpoints.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -27,6 +31,52 @@ import {
 export const runtime = "nodejs";
 
 const ROUTE = "/api/proposals/review";
+
+/**
+ * Shared observation-freshness block. Every read endpoint reports the same
+ * three fields with the same meaning so consumers can compare freshness across
+ * feed, detail, performance and review responses.
+ *
+ * - trustedLedger: the ledger sequence the data was last verified against, or
+ *   null when no trusted ledger has been observed yet.
+ * - observedAt: ISO-8601 timestamp of the observation, or null when unknown.
+ * - knownGaps: ledger ranges or conditions known to be missing from the index;
+ *   empty when the observation is complete.
+ */
+export interface ObservationFreshness {
+  trustedLedger: number | null;
+  observedAt: string | null;
+  knownGaps: string[];
+}
+
+/**
+ * Normalize an arbitrary freshness input into the shared schema. Invalid
+ * ledger numbers and timestamps collapse to null rather than leaking raw
+ * values, and gaps are coerced to a clean string array.
+ */
+export function buildObservationFreshness(input: {
+  trustedLedger?: unknown;
+  observedAt?: unknown;
+  knownGaps?: unknown;
+} | null | undefined): ObservationFreshness {
+  const ledger = input?.trustedLedger;
+  const trustedLedger =
+    typeof ledger === "number" && Number.isInteger(ledger) && ledger >= 0 ? ledger : null;
+
+  let observedAt: string | null = null;
+  const at = input?.observedAt;
+  if (typeof at === "string" && at !== "" && !Number.isNaN(Date.parse(at))) {
+    observedAt = new Date(at).toISOString();
+  } else if (at instanceof Date && !Number.isNaN(at.getTime())) {
+    observedAt = at.toISOString();
+  }
+
+  const gaps = Array.isArray(input?.knownGaps)
+    ? (input!.knownGaps as unknown[]).filter((g): g is string => typeof g === "string" && g !== "")
+    : [];
+
+  return { trustedLedger, observedAt, knownGaps: gaps };
+}
 
 function json(data: unknown, status = 200): NextResponse {
   return NextResponse.json(data, { status });
@@ -96,10 +146,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   try {
     const result = await listProposalsForReview({ status, limit, offset });
+    const freshness = buildObservationFreshness(
+      (result as { freshness?: unknown }).freshness as Parameters<typeof buildObservationFreshness>[0],
+    );
     return json({
       proposals: result.proposals,
       limit: result.limit,
       offset: result.offset,
+      freshness,
     });
   } catch (err) {
     console.error("[proposals/review] GET error:", err);

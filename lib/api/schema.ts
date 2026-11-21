@@ -22,6 +22,10 @@
  *    Taking the first or last value silently would let a caller believe a filter
  *    applied when another one was actually used.
  *
+ * Observation freshness (feed, detail and performance endpoints) shares one
+ * meaning via `ObservationFreshness` / `observationFreshness()` below: trusted
+ * ledger, observation time and known gaps are always reported under the same keys.
+ *
  * Pagination cursors are bound to the normalized query they were issued for
  * (see `bindCursor` / `verifyCursor`): a cursor minted under one sort or filter
  * selection is refused under any other, so a client cannot silently splice pages
@@ -78,6 +82,52 @@ export function resolveRequestVersion(
     };
   }
   return { ok: true, version };
+}
+
+// ── Observation freshness ─────────────────────────────────────────────────────
+
+/**
+ * Freshness metadata attached to every market observation payload (feed, detail
+ * and performance endpoints). The same keys and meaning apply everywhere.
+ *
+ *  - `trustedLedger`: the ledger sequence the observation was read from. Soroban
+ *    contract state is authoritative; this is the ledger the Postgres read index
+ *    was verified against. `null` when no trusted ledger is known.
+ *  - `observedAt`: ISO-8601 UTC time the observation was taken.
+ *  - `knownGaps`: ledger ranges or sources known to be missing from the index.
+ *    Empty when the observation is complete.
+ */
+export interface ObservationFreshness {
+  trustedLedger: number | null;
+  observedAt: string;
+  knownGaps: string[];
+}
+
+export interface ObservationFreshnessInput {
+  trustedLedger?: number | null;
+  observedAt: Date | string;
+  knownGaps?: readonly string[];
+}
+
+/**
+ * Build the shared freshness block. Normalises the observation time to ISO UTC,
+ * rejects an invalid time or a non-integer ledger rather than emitting them, and
+ * copies `knownGaps` so callers cannot mutate a returned payload.
+ */
+export function observationFreshness(input: ObservationFreshnessInput): ObservationFreshness {
+  const observed = input.observedAt instanceof Date ? input.observedAt : new Date(input.observedAt);
+  if (Number.isNaN(observed.getTime())) {
+    throw new RangeError("observedAt must be a valid date");
+  }
+  const ledger = input.trustedLedger ?? null;
+  if (ledger !== null && (!Number.isInteger(ledger) || ledger < 0)) {
+    throw new RangeError("trustedLedger must be a non-negative integer or null");
+  }
+  return {
+    trustedLedger: ledger,
+    observedAt: observed.toISOString(),
+    knownGaps: [...(input.knownGaps ?? [])],
+  };
 }
 
 // ── Query parameters ──────────────────────────────────────────────────────────

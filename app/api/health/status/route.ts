@@ -36,6 +36,35 @@ export interface IndexLag {
   checkedAt: string;
 }
 
+/**
+ * Observation freshness metadata shared across market feed, detail and
+ * performance endpoints. `ledger` is the trusted on-chain ledger the index has
+ * applied; `observedAt` is when this observation was taken; `gaps` lists known
+ * indexing gaps (e.g. lagging cursors) that consumers should treat as stale.
+ */
+export interface ObservationFreshness {
+  trustedLedger: number | null;
+  observedAt: string;
+  knownGaps: string[];
+}
+
+export function buildObservationFreshness(
+  lag: IndexLag,
+  trustedLedger: number | null,
+  nowMs: number,
+): ObservationFreshness {
+  const knownGaps: string[] = [];
+  if (lag.claims === null) knownGaps.push("claims.unknown");
+  else if (lag.claims > 0) knownGaps.push("claims.lagging");
+  if (lag.ledgers === null) knownGaps.push("ledgers.unknown");
+  else if (lag.ledgers > 0) knownGaps.push("ledgers.lagging");
+  return {
+    trustedLedger,
+    observedAt: new Date(nowMs).toISOString(),
+    knownGaps,
+  };
+}
+
 async function computeIndexLag(nowMs: number): Promise<IndexLag> {
   const checkedAt = new Date(nowMs).toISOString();
 
@@ -102,6 +131,11 @@ export async function GET() {
     ];
 
     report.indexLag = { claims: null, ledgers: null, checkedAt: new Date(nowMs).toISOString() };
+    report.observation = buildObservationFreshness(
+      { claims: null, ledgers: null, checkedAt: new Date(nowMs).toISOString() },
+      null,
+      nowMs,
+    );
 
     return NextResponse.json(report, {
       status: 503,
@@ -143,6 +177,16 @@ export async function GET() {
   });
 
   report.indexLag = indexLag;
+
+  // Trusted ledger is the ledger cursor the index has applied; observation
+  // freshness is shared with feed, detail and performance endpoints.
+  const trustedLedgerRaw = await getSyncMeta("ledger_cursor").catch(() => null);
+  const trustedLedgerNum = Number(trustedLedgerRaw ?? "");
+  report.observation = buildObservationFreshness(
+    indexLag,
+    Number.isFinite(trustedLedgerNum) && trustedLedgerNum > 0 ? trustedLedgerNum : null,
+    nowMs,
+  );
 
   if (backlog === null) {
     report.health.alarms.unshift({
