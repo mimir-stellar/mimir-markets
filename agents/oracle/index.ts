@@ -132,7 +132,7 @@ import { normalizeQuorum } from "../../lib/council/quorum";
 import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tiers";
 import { evaluateClaim as evaluateClaimPure, type EvaluateClaimDeps } from "./evaluate";
 import { RiskManager } from "../../lib/oracle-risk";
-import { isSportsEventFinal } from "./sports-finality";
+import { isSportsEventFinal, revisionChanged, type ReviewedClaimRevision } from "./sports-finality";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -303,9 +303,27 @@ export interface SettleDeps {
       summary: string;
       confidence: number;
       evidence_hash: string;
+      /** Snapshot of the claim the verdict was reviewed against (#814). */
+      reviewedRevision?: ReviewedClaimRevision;
     },
   ) => Promise<Awaited<ReturnType<typeof resolveClaim>>>;
 }
+
+/**
+ * Outcome of a settlement attempt (#814).
+ *
+ *   - `{ submitted: <resolveClaim return> }`  — the write was accepted
+ *   - `{ refreshRequired: { expected, actual } }` — the claim changed between
+ *     review and sign; no transaction was built, nothing was signed
+ *   - `{ skipped: <reason> }`                 — resolved / cancelled / paused
+ *
+ * Existing callers can treat `submitted` as truthy and everything else as
+ * "no settlement this round".
+ */
+export type SettlementOutcome =
+  | { submitted: Awaited<ReturnType<typeof resolveClaim>> }
+  | { refreshRequired: { expected: ReviewedClaimRevision; actual: ReviewedClaimRevision } }
+  | { skipped: "resolved" | "cancelled" | "paused" | "stale" | "no_signer" | "exhausted" }
 
 // VerdictPayload (verdict + confidence + explanation) is the canonical shape
 // the LLM must emit, defined in lib/verdict.ts. OracleVerdict is an alias kept
@@ -529,13 +547,14 @@ async function submitSettlementWithRetry(
     summary: string;
     confidence: number;
     evidence_hash: string;
+    reviewedRevision?: ReviewedClaimRevision;
   },
-): Promise<Awaited<ReturnType<typeof resolveClaim>> | null> {
+): Promise<SettlementOutcome> {
   for (let attempt = 1; attempt <= SETTLEMENT_RETRY_CONFIG.maxAttempts; attempt += 1) {
     const pause = pauseState("oracle_settlement");
     if (pause.paused) {
       console.warn(`[settle] Claim #${claimId}: settlement paused — ${pause.reason ?? "operator pause"}; deferring without a write.`);
-      return null;
+      return { skipped: "paused" };
     }
 
     // Never submit from the stale snapshot that was collected during the poll.
@@ -550,27 +569,54 @@ async function submitSettlementWithRetry(
         if (decision.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, decision.delayMs));
         continue;
       }
-      return null;
+      return { skipped: "exhausted" };
     }
 
     if (current.state === "resolved") {
       console.log(`[settle] Claim #${claimId}: duplicate avoided — chain is already resolved.`);
-      return null;
+      return { skipped: "resolved" };
     }
     if (current.state === "cancelled") {
       console.log(`[settle] Claim #${claimId}: cancelled on chain — no settlement submitted.`);
-      return null;
+      return { skipped: "cancelled" };
     }
     if (!settlementSnapshotIsReady(current, Math.floor(Date.now() / 1000))) {
       const reason = current.state !== "active"
         ? `state=${current.state}`
         : `deadline=${current.deadline} is still in the future`;
       console.log(`[settle] Claim #${claimId}: stale snapshot (${reason}) — deferring.`);
-      return null;
+      return { skipped: "stale" };
+    }
+
+    // #814: compare the claim revision the verdict was reviewed against with
+    // the freshly-read claim. A mismatch means the claim was edited (state
+    // changed, deadline moved, or it was resolved) between the evidence review
+    // and this write. Return a refresh-required result WITHOUT calling the
+    // signer — no transaction is built, nothing is signed, and the caller can
+    // re-review.
+    if (payload.reviewedRevision !== undefined) {
+      const currentRevision: ReviewedClaimRevision = {
+        state: current.state,
+        deadline: current.deadline,
+        resolvedAt: (current as { resolved_at?: number; resolvedAt?: number }).resolved_at
+          ?? (current as { resolvedAt?: number }).resolvedAt
+          ?? 0,
+      };
+      if (revisionChanged(payload.reviewedRevision, currentRevision)) {
+        console.warn(
+          `[settle] Claim #${claimId}: refresh-required — revision changed between review and sign`,
+        );
+        return {
+          refreshRequired: {
+            expected: payload.reviewedRevision,
+            actual: currentRevision,
+          },
+        };
+      }
     }
 
     try {
-      return await resolveClaim(ORACLE.signer, claimId, payload);
+      return { submitted: await resolveClaim(ORACLE.signer, claimId, payload) };
     } catch (error) {
       const info = classifySettlementError(error);
       const decision = settlementRetryDecision(info, attempt, SETTLEMENT_RETRY_CONFIG);
@@ -586,7 +632,7 @@ async function submitSettlementWithRetry(
       if (decision.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, decision.delayMs));
     }
   }
-  return null;
+  return { skipped: "exhausted" };
 }
 
 // Returns true if resolved on-chain, false if deferred or safely skipped.

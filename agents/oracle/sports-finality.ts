@@ -34,6 +34,38 @@ export interface SportsClaim {
 }
 
 /**
+ * Snapshot of the claim state a verdict was reviewed against (#814).
+ *
+ * A revision is the tuple of fields that change when a claim is edited in a way
+ * that invalidates a previously-reviewed decision:
+ *   - `state`       — "open" / "active" / "resolved" / "cancelled"
+ *   - `deadline`    — moved when a claim is extended or shortened
+ *   - `resolvedAt`  — nonzero once the claim has been resolved on chain
+ *
+ * These are the fields `submitSettlementWithRetry` already re-reads before
+ * signing; this interface lets the sports-finality path carry them through
+ * unchanged, so a domain rule cannot produce a verdict that bypasses the
+ * revision check that runs immediately before the signer.
+ */
+export interface ReviewedClaimRevision {
+  state: string
+  deadline: number
+  resolvedAt: number
+}
+
+/** True when `current` differs from `reviewed` in any revision-bearing field. */
+export function revisionChanged(
+  reviewed: ReviewedClaimRevision | undefined,
+  current: ReviewedClaimRevision,
+): boolean {
+  if (reviewed === undefined) return false
+  if (reviewed.state !== current.state) return true
+  if (reviewed.deadline !== current.deadline) return true
+  if (reviewed.resolvedAt !== current.resolvedAt) return true
+  return false
+}
+
+/**
  * True when the oracle should treat the sports event as final and settle.
  *
  *   - past the grace window → true (never lock funds on an outage)
