@@ -94,7 +94,7 @@ describe('peerIdentifierFromAddress', () => {
 
 describe('classifyXmtpThreadError', () => {
   it('classifies XmtpPeerUnreachableError', () => {
-    const err = new XmtpPeerUnreachableError('peer unreachable');
+    const err = new XmtpPeerUnreachableError();
     const out = classifyXmtpThreadError(err);
     expect(out).toBeTruthy();
     expect(typeof out).toBe('string');
@@ -103,7 +103,7 @@ describe('classifyXmtpThreadError', () => {
   it('classifies generic Error', () => {
     const out = classifyXmtpThreadError(new Error('boom'));
     expect(typeof out).toBe('string');
-    expect(out.length).toBeGreaterThan(0);
+    expect((out as unknown as string).length).toBeGreaterThan(0);
   });
 
   it('classifies non-Error values', () => {

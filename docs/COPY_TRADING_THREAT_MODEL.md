@@ -29,6 +29,25 @@
 Every decision writes source position, permission, simulation ledger, attribution,
 stake, fee lines, tx hash and status/skip reason to the audit ledger.
 
+## Copy execution timeline (owner-readable)
+
+The owner-readable timeline is a projection of the audit ledger for a single
+copy execution. Each entry references, and never embeds secrets:
+
+- signal reference (source position and signal ID),
+- policy reference (permission ID and the policy decision outcome),
+- reservation reference (budget/allowance reservation ID),
+- chain outcome reference (simulation ledger, transaction hash and status, or skip reason).
+
+The timeline must not expose signing seeds, private keys, or private agent
+reasoning. Soroban contract state remains authoritative; the timeline is a read
+view derived from Postgres and is not a source of truth. Amounts are integer
+USDC; XLM appears only for fees and reserve.
+
+Verification: focused tests cover a complete timeline, a skipped execution
+(expired deadline / over-allowance), and confirmation that secret fields are
+redacted from the response.
+
 - Allowance reconciliation: `lib/copy-allowance-reconciliation.ts` compares the
   owner-signed copy policy, the authoritative Soroban SAC allowance (and
   optional `SpendPermissionRecord`), and observed rolling consumption to emit a
