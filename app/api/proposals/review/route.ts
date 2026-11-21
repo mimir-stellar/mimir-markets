@@ -6,6 +6,10 @@
  * not a user-facing API, so every handler is gated on the `internal_worker` tier
  * and the shared `CRON_SECRET` — the same pattern as the cron routes. An unset
  * `CRON_SECRET` refuses rather than waving callers through.
+ *
+ * Cancellation is scoped to exactly one proposal per request: the transition is
+ * authorised for the named `proposalId` only, and never widens to other
+ * proposals or to delegated spending grants.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -68,6 +72,13 @@ function parseIntParam(raw: string | null): number | undefined {
   const n = Number(raw);
   if (!Number.isFinite(n) || Number.isNaN(n)) return undefined;
   return Math.trunc(n);
+}
+
+/** Require a non-empty string; returns the trimmed value or null. */
+function requireString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -159,14 +170,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }
 
       case "cancel": {
-        if (!proposalId || !reason) {
+        // Authorise exactly one proposal transition. The id and reason are
+        // validated as non-empty strings so a malformed or blank request can
+        // never reach the state change, and only the named proposal is passed
+        // through. Other proposals and delegated spending grants are untouched.
+        const targetId = requireString(proposalId);
+        const cancelReason = requireString(reason);
+        if (!targetId || !cancelReason) {
           return errorResponse("cancel requires proposalId and reason", 400);
         }
-        const ok = await cancelProposal(proposalId, reason);
+        const ok = await cancelProposal(targetId, cancelReason);
         if (!ok) {
           return errorResponse("Proposal not cancellable (not queued or in_review)", 409);
         }
-        return json({ success: true, proposalId, status: "cancelled" });
+        return json({ success: true, proposalId: targetId, status: "cancelled" });
       }
 
       case "mark_dependency_failed": {

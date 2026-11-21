@@ -16,6 +16,14 @@
 /** Longest an owner-signed authorisation may remain acceptable. */
 export const SIGNED_ACTION_MAX_TTL_MS = 5 * 60_000;
 
+/**
+ * Owner-signed proposal cancellations are scoped to the single proposal named
+ * in the signed message. Cancellation authority must never be derived from
+ * unrelated owner permissions (other proposals, delegated spending grants), so
+ * the window check is identical regardless of what else the owner controls.
+ */
+export const PROPOSAL_CANCEL_ACTION = "proposal.cancel" as const;
+
 const NONCE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 export type SignedWindowResult =
