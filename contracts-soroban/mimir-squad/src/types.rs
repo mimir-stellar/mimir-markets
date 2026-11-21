@@ -147,4 +147,13 @@ pub enum Error {
     /// `cancel_fee_recipient` / `execute_fee_recipient` found no queued
     /// fee-recipient rotation.
     NoFeeRecipientQueued = 34,
+    /// A squad withdrawal was refused because the depositor has no position
+    /// in the pool. Distinct from `InsufficientUnlocked` and `IncompatibleState`.
+    NoPosition = 35,
+    /// A squad withdrawal was refused because the requested amount exceeds the
+    /// depositor's unlocked balance.
+    InsufficientUnlocked = 36,
+    /// A squad withdrawal was refused because the pool is in a state that does
+    /// not permit withdrawals (e.g. resolved or cancelled).
+    IncompatibleState = 37,
 }
