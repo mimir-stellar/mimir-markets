@@ -488,4 +488,8 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    /// A queued fee-policy change was approved against a revision that is no
+    /// longer the active policy. The stale change is rejected and the active
+    /// policy and all balances are left untouched.
+    StaleFeePolicyRevision = 48,
 }

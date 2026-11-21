@@ -1,6 +1,6 @@
 # Mimir Contract Errors Reference
 
-This document provides a comprehensive reference of all error codes returned by the Mimir Soroban smart contracts (`mimir-market` and `mimir-squad`).
+This document provides a comprehensive reference of all error codes returned by the Mimir Soroban smart contracts (`mimir-market` and `mimir-squad`). Expected fee-policy revision mismatches are reported with the typed `FeePolicyRevisionMismatch` error (`mimir-market`), which rejects stale approved administrative fee-policy changes while preserving the active policy and all balances.
 
 ## Overview
 
@@ -66,6 +66,7 @@ Client SDKs and UI applications can map these numeric error codes or their varia
 | 45 | `ParentClaimAlreadyRematched` | `mimir-market` | `create_claim` | A rematch claim has already been linked to this parent claim ID. | A parent claim can only have one rematch child; create an independent new claim instead. |
 | 46 | `BatchTooLarge` | `mimir-market` | `get_claims_batch` | Batch query requested more than `MAX_BATCH_SIZE` (50) claim IDs in a single call. | Chunk batch requests into batches of 50 IDs or fewer. |
 | 47 | `ConservationViolation` | `mimir-market` | `create_claim`, `challenge_claim`, `resolve_claim`, `resolve_claim_versioned`, `cancel_claim`, `claim_challenger_payout` | State transition violated an accounting invariant (negative balances or liability > stake). | Invariant protection triggered to safeguard funds; audit state and report issue. |
+| 48 | `FeePolicyRevisionMismatch` | `mimir-market` | `execute_fee_policy` | The approved fee-policy change was queued against a policy revision that is no longer the active revision, so it is stale and was rejected. The active policy and all balances are unchanged. | Re-queue the fee policy change with `queue_fee_policy` against the current revision and wait for the timelock to elapse again. |
 | 1 | `AlreadyInitialized` | `mimir-squad` | `initialize` | Squad pool was already initialized. | No action needed; initialization is one-time only. |
 | 2 | `NotInitialized` | `mimir-squad` | `deposit`, `withdraw_before_deadline`, `claim`, `claim_parked_payout`, `claim_fees`, `queue_oracle`, `execute_oracle`, `get_usdc`, `get_oracle`, `get_fee_recipient`, `get_escrow_balance` | Squad pool entry point called before `initialize`. | Call `initialize` with required USDC token, oracle, and fee recipient addresses before interacting. |
 | 3 | `ZeroAddress` | `mimir-squad` | `initialize`, `create_market` | Address argument was null or zero address. | Provide a valid, non-zero Stellar contract or account address. |
