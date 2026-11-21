@@ -43,7 +43,7 @@ export function VsDetailSection({
       className={joinClasses("flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm", className)}
     >
       {(title || description || action) && (
-        <div className="flex item-start justify-between gap-3">
+        <div className="flex items-start justify-between gap-3">
           <div className="flex flex-col gap-1">
             {title && (
               <h2 className="text-base font-semibold text-slate-900">{title}</h2>
@@ -142,7 +142,7 @@ export function VsErrorState({
         <button
           type="button"
           onClick={onRetry}
-          className="self-start rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 transition colors hover:bg-red-100"
+          className="self-start rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-100"
         >
           {retryLabel}
         </button>

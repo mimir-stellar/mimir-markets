@@ -79,6 +79,25 @@ established gross meaning for `total_return_multiple` and gains a `fee_adjusted`
 marker, so the fee-adjusted and fee-unknown cases stay distinguishable without
 renaming an event or an envelope field.
 
+### Settlement explanation
+
+The settlement explanation shown to a participant breaks a payout into its
+components — principal, gain, fees and claimable amount — each as a separate
+labelled integer atomic value. The four figures are derived from the same
+principal-safe split above, so they reconcile exactly:
+
+- `principal + gain = gross`, where `gain = max(gross - principal, 0)`.
+- `fees` is the profit-only fee taken from `gain` using the claim's snapshot,
+  and `claimable = gross - fees`, which is the `netPayout` preview.
+- All values are exact integers at 7 decimals; no floating-point rounding is
+  applied, and the explanation never recomputes fees from live policy.
+- A figure whose underlying observation is unresolved (snapshot `loading`,
+  `unavailable` or `invalid`) is labelled as unresolved rather than shown as a
+  definitive amount, and the claimable figure is then presented as a ceiling.
+- Tests: `tests/node/settlement-explanation.test.ts` covers the component split,
+  the sum identity, the zero-gain (break-even) boundary, and an unresolved
+  snapshot being labelled rather than asserted.
+
 ### Settlement conservation
 
 `conservation_holds_across_every_verdict` asserts, for every `WinnerSide`, that
@@ -197,25 +216,4 @@ Source: `contracts-soroban/mimir-squad/src/pool.rs`. Tests: `src/test_lifecycle.
   a second payout.
 - `src/test_dust_isolation.rs` isolates the same dust property for the squad pool:
   the final winner's gross is `formula + dust`, the dust is identical under either
-  claim order, an exactly dividing pool leaves none, conservation holds after every
-  claim, and preview equals payout.
-
-## Virtual baskets
-
-Source: `lib/baskets.ts`. Tests: `tests/node/baskets.test.ts`,
-`tests/node/basket-returns.test.ts`.
-
-- Weights equal exactly 10,000 bps and single-agent/category caps are enforced.
-- Paused/stale/failed-copy allocation remains idle USDC and cannot fabricate NAV.
-- Share/deposit/redemption and high-water-mark calculations use integer rounding
-  with explicit dust ownership.
-- Funded deposits remain off until the external audit and legal/eligibility gates in
-  `LAUNCH_GATE_STATUS.md` are complete.
-
-## Reentrancy
-
-There is no reentrancy guard in these contracts, and that is not an omission: the
-Soroban host rejects a call that re-enters a contract already on the call stack, so
-the EVM `nonReentrant` modifier has no counterpart to port. The ordering discipline it protected
-(state written before an external transfer) is kept anyway, because it is also what
-makes the pull paths correct.
+  claim order, an exactly dividing pool leaves none
