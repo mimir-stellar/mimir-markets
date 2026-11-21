@@ -25,6 +25,21 @@
   with an expiry, which does not refresh. The rolling-period budget the follower
   actually signed for is Mimir's own accounting on top; both must pass, so
   exceeding either is a skip.
+- Simultaneous signals: `tests/node/copy-permission-fixtures.ts` models a batch as
+  one shared preview snapshot followed by a stable claim-id-ordered execution pass.
+  Every execution re-reads usage, claim ids, allowance and revocation from a
+  temporary state directory, so a preview can never be replayed as approval and two
+  signals cannot both spend the same signed budget.
+- Revocation between preview and execution: the fixture applies an owner-signed
+  `copyRevokeMessage` before the execution pass (or from an `afterExecution` hook)
+  and expects `permission_revoked`, not a stale preview verdict. A revocation is a
+  separate signed lifecycle action; it does not re-sign the economic policy, so the
+  fixture checks the policy hash with `status` normalised to `active`.
+- Policy integrity: before each execution the fixture recomputes the active-form
+  `signedPolicyHash`. A mutated cap, allowance or allowlist fails closed with
+  `policy_hash_mismatch` before any stake is reserved. Every executed row records
+  that hash, and the fixture's invariant check re-derives atomic 7-decimal USDC
+  caps from the signed policy and the decreasing on-chain allowance.
 
 Every decision writes source position, permission, simulation ledger, attribution,
 stake, fee lines, tx hash and status/skip reason to the audit ledger.

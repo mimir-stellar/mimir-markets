@@ -108,7 +108,7 @@ export type CopySkipReason =
   | "category_blocked" | "mode_blocked"
   | "confidence_below_floor" | "payout_below_floor" | "position_cap"
   | "daily_cap" | "weekly_cap" | "open_exposure_cap" | "spend_permission_mismatch"
-  | "loss_limit" | "simulation_failed";
+  | "loss_limit" | "simulation_failed" | "policy_hash_mismatch";
 
 export interface CopyExecutionContext {
   now: number;
@@ -575,6 +575,8 @@ export function explainCopySkipReason(reason: CopySkipReason): string {
       return "The stake would exceed the maximum realized loss limit.";
     case "simulation_failed":
       return "The pre-flight simulation failed.";
+    case "policy_hash_mismatch":
+      return "The policy no longer matches the signed policy.";
     default:
       return "Unknown skip reason.";
   }
