@@ -21,6 +21,19 @@ function truncate(s: string, max: number) {
 }
 
 /**
+ * Only https URLs may be rendered as links. Anything else (javascript:, data:,
+ * http:, malformed) stays visible as plain text with an accessible note.
+ */
+function isSafeSourceUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw.trim());
+    return u.protocol === "https:" && u.username === "" && u.password === "";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Vista compacta: primeros 6 y últimos 4 caracteres (p. ej. GAIRCE...CF6M).
  *
  * The EVM version prefixed a `0x` when the value did not already have one, which

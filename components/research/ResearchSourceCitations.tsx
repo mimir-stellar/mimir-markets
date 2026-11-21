@@ -126,6 +126,9 @@ export default function ResearchSourceCitations({
                     {t("unsafeLink")}
                   </span>
                 )}
+                <span className="min-w-0 truncate font-mono text-[11px] text-pv-muted" data-testid="citation-unsafe-url">
+                  {row.domain || row.url}
+                </span>
                 {row.shortHash ? (
                   <span className="inline-flex items-center gap-1 font-mono text-[11px] text-pv-muted">
                     <ShieldCheck size={11} aria-hidden />
