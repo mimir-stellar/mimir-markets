@@ -41,5 +41,21 @@
   that hash, and the fixture's invariant check re-derives atomic 7-decimal USDC
   caps from the signed policy and the decreasing on-chain allowance.
 
+- Pre-signature review digest: before owner signing, `POST /api/copy/permissions/review`
+  (backed by `buildCopyPermissionReviewDigest` in `lib/copy-trading.ts`) exposes a
+  canonical SHA-256 `reviewDigest` binding the execution/signal agents, allowed
+  categories/modes, thresholds, expiry, and every spending limit (per-position, daily,
+  weekly, open-exposure, realized-loss, and delegated spend permission). Submitting a
+  signed grant to `POST /api/copy/permissions` with `reviewDigest` re-verifies the
+  digest via `verifyCopyPermissionReviewDigest` and rejects with `409 review_digest_mismatch`
+  if any bound field changed between review and signature.
+
 Every decision writes source position, permission, simulation ledger, attribution,
 stake, fee lines, tx hash and status/skip reason to the audit ledger.
+
+- Allowance reconciliation: `lib/copy-allowance-reconciliation.ts` compares the
+  owner-signed copy policy, the authoritative Soroban SAC allowance (and
+  optional `SpendPermissionRecord`), and observed rolling consumption to emit a
+  read-only discrepancy report (`mode: "read_only"`, `remediationApplied: false`)
+  before any remediation action is taken. Malformed or non-atomic inputs fail
+  closed with a `malformed_input` critical discrepancy.

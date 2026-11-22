@@ -66,7 +66,36 @@ export type ClaimCreationMessageKey =
   | "sourceRequired"
   | "settlementRuleRequired"
   | "moderationCheckFailed"
-  | "moderationNedsReview";
+  | "moderationNedsReview"
+  | "challengeIntentStale";
+
+/**
+ * Snapshot of the inputs a challenge intent review is bound to. Any change in
+ * account, stake amount, or claim statement invalidates a prior review.
+ */
+export type ChallengeIntentBinding = {
+  address: string;
+  stake: number;
+  claimStatement: string;
+  network: string;
+};
+
+/**
+ * Compare the binding captured at review time with the current draft.
+ * Returns true only when a review exists and every bound field is unchanged.
+ */
+export function isChallengeIntentReviewCurrent(
+  reviewed: ChallengeIntentBinding | null | undefined,
+  current: ChallengeIntentBinding
+): boolean {
+  if (!reviewed) return false;
+  return (
+    reviewed.address === current.address &&
+    reviewed.stake === current.stake &&
+    reviewed.claimStatement.trim() === current.claimStatement.trim() &&
+    reviewed.network === current.network
+  );
+}
 
 export type ClaimCreationModerationGate = {
   enabled: boolean;
@@ -100,6 +129,10 @@ export type ClaimCreationDraftInput = {
   address: string | null | undefined;
   hasSigner: boolean;
   moderation?: ClaimCreationModerationGate;
+  /** Challenge intent review snapshot; when present it must match the draft. */
+  challengeIntentReview?: ChallengeIntentBinding | null;
+  /** Network the draft will be signed against. */
+  network?: string;
   /** Injectable clock for tests (ms). */
   nowMs?: number;
 };
@@ -236,6 +269,23 @@ export function validateClaimCreationBeforeSign(input: ClaimCreationDraftInput):
     };
   }
 
+  if (input.challengeIntentReview !== undefined && input.challengeIntentReview !== null) {
+    const current: ChallengeIntentBinding = {
+      address: input.address ?? "",
+      stake: input.stake,
+      claimStatement: question,
+      network: input.network ?? "",
+    };
+    if (!isChallengeIntentReviewCurrent(input.challengeIntentReview, current)) {
+      return {
+        status: "stale",
+        ok: false,
+        messageKey: "challengeIntentStale",
+        detail: "Challenge intent review no longer matches the account, stake, or claim.",
+      };
+    }
+  }
+
   if (input.moderation?.enabled) {
     const { currentKey, approvedKey = "", decision = "" } = input.moderation;
     if (decision === "allow" && approvedKey && approvedKey !== currentKey) {
@@ -292,6 +342,7 @@ export function claimCreationDraftFixture(
     isConnected: true,
     address: "GBBD47IF6LWK7P7MDEVCYWR7DPWUV3NY3STQEVFL4N4T4aQH3ZLLFLA5",
     hasSigner: true,
+    network: "testnet",
     nowMs,
     ...overrides,
   };

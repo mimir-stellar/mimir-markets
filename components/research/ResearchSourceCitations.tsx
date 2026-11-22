@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { ExternalLink, Link2Off, Quote, ShieldCheck } from "lucide-react";
+import { ChevronDown, ExternalLink, Link2Off, Quote, ShieldCheck } from "lucide-react";
 
+import CitationProvenanceView from "./CitationProvenanceView";
 import {
   buildResearchCitations,
   researchCitationsShowsRows,
@@ -52,6 +53,14 @@ export default function ResearchSourceCitations({
   title,
 }: ResearchSourceCitationsProps) {
   const t = useTranslations("researchCitations");
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+
+  function toggleProvenance(id: string) {
+    setExpandedIds((prev) => ({
+      ...prev,
+      [id]: !prev[id],
+    }));
+  }
 
   const view = useMemo(
     () =>
@@ -99,14 +108,32 @@ export default function ResearchSourceCitations({
               className="rounded-lg border border-pv-ink/[0.08] bg-pv-ink/[0.02] px-3 py-2.5"
               data-citation-status={row.status}
             >
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-bold uppercase tracking-[0.14em] text-pv-muted">
-                <span className="text-pv-text/85">[{index + 1}]</span>
-                <span>{trustLabel(row.trustTier, t)}</span>
-                {row.status !== "ready" ? (
-                  <span className={ROW_STATUS_CLASSES[row.status] ?? ""}>
-                    {t(`rowStatus.${row.status}`)}
-                  </span>
-                ) : null}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] font-bold uppercase tracking-[0.14em] text-pv-muted">
+                  <span className="text-pv-text/85">[{index + 1}]</span>
+                  <span>{trustLabel(row.trustTier, t)}</span>
+                  {row.status !== "ready" ? (
+                    <span className={ROW_STATUS_CLASSES[row.status] ?? ""}>
+                      {t(`rowStatus.${row.status}`)}
+                    </span>
+                  ) : null}
+                </div>
+
+                <button
+                  type="button"
+                  id={`trigger-provenance-${row.id}`}
+                  aria-expanded={Boolean(expandedIds[row.id])}
+                  aria-controls={`provenance-${row.id}`}
+                  onClick={() => toggleProvenance(row.id)}
+                  className="inline-flex items-center gap-1 rounded border border-pv-ink/[0.08] bg-pv-surface2/50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em] text-pv-muted hover:text-pv-text hover:bg-pv-surface2 transition-colors"
+                >
+                  <span>[{t("provenance.toggle")}]</span>
+                  <ChevronDown
+                    size={11}
+                    className={`transition-transform duration-150 ${expandedIds[row.id] ? "rotate-180" : ""}`}
+                    aria-hidden
+                  />
+                </button>
               </div>
 
               <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
@@ -126,6 +153,9 @@ export default function ResearchSourceCitations({
                     {t("unsafeLink")}
                   </span>
                 )}
+                <span className="min-w-0 truncate font-mono text-[11px] text-pv-muted" data-testid="citation-unsafe-url">
+                  {row.domain || row.url}
+                </span>
                 {row.shortHash ? (
                   <span className="inline-flex items-center gap-1 font-mono text-[11px] text-pv-muted">
                     <ShieldCheck size={11} aria-hidden />
@@ -141,6 +171,12 @@ export default function ResearchSourceCitations({
                   <span className="font-semibold text-pv-text/70">{t("excerpt")}: </span>
                   {row.excerpt}
                 </p>
+              ) : null}
+
+              {expandedIds[row.id] ? (
+                <div className="mt-2.5">
+                  <CitationProvenanceView citation={row} id={`provenance-${row.id}`} />
+                </div>
               ) : null}
             </li>
           ))}

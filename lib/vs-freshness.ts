@@ -1,12 +1,21 @@
 export type VSCacheFreshnessSource = "index" | "contract";
 export type VSCacheFreshnessStatus = "live" | "cached" | "stale";
 
+export interface ProjectionCompleteness {
+  trustedLedger: number | null;
+  knownGaps: number;
+  projectionGeneration: number;
+}
+
+export const CURRENT_PROJECTION_GENERATION = 1;
+
 export interface VSCacheFreshness {
   source: VSCacheFreshnessSource;
   status: VSCacheFreshnessStatus;
   lastUpdatedAt: string | null;
   ageMs: number | null;
   freshnessWindowMs: number;
+  projection?: ProjectionCompleteness;
 }
 
 const STALE_MULTIPLIER = 5;
@@ -15,6 +24,7 @@ export function buildVSCacheFreshness(args: {
   updatedAtMs?: number | null;
   freshnessWindowMs: number;
   source: VSCacheFreshnessSource;
+  projection?: ProjectionCompleteness | null;
 }): VSCacheFreshness {
   const updatedAtMs =
     typeof args.updatedAtMs === "number" && Number.isFinite(args.updatedAtMs)
@@ -31,20 +41,33 @@ export function buildVSCacheFreshness(args: {
     }
   }
 
-  return {
+  const freshness: VSCacheFreshness = {
     source: args.source,
     status,
     lastUpdatedAt: updatedAtMs == null ? null : new Date(updatedAtMs).toISOString(),
     ageMs,
     freshnessWindowMs: args.freshnessWindowMs,
   };
+
+  if (args.projection !== undefined && args.projection !== null) {
+    freshness.projection = args.projection;
+  }
+
+  return freshness;
 }
 
-export function makeContractFreshness(): VSCacheFreshness {
+export function makeContractFreshness(opts?: {
+  trustedLedger?: number | null;
+}): VSCacheFreshness {
   return buildVSCacheFreshness({
     updatedAtMs: Date.now(),
     freshnessWindowMs: 1,
     source: "contract",
+    projection: {
+      trustedLedger: opts?.trustedLedger ?? null,
+      knownGaps: 0,
+      projectionGeneration: CURRENT_PROJECTION_GENERATION,
+    },
   });
 }
 

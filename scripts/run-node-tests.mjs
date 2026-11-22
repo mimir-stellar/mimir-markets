@@ -35,22 +35,44 @@ const SAFE_ENV_KEYS = [
 
 const DATABASE_ENV_KEYS = ["DATABASE_URL", "TURSO_DATABASE_URL"];
 
+// Path defaults are relative to the repository. A null path leaves the choice to the runner.
+const FLAGS = [
+  { name: "--coverage", key: "coverage", default: false, description: "write an LCOV report" },
+  { name: "--coverage-dir", key: "coverageDir", argument: "path", default: "coverage/node", enables: "coverage", description: "choose the coverage output directory and enable coverage" },
+  { name: "--cache", key: "cache", default: true, negations: ["--no-cache", "--no-compile-cache"], description: "use the Node compile cache when supported" },
+  { name: "--cache-dir", key: "cacheDir", argument: "path", default: null, description: "choose the compile-cache root (otherwise MIMIR_NODE_TEST_CACHE_DIR or .cache/node-tests)" },
+  { name: "--clear-cache", key: "clearCache", default: false, description: "clear the selected compile cache before running" },
+  { name: "--with-db", key: "includeDatabase", default: false, description: "pass database URLs to the child (use a test DB only)" },
+  { name: "--help", key: "help", aliases: ["-h"], default: false, description: "show this help" },
+  { name: "--help-json", key: "helpJson", default: false, description: "print the flag definitions as JSON" },
+];
+
+const flagNames = new Map();
+for (const flag of FLAGS) {
+  for (const name of [flag.name, ...(flag.aliases ?? [])]) {
+    flagNames.set(name, { flag, enabled: true });
+  }
+  for (const name of flag.negations ?? []) {
+    flagNames.set(name, { flag, enabled: false });
+  }
+}
+
 function usage() {
-  return [
+  const lines = [
     "Usage: npm run test:node -- [options] [test filters]",
     "",
     "Positional arguments are filename substrings or globs. Only matching",
     "files under tests/node/ are run.",
     "",
     "Options:",
-    "  --coverage                 write coverage/node/node-tests.lcov",
-    "  --coverage-dir <path>      choose the coverage output directory",
-    "  --no-cache                 disable the Node compile cache",
-    "  --cache-dir <path>         choose the compile-cache root",
-    "  --clear-cache              clear the selected compile cache before running",
-    "  --with-db                  pass database URLs to the child (use a test DB only)",
-    "  -h, --help                 show this help",
-  ].join("\n");
+  ];
+  for (const flag of FLAGS) {
+    const names = [...(flag.aliases ?? []), flag.name].join(", ");
+    const label = flag.argument ? `${names} <${flag.argument}>` : names;
+    lines.push(`  ${label.padEnd(30)} ${flag.description} (default: ${flag.default ?? "automatic"})`);
+    if (flag.negations) lines.push(`  ${flag.negations.join(", ").padEnd(30)} disable ${flag.name}`);
+  }
+  return lines.join("\n");
 }
 
 function fail(message) {
@@ -66,17 +88,12 @@ function requireValue(argv, index, option) {
 }
 
 export function parseArgs(argv = [], root = ROOT) {
-  const options = {
-    cache: true,
-    clearCache: false,
-    coverage: false,
-    coverageDir: path.resolve(root, "coverage", "node"),
-    cacheDir: undefined,
-    includeDatabase: false,
-    help: false,
-    filters: [],
-    files: [],
-  };
+  const options = { filters: [], files: [] };
+  for (const flag of FLAGS) {
+    options[flag.key] = flag.argument === "path" && flag.default !== null
+      ? path.resolve(root, flag.default)
+      : flag.default ?? undefined;
+  }
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -84,52 +101,23 @@ export function parseArgs(argv = [], root = ROOT) {
       options.filters.push(...argv.slice(index + 1));
       break;
     }
-    if (argument === "--coverage") {
-      options.coverage = true;
-      continue;
-    }
-    if (argument === "--no-cache" || argument === "--no-compile-cache") {
-      options.cache = false;
-      continue;
-    }
-    if (argument === "--cache") {
-      options.cache = true;
-      continue;
-    }
-    if (argument === "--clear-cache") {
-      options.clearCache = true;
-      continue;
-    }
-    if (argument === "--with-db") {
-      options.includeDatabase = true;
-      continue;
-    }
-    if (argument === "--help" || argument === "-h") {
-      options.help = true;
-      continue;
-    }
-    if (argument.startsWith("--coverage-dir=")) {
-      options.coverageDir = path.resolve(root, argument.slice("--coverage-dir=".length));
-      options.coverage = true;
-      continue;
-    }
-    if (argument === "--coverage-dir") {
-      options.coverageDir = path.resolve(root, requireValue(argv, index, argument));
-      options.coverage = true;
-      index += 1;
-      continue;
-    }
-    if (argument.startsWith("--cache-dir=")) {
-      options.cacheDir = path.resolve(root, argument.slice("--cache-dir=".length));
-      continue;
-    }
-    if (argument === "--cache-dir") {
-      options.cacheDir = path.resolve(root, requireValue(argv, index, argument));
-      index += 1;
-      continue;
-    }
     if (argument.startsWith("-")) {
-      fail("Unknown node test option. Use --help for supported options.");
+      const separator = argument.indexOf("=");
+      const name = separator < 0 ? argument : argument.slice(0, separator);
+      const entry = flagNames.get(name);
+      if (!entry || (separator >= 0 && !entry.flag.argument)) {
+        fail("Unknown node test option. Use --help for supported options.");
+      }
+      const { flag, enabled } = entry;
+      if (flag.argument) {
+        const value = separator >= 0 ? argument.slice(separator + 1) : requireValue(argv, index, name);
+        if (separator < 0) index += 1;
+        options[flag.key] = path.resolve(root, value);
+        if (flag.enables) options[flag.enables] = true;
+      } else {
+        options[flag.key] = enabled;
+      }
+      continue;
     }
     options.filters.push(argument);
   }
@@ -368,8 +356,8 @@ export function runNodeTests({
   spawn = spawnSync,
 } = {}) {
   const options = typeof argv === "string" ? parseArgs(argv.split(" "), root) : parseArgs(argv, root);
-  if (options.help) {
-    console.log(usage());
+  if (options.help || options.helpJson) {
+    console.log(options.helpJson ? JSON.stringify({ flags: FLAGS }, null, 2) : usage());
     return 0;
   }
 
