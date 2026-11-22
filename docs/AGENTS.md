@@ -28,6 +28,7 @@ lib/x402/server.ts	x402 v2 seller paywall (@x402/next) + settlement recording
 lib/x402/buyer.ts	x402 v2 buyer with a hard USDC budget cap (@x402/fetch)
 agents/oracle/index.ts	Off-chain AI oracle agent (LLM + local keypair)
 agents/market-creator/index.ts	Autonomous market creator (LLM + local keypair)
+agents/market-creator/draft-quality.ts	Market draft quality explanation report (wording, source, deadline checks)
 agents/council/	Ten AI personas that stake as economic actors
 fixtures/ledger/	Versioned public-chain captures for deterministic offline replay
 deploy/deploy.ts	Soroban build/deploy/initialize script
@@ -80,6 +81,7 @@ environment behavior.
 | `lib/x402/buyer.ts` | x402 v2 buyer with a hard USDC budget cap (`@x402/fetch`) |
 | `agents/oracle/index.ts` | Off-chain AI oracle agent (LLM + local keypair) |
 | `agents/market-creator/index.ts` | Autonomous market creator (LLM + local keypair) |
+| `agents/market-creator/draft-quality.ts` | Market draft quality explanation report (wording, source, deadline checks); see `docs/MARKET_DRAFT_QUALITY.md` |
 | `agents/council/` | Ten AI personas that stake as economic actors |
 | `fixtures/ledger/` | Versioned public-chain captures for deterministic offline replay |
 | `deploy/deploy.ts` | Soroban build/deploy/initialize script |
