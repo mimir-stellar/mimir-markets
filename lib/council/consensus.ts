@@ -14,6 +14,12 @@
  * Abstentions are counted, never dropped: a claim where most of the jury declined
  * to call it is a different result from one where the jury split, and averaging
  * only the confident voters would report them identically.
+ *
+ * Deadline abstentions are distinct from substantive abstentions. A persona that
+ * ran out of its deliberation budget (`timedOut: true`) did not reason its way to
+ * a position, so it is recorded separately in `deadlineAbstentions` rather than
+ * being folded into the substantive `abstentions` count. Neither kind carries
+ * weight, and a missing vote is never converted into agreement with any verdict.
  */
 
 export type ConsensusVerdict = "creator" | "challengers" | "draw" | "unresolvable" | "abstain";
@@ -24,6 +30,11 @@ export interface TrackVote {
   verdict: ConsensusVerdict;
   /** 0..10000. Weight within its own track. */
   confidenceBps: number;
+  /**
+   * True when the persona hit its deliberation deadline before producing a
+   * verdict. Such a vote is treated as a deadline abstention, not a substantive one.
+   */
+  timedOut?: boolean;
 }
 
 export interface Tally {
@@ -36,8 +47,10 @@ export interface Tally {
   /** Leading verdict's share of the total weight, in bps. */
   leadingBps: number;
   voters: number;
-  /** Voters who declined to call it. */
+  /** Voters who declined to call it on substance. */
   abstentions: number;
+  /** Voters whose deliberation hit its deadline before a verdict was reached. */
+  deadlineAbstentions: number;
 }
 
 export interface ConsensusReport {
@@ -65,16 +78,20 @@ function emptyTally(): Tally {
     leadingBps: 0,
     voters: 0,
     abstentions: 0,
+    deadlineAbstentions: 0,
   };
 }
 
 /**
  * An abstention carries no confidence weight however confident the persona claims
  * to be about abstaining — otherwise a jury that all abstained would report a
- * confident "abstain" verdict competing with real positions.
+ * confident "abstain" verdict competing with real positions. A deadline timeout
+ * likewise carries no weight: a vote that never finished deliberating is not a
+ * position on either side.
  */
 function voteWeight(vote: TrackVote): number {
   if (vote.verdict === "abstain") return 0;
+  if (vote.timedOut) return 0;
   return Math.max(0, Math.min(10_000, Math.trunc(vote.confidenceBps)));
 }
 
@@ -85,8 +102,14 @@ function tally(votes: TrackVote[]): Tally {
   const rawWeight = emptyRecord();
   let totalWeight = 0;
   for (const vote of votes) {
-    result.counts[vote.verdict] += 1;
-    if (vote.verdict === "abstain") result.abstentions += 1;
+    if (vote.timedOut) {
+      // Deadline abstention: recorded under its own counter, never as a verdict
+      // for consensus purposes, so a timeout cannot masquerade as a position.
+      result.deadlineAbstentions += 1;
+    } else {
+      result.counts[vote.verdict] += 1;
+      if (vote.verdict === "abstain") result.abstentions += 1;
+    }
     const weight = voteWeight(vote);
     rawWeight[vote.verdict] += weight;
     totalWeight += weight;
@@ -135,6 +158,7 @@ export function councilConsensus(votes: TrackVote[]): ConsensusReport {
   const combined = emptyTally();
   combined.voters = classic.voters + philosopher.voters;
   combined.abstentions = classic.abstentions + philosopher.abstentions;
+  combined.deadlineAbstentions = classic.deadlineAbstentions + philosopher.deadlineAbstentions;
   for (const verdict of VERDICTS) {
     combined.counts[verdict] = classic.counts[verdict] + philosopher.counts[verdict];
   }

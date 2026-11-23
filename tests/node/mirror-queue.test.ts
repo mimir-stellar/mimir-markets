@@ -1,163 +1,258 @@
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import test from "node:test";
-
+import { Keypair } from "@stellar/stellar-sdk";
 import {
-  computeMirrorAmountAtomic,
-  formatMirrorAtomicUsdc,
-  toUsdcAtomic,
-} from "../../lib/baskets";
-import {
+  MAX_MIRROR_QUEUE_FAILURES,
+  MAX_MIRROR_QUEUE_FAILURE_MESSAGE_LENGTH,
+  pendingMirrorQueueFor,
   pendingMirrorsFor,
   type MirrorQueueDependencies,
 } from "../../lib/server/mirror-queue";
 
-const SUBSCRIBER = "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE";
-const MEMBER_ADDRESS = "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D";
-const FUTURE_DEADLINE = Math.floor(Date.now() / 1000) + 3600;
-const PAST_DEADLINE = Math.floor(Date.now() / 1000) - 60;
+const SUBSCRIBER = Keypair.random().publicKey();
+const MEMBER_ADDRESS = Keypair.random().publicKey();
+const NOW = 1_000_000;
 
 function makeDeps(opts: {
-  subscriptions?: string[];
-  definitions?: Array<{
-    id: string;
-    name: string;
-    members: Array<{ agentId: string; weightBps: number }>;
-  }>;
-  agents?: Array<{ id: string; displayName: string; address: string }>;
-  claims?: Array<{
-    id: number;
-    question?: string | null;
-    deadline: number;
-    creator?: string | null;
-  }>;
-  challengers?: Record<
-    number,
-    Array<{ address: string; stake: number; stakeAtomic?: string | bigint }>
-  >;
+  subscriptions?: string[] | (() => Promise<string[]>);
+  definitions?:
+    | Array<{ id: string; name: string; members: Array<{ agentId: string; weightBps: number }> }>
+    | (() => Promise<Array<{ id: string; name: string; members: Array<{ agentId: string; weightBps: number }> }>>);
+  agents?:
+    | Array<{ id: string; displayName: string; address: string }>
+    | (() => Promise<Array<{ id: string; displayName: string; address: string }>>);
+  claims?:
+    | Array<{ id: number; question?: string | null; deadline: number; creator?: string | null }>
+    | (() => Promise<Array<{ id: number; question?: string | null; deadline: number; creator?: string | null }>>);
+  challengers?:
+    | Record<number, Array<{ address: string; stake: number }>>
+    | ((claimId: number) => Promise<Array<{ address: string; stake: number }>>);
 }): MirrorQueueDependencies {
   return {
-    listSubscriptions: async () => opts.subscriptions ?? [],
-    listDefinitions: async () => opts.definitions ?? [],
-    listAgents: async () => opts.agents ?? [],
-    listOpenClaims: async () => opts.claims ?? [],
-    listChallengers: async (claimId) => opts.challengers?.[claimId] ?? [],
+    listSubscriptions:
+      typeof opts.subscriptions === "function"
+        ? opts.subscriptions
+        : async () => opts.subscriptions ?? [],
+    listDefinitions:
+      typeof opts.definitions === "function"
+        ? opts.definitions
+        : async () => opts.definitions ?? [],
+    listAgents:
+      typeof opts.agents === "function"
+        ? opts.agents
+        : async () => opts.agents ?? [],
+    listOpenClaims:
+      typeof opts.claims === "function"
+        ? opts.claims
+        : async () => opts.claims ?? [],
+    listChallengers:
+      typeof opts.challengers === "function"
+        ? opts.challengers
+        : async (claimId) => opts.challengers?.[claimId] ?? [],
   };
 }
 
-const AGENT = { id: "a1", displayName: "Agent One", address: MEMBER_ADDRESS };
+// ---------------------------------------------------------------------------
+// Clock control
+// ---------------------------------------------------------------------------
 
-test("computeMirrorAmountAtomic preserves exact 7-decimal atomic precision", () => {
-  // 2 USDC (20_000_000 atomic) * 3333 / 10_000 = 6_666_000 atomic (0.6666 USDC),
-  // whereas lossy cent rounding produced 0.67 USDC.
-  assert.equal(computeMirrorAmountAtomic(2, 3333), 6_666_000n);
-  // Sub-cent weighted stake (1 USDC * 33 bps = 0.0033 USDC = 33_000 atomic) is preserved.
-  assert.equal(computeMirrorAmountAtomic(1, 33), 33_000n);
-  // Exact 100% weight preserves the full atomic budget.
-  assert.equal(computeMirrorAmountAtomic(25, 10_000), 250_000_000n);
-  // Supports bigint atomic input directly.
-  assert.equal(computeMirrorAmountAtomic(20_000_000n, 3333), 6_666_000n);
-});
+function withFixedClock(fn: () => void | Promise<void>) {
+  return async () => {
+    const spy = mock.method(Date, "now", () => NOW * 1000);
+    try {
+      await fn();
+    } finally {
+      spy.mock.restore();
+    }
+  };
+}
 
-test("computeMirrorAmountAtomic returns 0n for invalid or non-positive inputs", () => {
-  assert.equal(computeMirrorAmountAtomic(2, 0), 0n);
-  assert.equal(computeMirrorAmountAtomic(2, -1), 0n);
-  assert.equal(computeMirrorAmountAtomic(2, 10_001), 0n);
-  assert.equal(computeMirrorAmountAtomic(2, 33.5), 0n);
-  assert.equal(computeMirrorAmountAtomic(0, 5_000), 0n);
-  assert.equal(computeMirrorAmountAtomic(-5, 5_000), 0n);
-  assert.equal(computeMirrorAmountAtomic(Number.NaN, 5_000), 0n);
-  assert.equal(computeMirrorAmountAtomic(Number.POSITIVE_INFINITY, 5_000), 0n);
-});
+describe("pendingMirrorQueueFor & pendingMirrorsFor", () => {
+  const originalDateNow = Date.now;
 
-test("formatMirrorAtomicUsdc formats atomic strings at the display boundary", () => {
-  assert.equal(formatMirrorAtomicUsdc("6666000"), "0.6666");
-  assert.equal(formatMirrorAtomicUsdc("6666000", 2), "0.66");
-  assert.equal(formatMirrorAtomicUsdc("100000000", 2), "10.00");
-  assert.equal(formatMirrorAtomicUsdc("33000"), "0.0033");
-  assert.equal(formatMirrorAtomicUsdc(0n, 2), "0.00");
-});
+  beforeEach(() => {
+    Date.now = () => NOW * 1000;
+  });
 
-test("toUsdcAtomic normalizes numbers and rejects invalid values", () => {
-  assert.equal(toUsdcAtomic(0.1 + 0.2), 3_000_000n);
-  assert.equal(toUsdcAtomic("12.3456789"), 123_456_789n);
-  assert.throws(() => toUsdcAtomic(-1));
-  assert.throws(() => toUsdcAtomic("1.12345678"));
-});
+  afterEach(() => {
+    Date.now = originalDateNow;
+  });
 
-test("pendingMirrorsFor returns exact atomic string amounts without lossy float fields", async () => {
-  const deps = makeDeps({
-    subscriptions: ["b"],
-    definitions: [
-      {
-        id: "b",
-        name: "Basket",
-        members: [{ agentId: "a1", weightBps: 3333 }],
+  it("distinguishes invalid subscriber addresses from incomplete sources", async () => {
+    const deps = makeDeps({ subscriptions: ["b"] });
+    const result = await pendingMirrorQueueFor("not-a-stellar-address", {}, deps);
+    assert.equal(result.status, "invalid_subscriber");
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.mirrors, []);
+    assert.deepEqual(result.following, []);
+    assert.equal(result.failureSummary, null);
+  });
+
+  it("distinguishes no subscriptions from unavailable subscriptions", async () => {
+    const deps = makeDeps({
+      subscriptions: [],
+      definitions: [BASKET],
+      agents: [AGENT],
+      openClaims: [{ id: 1, deadline: NOW + 1000 }],
+      challengers: { 1: [{ address: MEMBER_ADDRESS, stake: 10 }] },
+    });
+
+    const result = await pendingMirrorQueueFor(SUBSCRIBER, {}, deps);
+    assert.equal(result.status, "no_subscriptions");
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.mirrors, []);
+    assert.deepEqual(result.following, []);
+    assert.equal(result.failureSummary, null);
+
+    // Backward-compatible wrapper still returns [].
+    assert.deepEqual(await pendingMirrorsFor(SUBSCRIBER, {}, deps), []);
+  });
+
+  it("distinguishes no eligible opportunities from source failures", async () => {
+    const deps = makeDeps({
+      subscriptions: ["b"],
+      definitions: [BASKET],
+      agents: [AGENT],
+      claims: [{ id: 1, deadline: NOW + 1000 }],
+      challengers: { 1: [] },
+    });
+
+    const result = await pendingMirrorQueueFor(SUBSCRIBER, {}, deps);
+    assert.equal(result.status, "complete");
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.mirrors, []);
+    assert.deepEqual(result.following, ["b"]);
+    assert.equal(result.failureSummary, null);
+  });
+
+  it("exposes incomplete result when subscriptions source fails", async () => {
+    const deps = makeDeps({
+      subscriptions: async () => {
+        throw new Error("postgres connection refused");
       },
-    ],
-    agents: [AGENT],
-    claims: [
-      { id: 1, question: "Q1", deadline: FUTURE_DEADLINE },
-      { id: 2, question: "Q2", deadline: FUTURE_DEADLINE + 600 },
-    ],
-    challengers: {
-      1: [{ address: MEMBER_ADDRESS, stake: 10.1234567 }],
-      2: [{ address: MEMBER_ADDRESS, stake: 25, stakeAtomic: "250000001" }],
-    },
+    });
+
+    const result = await pendingMirrorQueueFor(SUBSCRIBER, {}, deps);
+    assert.equal(result.status, "incomplete");
+    assert.equal(result.complete, false);
+    assert.deepEqual(result.mirrors, []);
+    assert.deepEqual(result.following, []);
+    assert.ok(result.failureSummary);
+    assert.equal(result.failureSummary.totalFailures, 1);
+    assert.deepEqual(result.failureSummary.unavailableSources, ["subscriptions"]);
+    assert.equal(result.failureSummary.truncated, false);
+    assert.equal(result.failureSummary.failures[0].source, "subscriptions");
+    assert.match(result.failureSummary.failures[0].message, /postgres connection refused/);
+    assert.match(result.failureSummary.summary, /subscriptions/);
   });
 
-  const result = await pendingMirrorsFor(SUBSCRIBER, { b: 2 }, deps);
-  assert.equal(result.length, 2);
+  it("exposes incomplete result when agents directory fails", async () => {
+    const deps = makeDeps({
+      subscriptions: ["b"],
+      definitions: [BASKET],
+      agents: async () => {
+        throw new Error("agent directory timeout");
+      },
+      claims: [{ id: 1, deadline: NOW + 1000 }],
+      challengers: { 1: [{ address: MEMBER_ADDRESS, stake: 10 }] },
+    });
 
-  assert.equal(result[0].claimId, 1);
-  assert.equal(result[0].memberStakeAtomic, "101234567");
-  assert.equal(result[0].mirrorAmountAtomic, "6666000");
-  assert.equal("memberStakeUsdc" in result[0], false);
-  assert.equal("mirrorUsdc" in result[0], false);
+    const result = await pendingMirrorQueueFor(SUBSCRIBER, {}, deps);
+    assert.equal(result.status, "incomplete");
+    assert.equal(result.complete, false);
+    assert.deepEqual(result.mirrors, []);
+    assert.deepEqual(result.following, ["b"]);
+    assert.ok(result.failureSummary);
+    assert.deepEqual(result.failureSummary.unavailableSources, ["agents"]);
+    assert.equal(result.failureSummary.totalFailures, 1);
+    assert.match(result.failureSummary.summary, /agents/);
+  });
 
-  assert.equal(result[1].claimId, 2);
-  assert.equal(result[1].memberStakeAtomic, "250000001");
-  assert.equal(result[1].mirrorAmountAtomic, "6666000");
-});
-
-test("pendingMirrorsFor skips invalid weights, expired claims, and already-mirrored positions", async () => {
-  const deps = makeDeps({
-    subscriptions: ["b-valid", "b-zero"],
-    definitions: [
-      { id: "b-valid", name: "Valid", members: [{ agentId: "a1", weightBps: 33 }] },
-      { id: "b-zero", name: "Zero", members: [{ agentId: "a1", weightBps: 0 }] },
-    ],
-    agents: [AGENT],
-    claims: [
-      { id: 1, deadline: PAST_DEADLINE },
-      { id: 2, deadline: FUTURE_DEADLINE },
-      { id: 3, deadline: FUTURE_DEADLINE + 600 },
-    ],
-    challengers: {
-      1: [{ address: MEMBER_ADDRESS, stake: 10 }],
-      2: [
-        { address: MEMBER_ADDRESS, stake: 10 },
-        { address: SUBSCRIBER, stake: 2 },
+  it("returns partial mirrors alongside failure summary when a single claim challenger lookup fails", async () => {
+    const deps = makeDeps({
+      subscriptions: ["b"],
+      definitions: [BASKET],
+      agents: [AGENT],
+      openClaims: [
+        { id: 1, deadline: NOW + 1000 },
+        { id: 2, deadline: NOW + 2000 },
       ],
-      3: [{ address: MEMBER_ADDRESS, stake: 10 }],
-    },
+      challengers: async (claimId) => {
+        if (claimId === 1) throw new Error("indexer timeout on claim 1");
+        return [{ address: MEMBER_ADDRESS, stake: 25 }];
+      },
+    });
+
+    const result = await pendingMirrorQueueFor(SUBSCRIBER, {}, deps);
+    assert.equal(result.status, "incomplete");
+    assert.equal(result.complete, false);
+    assert.deepEqual(result.mirrors.map((m) => m.claimId), [2]);
+    assert.equal(result.mirrors[0].memberStakeUsdc, 25);
+    assert.ok(result.failureSummary);
+    assert.deepEqual(result.failureSummary.unavailableSources, ["challengers"]);
+    assert.equal(result.failureSummary.totalFailures, 1);
+    assert.equal(result.failureSummary.failures[0].claimId, 1);
+    assert.match(result.failureSummary.failures[0].message, /indexer timeout on claim 1/);
   });
 
-  const result = await pendingMirrorsFor(SUBSCRIBER, { "b-valid": 1, "b-zero": 10 }, deps);
-  assert.equal(result.length, 1);
-  assert.equal(result[0].claimId, 3);
-  assert.equal(result[0].mirrorAmountAtomic, "33000");
-  assert.equal(result[0].memberStakeAtomic, "100000000");
-});
+  it("bounds failure count and message length in failureSummary", async () => {
+    const claimCount = MAX_MIRROR_QUEUE_FAILURES + 3;
+    const claims = Array.from({ length: claimCount }, (_, idx) => ({
+      id: idx + 1,
+      deadline: NOW + 1000 + idx,
+    }));
+    const longError = `rpc   failure:\n${"x".repeat(MAX_MIRROR_QUEUE_FAILURE_MESSAGE_LENGTH + 50)}`;
 
-test("pendingMirrorsFor returns an empty list for invalid subscriber or no subscriptions", async () => {
-  const deps = makeDeps({
-    subscriptions: [],
-    definitions: [{ id: "b", name: "Basket", members: [{ agentId: "a1", weightBps: 10_000 }] }],
-    agents: [AGENT],
-    claims: [{ id: 1, deadline: FUTURE_DEADLINE }],
-    challengers: { 1: [{ address: MEMBER_ADDRESS, stake: 10 }] },
+    const deps = makeDeps({
+      subscriptions: ["b"],
+      definitions: [BASKET],
+      agents: [AGENT],
+      claims,
+      challengers: async () => {
+        throw new Error(longError);
+      },
+    });
+
+    const result = await pendingMirrorQueueFor(SUBSCRIBER, {}, deps);
+    assert.equal(result.status, "incomplete");
+    assert.equal(result.complete, false);
+    assert.ok(result.failureSummary);
+    assert.equal(result.failureSummary.totalFailures, claimCount);
+    assert.equal(result.failureSummary.failures.length, MAX_MIRROR_QUEUE_FAILURES);
+    assert.equal(result.failureSummary.truncated, true);
+    assert.ok(
+      result.failureSummary.failures.every(
+        (f) => f.message.length <= MAX_MIRROR_QUEUE_FAILURE_MESSAGE_LENGTH && !f.message.includes("\n"),
+      ),
+    );
+    assert.match(
+      result.failureSummary.summary,
+      new RegExp(`${claimCount} failures recorded \\(showing first ${MAX_MIRROR_QUEUE_FAILURES}\\)`),
+    );
   });
 
-  assert.deepEqual(await pendingMirrorsFor("not-a-strkey", {}, deps), []);
-  assert.deepEqual(await pendingMirrorsFor(SUBSCRIBER, {}, deps), []);
+  it("excludes expired markets and markets the follower already mirrored", async () => {
+    const deps = makeDeps({
+      subscriptions: ["b"],
+      definitions: [BASKET],
+      agents: [AGENT],
+      claims: [
+        { id: 1, deadline: NOW - 1 },
+        { id: 2, deadline: NOW + 1000 },
+        { id: 3, deadline: NOW + 2000 },
+      ],
+      challengers: {
+        1: [{ address: MEMBER_ADDRESS, stake: 10 }],
+        2: [
+          { address: MEMBER_ADDRESS, stake: 15 },
+          { address: SUBSCRIBER, stake: 2 },
+        ],
+        3: [{ address: MEMBER_ADDRESS, stake: 20 }],
+      },
+    });
+
+    const result = await pendingMirrorsFor(SUBSCRIBER, {}, deps);
+    assert.deepEqual(result.map((r) => r.claimId), [3]);
+    assert.equal(result[0].memberStakeUsdc, 20);
+  });
 });

@@ -1359,6 +1359,10 @@ export default function DocsPage() {
             <code className="rounded bg-pv-surface2 px-1.5 py-0.5 text-xs">RESEARCH_DENIED_DOMAINS</code> subtracts from whatever is otherwise
             permitted.
           </li>
+          <li>
+            <strong className="text-pv-text">Redirect policy decisions are diagnostic-visible offline.</strong>{" "}
+            Captured redirect chains can be evaluated offline via <code className="rounded bg-pv-surface2 px-1.5 py-0.5 text-xs">diagnoseRedirectPolicy</code> and research content validation. It returns bounded per-hop scheme, domain, and SSRF verdicts while redacting URL identities (credentials, tokens, and wallet strkeys) without making new network requests.
+          </li>
         </ul>
 
         <h3 className="text-lg font-bold text-pv-text">Judging</h3>

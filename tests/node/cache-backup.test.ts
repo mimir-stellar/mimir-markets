@@ -215,6 +215,7 @@ test("regression: every committed fixture is loadable and typed correctly", () =
   // Structurally valid fixtures parse and expose all 8 tables.
   const validNames = [
     "valid.json",
+    "crash-recovery.json",
     "checksum-mismatch.json",
     "private-content-visible.json",
     "empty-payload.json",

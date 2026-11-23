@@ -172,7 +172,7 @@ The mechanism lives in `agents/oracle/council-vote.ts` (pure scoring math is uni
 | Variable | Default | Effect |
 |---|---|---|
 | `COUNCIL_SELF_RESOLVING` | off | `1` enables the mechanism (requires `COUNCIL_SETTLEMENT=1`) |
-| `COUNCIL_QUORUM` | `3` | Min decisive votes before council settles; invalid values normalize to 3 (see `lib/council/quorum.ts`) |
+| `COUNCIL_QUORUM` | `3` | Min decisive votes before council settles; invalid values normalize to 3 (see `lib/council/quorum.ts`). Deduplication preserves the original vote's `arrivalId`: identical retries are idempotent, while conflicting duplicates are surfaced in `conflicts`. |
 | `COUNCIL_ALPHA` | `0.25` | Per-vote stop probability after quorum |
 | `COUNCIL_BONUS_USDC` | `0.01` | Total cross-entropy bonus pool per settlement; `0` pauses bonuses, maximum `1`, exact 7-decimal USDC |
 
@@ -221,6 +221,14 @@ quorum/confidence policies and reports which settlement decisions would change.
 It evaluates both policies on identical fixtures, makes no model-provider calls,
 and writes results only to a temporary state directory.
 
+---
+
+### Versioned council ballot commitment
+
+Before evaluating quorum or peer-reasoning outcomes, council ballots can be sealed with a versioned SHA-256 commitment (`COUNCIL_BALLOT_COMMITMENT_VERSION = 1` in `lib/council/quorum.ts` and `PEER_REASONING_COMMITMENT_VERSION = 1` in `agents/council/shared/peer-reasoning.ts`):
+
+- **Bound fields:** Canonical participant identities (persona slugs, optional case-sensitive wallet addresses, and jury track), `claimId`, `claimRevision`, the canonical `eligibleVoteSet`, the approved `votingBoundaryMs`, and the folded ballot snapshot.
+- **Boundary enforcement:** `createBallotCommitment`, `verifyBallotCommitment`, `evaluateQuorum`, and `buyPeerReasoning` reject any ballot or peer-reasoning read that is recorded or altered after `votingBoundaryMs`, comes from a persona outside `eligibleVoteSet`, mismatches a bound participant identity or `claimRevision`, or fails version/digest verification (`action: "abort_invalid_commitment"`).
 
 ---
 
@@ -241,6 +249,25 @@ Rule-based personas (`contrarian`, `whale-follow`) and out-of-category specialis
 The market-creator can buy council opinions before opening a market via `POST /api/council/preflight`. Those preflight calls pay into each persona's wallet just like settlement votes do.
 
 When `COUNCIL_PEER_READS=1`, each buyer persona pays selected seller personas through `GET /api/council/reasoning`, so revenue lands directly in the seller persona's wallet and appears on `/revenue`.
+
+### Bounded deliberation deadlines
+
+Each council deliberation runs against a bounded deadline. A persona whose vote, peer read, or LLM call has not completed before the deadline is recorded as **deadline abstention**, which is distinct from **substantive disagreement**:
+
+- **Deadline abstention** means the persona produced no usable opinion in time. It is excluded from quorum counts and never contributes a CREATOR_WINS or CHALLENGERS_WIN vote.
+- **Substantive disagreement** means the persona returned an explicit verdict (including `UNRESOLVABLE`) that disagrees with the rest of the council. It counts toward quorum like any other decisive or non-decisive report.
+
+Missing votes are never converted into consensus. If the number of substantive opinions is below `COUNCIL_QUORUM`, the council does not settle on the strength of the remaining votes, and the claim is left for the oracle's independent resolution path. Deadline abstentions are logged as `council-<slug>-<claimId>` with status `deadline_abstain` so operators can distinguish timeouts from genuine disagreement in audits.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `COUNCIL_DELIBERATION_DEADLINE_MS` | `120000` | Max ms a deliberation round may run before outstanding personas are recorded as deadline abstentions. `0` disables the deadline. |
+
+Behaviour summary:
+
+- A persona that times out counts as abstaining, not as agreeing with the majority.
+- Abstentions do not lower the quorum threshold; `COUNCIL_QUORUM` still applies to substantive opinions only.
+- Existing configurations are unaffected unless `COUNCIL_DELIBERATION_DEADLINE_MS` is set to a non-zero value below the observed round duration.
 
 ---
 

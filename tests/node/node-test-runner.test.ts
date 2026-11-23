@@ -9,6 +9,7 @@ import * as runnerModule from "../../scripts/run-node-tests.mjs";
 type SpawnLike = (command: string, args: string[], options: { cwd: string; env: Record<string, string>; stdio: string }) => { status: number | null; error?: Error };
 
 type RunnerOptions = {
+  nodeVersion?: string;
   argv?: string[];
   root?: string;
   sourceEnvironment?: NodeJS.ProcessEnv;
@@ -205,4 +206,28 @@ test("runner publishes a successful coverage report and creates a compile cache"
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("an unsupported runtime reports the engine range before selecting or launching tests", () => {
+  assert.throws(() => runNodeTests({
+    nodeVersion: "21.9.0",
+    argv: ["no-such-test-file"],
+    spawn: () => assert.fail("unexpected test launch"),
+  }), /Detected Node\.js 21\.9\.0.*requires >=22\.0\.0.*nvm use/);
+});
+
+test("the minimum supported runtime reaches the child launcher", () => {
+  let launched = false;
+  const status = runNodeTests({
+    nodeVersion: "22.0.0",
+    argv: ["--no-cache", "node-test-runner.test.ts"],
+    spawn: (_command: string, args: string[]) => {
+      launched = true;
+      assert.ok(args.some((arg) => arg.endsWith("node-test-runner.test.ts")));
+      assert.ok(!args.includes("--experimental-test-isolation=process"));
+      return { status: 0 };
+    },
+  });
+  assert.ok(launched);
+  assert.equal(status, 0);
 });

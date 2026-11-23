@@ -2,6 +2,10 @@
 
 use soroban_sdk::{contracterror, contracttype, Address};
 
+/// Version tag for the squad settlement manifest. Bump on any change to the
+/// manifest's encoded layout so off-chain indexers can reject unknown shapes.
+pub const SETTLEMENT_MANIFEST_VERSION: u32 = 1;
+
 // ── Constants (mirror MimirSquad.sol) ────────────────────────────────────────
 
 pub const SIDE_A: u32 = 1;

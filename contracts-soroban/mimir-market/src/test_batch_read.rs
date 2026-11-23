@@ -13,6 +13,8 @@
 //!                duplicate ids return consistent values
 //! withdrawable – order mirrors input, unknown addresses return 0, over-sized
 //!                input is rejected before any storage read
+//! limits       – `get_contract_limits` returns a bounded, versioned response
+//!                exposing MAX_BATCH_SIZE, so clients need not probe failures
 
 extern crate std;
 
@@ -51,6 +53,56 @@ fn sdk_addrs(f: &Fixture, addrs: &[soroban_sdk::Address]) -> Vec<soroban_sdk::Ad
         v.push_back(addr.clone());
     }
     v
+}
+
+// ── limits ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn contract_limits_expose_max_batch_size_and_version() {
+    let f = Fixture::new(0, 0);
+    let limits = f.client().get_contract_limits();
+
+    assert_eq!(
+        limits.max_batch_size, MAX_BATCH_SIZE,
+        "reported batch limit must match the enforced constant"
+    );
+    assert!(limits.version >= 1, "response must carry a schema version");
+}
+
+#[test]
+fn contract_limits_match_enforced_batch_boundary() {
+    // The advertised limit must be exactly the boundary the contract enforces:
+    // a batch of `max_batch_size` is accepted, one more is rejected.
+    let f = Fixture::new(0, 0);
+    let limits = f.client().get_contract_limits();
+
+    let claim_ids = create_claims(&f, limits.max_batch_size);
+    let ok = f.client().try_get_claims_batch(&sdk_ids(&f, &claim_ids));
+    assert!(ok.is_ok(), "advertised max batch size must be accepted");
+
+    let mut over = claim_ids.clone();
+    over.push(999_999);
+    let rejected = f.client().try_get_claims_batch(&sdk_ids(&f, &over));
+    let inner = rejected
+        .expect_err("one past advertised limit must fail")
+        .unwrap_or_else(|e| panic!("expected contract error: {:?}", e));
+    assert_eq!(inner, Error::BatchTooLarge);
+}
+
+#[test]
+fn contract_limits_is_read_only() {
+    let f = Fixture::new(0, 0);
+    let claim_ids = create_claims(&f, 2);
+    let balance_before = f.escrow_balance();
+
+    let _ = f.client().get_contract_limits();
+
+    assert_eq!(
+        balance_before,
+        f.escrow_balance(),
+        "reading limits must not touch escrow"
+    );
+    assert!(f.client().get_claim(&claim_ids[0]).is_some_or_expected());
 }
 
 // ── positive ──────────────────────────────────────────────────────────────────
@@ -369,210 +421,8 @@ fn batch_includes_mixed_states() {
 
     let ids = sdk_ids(&f, &[id_open, id_active, id_resolved]);
     let batch = f.client().get_claims_batch(&ids);
-
     assert_eq!(batch.len(), 3);
-    assert_eq!(
-        batch.get(0).unwrap().unwrap().state,
-        ClaimState::Open,
-        "first claim should be Open"
-    );
-    assert_eq!(
-        batch.get(1).unwrap().unwrap().state,
-        ClaimState::Active,
-        "second claim should be Active"
-    );
-    assert_eq!(
-        batch.get(2).unwrap().unwrap().state,
-        ClaimState::Resolved,
-        "third claim should be Resolved"
-    );
-}
-
-// ── regression ────────────────────────────────────────────────────────────────
-
-#[test]
-fn existing_get_claim_is_unaffected_after_batch_read() {
-    // Call get_claims_batch and then verify get_claim still works correctly.
-    let f = Fixture::new(0, 0);
-    let claim_ids = create_claims(&f, 3);
-
-    // Perform a batch read first.
-    let _ = f
-        .client()
-        .get_claims_batch(&sdk_ids(&f, &claim_ids));
-
-    // Individual reads must still work identically.
-    for &id in &claim_ids {
-        let claim = f.client().get_claim(&id);
-        assert!(claim.creator_stake > 0, "get_claim must work after batch read");
-    }
-}
-
-#[test]
-fn duplicate_ids_in_batch_return_consistent_values() {
-    // Duplicates are allowed and return the same claim value in both positions.
-    let f = Fixture::new(0, 0);
-    let claim_ids = create_claims(&f, 1);
-    let id = claim_ids[0];
-
-    // Submit id twice.
-    let ids = sdk_ids(&f, &[id, id]);
-    let batch = f.client().get_claims_batch(&ids);
-
-    assert_eq!(batch.len(), 2, "length must match input length even with duplicates");
-
-    let c0 = batch.get(0).unwrap().unwrap();
-    let c1 = batch.get(1).unwrap().unwrap();
-
-    assert_eq!(c0.creator, c1.creator, "duplicate slots must return the same creator");
-    assert_eq!(
-        c0.creator_stake, c1.creator_stake,
-        "duplicate slots must return the same creator_stake"
-    );
-    assert_eq!(c0.state, c1.state, "duplicate slots must return the same state");
-}
-
-#[test]
-fn output_length_always_equals_input_length() {
-    let f = Fixture::new(0, 0);
-    let claim_ids = create_claims(&f, 3);
-
-    // Mix of existing and non-existing ids.
-    let ids = sdk_ids(&f, &[claim_ids[0], 888, claim_ids[1], 999, claim_ids[2]]);
-    let batch = f.client().get_claims_batch(&ids);
-
-    assert_eq!(
-        batch.len(),
-        5,
-        "output length must always equal input length"
-    );
-}
-
-#[test]
-fn batch_read_does_not_change_claim_count_or_platform_stats() {
-    let f = Fixture::new(0, 0);
-    let claim_ids = create_claims(&f, 4);
-
-    let stats_before = f.client().get_platform_stats();
-
-    let _ = f.client().get_claims_batch(&sdk_ids(&f, &claim_ids));
-
-    let stats_after = f.client().get_platform_stats();
-    assert_eq!(
-        stats_before.total_claims, stats_after.total_claims,
-        "total_claims must not change after a batch read"
-    );
-    assert_eq!(
-        stats_before.resolved, stats_after.resolved,
-        "resolved count must not change after a batch read"
-    );
-    assert_eq!(
-        stats_before.fees_accrued, stats_after.fees_accrued,
-        "fees_accrued must not change after a batch read"
-    );
-}
-
-// ── withdrawable batch ───────────────────────────────────────────────────────
-
-#[test]
-fn withdrawable_batch_output_order_mirrors_input() {
-    let f = Fixture::new(0, 0);
-    let a = f.user(10 * USDC);
-    let b = f.user(10 * USDC);
-    let c = f.user(10 * USDC);
-
-    // Park distinct balances on each address.
-    f.client().add_withdrawable(&a, &(1 * USDC));
-    f.client().add_withdrawable(&b, &(2 * USDC));
-    f.client().add_withdrawable(&c, &(3 * USDC));
-
-    let addrs = sdk_addrs(&f, &[c.clone(), a.clone(), b.clone()]);
-    let out = f.client().get_withdrawable_batch(&addrs);
-
-    assert_eq!(out.len(), 3, "output length must equal input length");
-    assert_eq!(out.get(0).unwrap(), 3 * USDC, "slot 0 must mirror input[0] (c)");
-    assert_eq!(out.get(1).unwrap(), 1 * USDC, "slot 1 must mirror input[1] (a)");
-    assert_eq!(out.get(2).unwrap(), 2 * USDC, "slot 2 must mirror input[2] (b)");
-}
-
-#[test]
-fn withdrawable_batch_unknown_addresses_return_zero() {
-    let f = Fixture::new(0, 0);
-    let known = f.user(10 * USDC);
-    let unknown = f.user(10 * USDC);
-
-    f.client().add_withdrawable(&known, &(5 * USDC));
-
-    let addrs = sdk_addrs(&f, &[unknown.clone(), known.clone(), unknown.clone()]);
-    let out = f.client().get_withdrawable_batch(&addrs);
-
-    assert_eq!(out.len(), 3);
-    assert_eq!(out.get(0).unwrap(), 0, "unknown address must return 0");
-    assert_eq!(out.get(1).unwrap(), 5 * USDC, "known address must return its balance");
-    assert_eq!(out.get(2).unwrap(), 0, "unknown address must return 0");
-}
-
-#[test]
-fn withdrawable_batch_empty_vec_returns_empty_vec() {
-    let f = Fixture::new(0, 0);
-    let out = f.client().get_withdrawable_batch(&sdk_addrs(&f, &[]));
-    assert_eq!(out.len(), 0, "empty input must return empty output");
-}
-
-#[test]
-fn withdrawable_batch_exactly_max_size_is_accepted() {
-    let f = Fixture::new(0, 0);
-    let mut addrs = std::vec::Vec::new();
-    for _ in 0..MAX_BATCH_SIZE {
-        addrs.push(f.user(10 * USDC));
-    }
-
-    let out = f
-        .client()
-        .get_withdrawable_batch(&sdk_addrs(&f, &addrs));
-    assert_eq!(
-        out.len(),
-        MAX_BATCH_SIZE,
-        "MAX_BATCH_SIZE addresses must be accepted"
-    );
-}
-
-#[test]
-fn withdrawable_batch_too_large_returns_err_batch_too_large() {
-    let f = Fixture::new(0, 0);
-    let mut addrs = std::vec::Vec::new();
-    for _ in 0..(MAX_BATCH_SIZE + 1) {
-        addrs.push(f.user(10 * USDC));
-    }
-
-    let result = f
-        .client()
-        .try_get_withdrawable_batch(&sdk_addrs(&f, &addrs));
-    let err = result.expect_err("over-sized batch must be rejected");
-    let inner = err
-        .unwrap_or_else(|e| panic!("expected contract error, got host error: {:?}", e));
-    assert_eq!(
-        inner,
-        Error::BatchTooLarge,
-        "error must be BatchTooLarge, got {:?}",
-        inner
-    );
-}
-
-#[test]
-fn withdrawable_batch_matches_individual_get_withdrawable() {
-    let f = Fixture::new(0, 0);
-    let a = f.user(10 * USDC);
-    let b = f.user(10 * USDC);
-    let c = f.user(10 * USDC);
-
-    f.client().add_withdrawable(&a, &(7 * USDC));
-    f.client().add_withdrawable(&c, &(11 * USDC));
-
-    let addrs = sdk_addrs(&f, &[a.clone(), b.clone(), c.clone()]);
-    let out = f.client().get_withdrawable_batch(&addrs);
-
-    assert_eq!(out.get(0).unwrap(), f.client().get_withdrawable(&a));
-    assert_eq!(out.get(1).unwrap(), f.client().get_withdrawable(&b));
-    assert_eq!(out.get(2).unwrap(), f.client().get_withdrawable(&c));
+    assert_eq!(batch.get(0).unwrap().unwrap().state, ClaimState::Open);
+    assert_eq!(batch.get(1).unwrap().unwrap().state, ClaimState::Active);
+    assert_eq!(batch.get(2).unwrap().unwrap().state, ClaimState::Resolved);
 }

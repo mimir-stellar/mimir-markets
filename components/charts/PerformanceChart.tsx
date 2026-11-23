@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * One line chart for both agent P&L and basket NAV.
+ * One line chart for both agent P&amp;L and basket NAV.
  *
  * Inline SVG rather than a charting library: this is a path, a baseline and a
  * hover readout — a chart dependency would ship more JavaScript than the rest of
@@ -21,13 +21,19 @@
  * observation instead of jumping as the series grows.
  */
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 
 import {
+  PORTFOLIO_CHART_RANGES,
   buildPerformanceChartRows,
   formatChartDay,
   MAX_TABLE_ROWS,
 } from "@/lib/performance-chart-rows";
+import {
+  verifyPortfolioPerformanceManifest,
+  type PortfolioPerformanceStatementManifest,
+} from "@/lib/portfolio-performance";
+import { formatAtomicUsdc } from "@/lib/usdc";
 
 export interface ChartPoint {
   timestamp: number;
@@ -51,8 +57,32 @@ const VIEW_HEIGHT = 180;
 const PAD_X = 10;
 const PAD_Y = 14;
 
-function formatDay(timestamp: number): string {
-  return formatChartDay(timestamp);
+const RANGE_LABELS: Record<PortfolioChartRange, string> = {
+  "24h": "24h",
+  "7d": "7d",
+  "30d": "30d",
+  all: "All",
+};
+
+export interface PerformanceChartProps {
+  points?: ChartPoint[];
+  series?: ChartSeries[];
+  /** The line drawn as "flat": starting NAV, or zero for cumulative P&L. */
+  baseline: number;
+  label: string;
+  valueSuffix?: string;
+  emptyMessage?: string;
+  invalidMessage?: string;
+  height?: number;
+  /** Initial or controlled chart range */
+  range?: PortfolioChartRange;
+  timeBounds?: TimeBounds;
+  /** Callback fired when the user selects a range */
+  onRangeChange?: (range: PortfolioChartRange, bounds?: TimeBounds) => void;
+  /** Whether to sync selected chart range with normalized URL state (default: true) */
+  syncUrl?: boolean;
+  /** Show range selection buttons (default: true) */
+  showRangeControls?: boolean;
 }
 
 function formatCoverage(coverage: ChartPoint["coverage"]): string {
@@ -72,9 +102,11 @@ export function PerformanceChart({
   emptyMessage = "No settled results in this window yet.",
   invalidMessage = "Performance data is unavailable.",
   height = 180,
+  statementManifest,
 }: {
-  points: ChartPoint[];
-  /** The line drawn as "flat": starting NAV, or zero for cumulative P&L. */
+  points?: ChartPoint[];
+  series?: ChartSeries[];
+  /** The line drawn as "flat": starting NAV, or zero for cumulative P&amp;L. */
   baseline: number;
   label: string;
   valueSuffix?: string;
@@ -94,7 +126,11 @@ export function PerformanceChart({
   const svgRef = useRef<SVGSVGElement>(null);
 
   const allSeries: ChartSeries[] =
-    series && series.length > 0 ? series : points ? [{ points }] : [];
+    series && series.length > 0
+      ? series
+      : points
+        ? [{ points }]
+        : [];
   const primaryCount = allSeries[0]?.points.length ?? 0;
   const invalid =
     !Number.isFinite(baseline) ||
@@ -135,12 +171,16 @@ export function PerformanceChart({
   }, [primaryCount]);
 
   const geometry = useMemo(() => {
-    if (invalid || allSeries.length === 0) return null;
+    if (effectiveState !== "available" || allSeries.length === 0) return null;
     const allPoints = allSeries.flatMap((s) => s.points);
-    if (allPoints.length === 0) return null;
-    const values = allPoints.map((point) => point.value);
-    const min = Math.min(baseline, ...values);
-    const max = Math.max(baseline, ...values);
+    const validNumericValues = allPoints
+      .map((p) => p.value)
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+
+    if (validNumericValues.length === 0) return null;
+
+    const min = Math.min(baseline, ...validNumericValues);
+    const max = Math.max(baseline, ...validNumericValues);
     // A flat series would divide by zero; give it a nominal band so it centres.
     const span = max - min || Math.max(1, Math.abs(max) * 0.02);
 
@@ -151,7 +191,12 @@ export function PerformanceChart({
       const pts = s.points;
       if (pts.length === 0) {
         return {
-          coords: [] as Array<{ x: number; y: number; timestamp: number; value: number; coverage?: ChartPoint["coverage"] }>,
+          coords: [] as Array<{
+            x: number;
+            y: number;
+            timestamp: number;
+            value: number;
+          }>,
           line: "",
           area: "",
         };
@@ -159,17 +204,18 @@ export function PerformanceChart({
       const x = (index: number) =>
         PAD_X + (index / Math.max(1, pts.length - 1)) * (VIEW_WIDTH - PAD_X * 2);
       const coords = pts.map((point, index) => ({
-        x: x(index), y: y(point.value), timestamp: point.timestamp, value: point.value, coverage: point.coverage,
+        x: x(index),
+        y: y(point.value),
+        timestamp: point.timestamp,
+        value: point.value,
       }));
-      // A single point has no line; draw a short flat stub so the dot has context.
       const line =
         pts.length === 1
           ? `M${PAD_X},${coords[0].y} L${VIEW_WIDTH - PAD_X},${coords[0].y}`
           : coords
               .map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`)
               .join(" ");
-      const endX = pts.length === 1 ? VIEW_WIDTH - PAD_X : coords[coords.length - 1].x;
-      const area = `${line} L${endX.toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${PAD_X},${VIEW_HEIGHT - PAD_Y} Z`;
+      const area = `${line} L${(pts.length === 1 ? VIEW_WIDTH - PAD_X : coords.at(-1)!.x).toFixed(1)},${VIEW_HEIGHT - PAD_Y} L${PAD_X},${VIEW_HEIGHT - PAD_Y} Z`;
       return { coords, line, area };
     };
 
@@ -184,10 +230,26 @@ export function PerformanceChart({
     };
   }, [allSeries, baseline, invalid]);
 
+    const primaryCoords = seriesGeoms[0]?.coords ?? [];
+    const firstTimestamp = primaryCoords[0]?.timestamp ?? allPoints[0]?.timestamp ?? 0;
+    const lastTimestamp =
+      primaryCoords.at(-1)?.timestamp ?? allPoints.at(-1)?.timestamp ?? 0;
+
+    return {
+      seriesGeoms,
+      line: seriesGeoms[0]?.line ?? "",
+      area: seriesGeoms[0]?.area ?? "",
+      baselineY: y(baseline),
+      firstTimestamp,
+      lastTimestamp,
+    };
+  }, [allSeries, baseline, invalid]);
+
   if (invalid) {
     return (
       <div
         role="alert"
+        data-state="unavailable"
         className="border border-pv-danger/30 bg-pv-danger/[0.06] px-4 py-12 text-center text-sm text-pv-muted"
       >
         {invalidMessage}
@@ -195,7 +257,7 @@ export function PerformanceChart({
     );
   }
 
-  if (!geometry) {
+  if (!geometry || geometry.seriesGeoms.length === 0 || geometry.seriesGeoms[0].coords.length === 0) {
     return (
       <div className="border border-pv-ink/[0.1] bg-pv-surface/40 px-4 py-12 text-center text-sm text-pv-muted">
         {emptyMessage}
@@ -213,42 +275,11 @@ export function PerformanceChart({
   const up = last.value >= baseline;
   const stroke = allSeries[0].stroke ?? (up ? "rgb(var(--pv-accent))" : "rgb(var(--pv-danger))");
   const length = pathRef.current?.getTotalLength?.() ?? 2000;
-  const table = buildPerformanceChartRows(points, valueSuffix);
-
-  const moveFocus = (next: number) => {
-    const clamped = Math.max(0, Math.min(count - 1, next));
-    setFocusIndex(clamped);
-    setFocusTimestamp(primary.coords[clamped].timestamp);
-  };
-
-  const onKeyDown = (event: React.KeyboardEvent<SVGSVGElement>) => {
-    const current = focusIndex ?? defaultIndex;
-    switch (event.key) {
-      case "ArrowLeft":
-        event.preventDefault();
-        moveFocus(current - 1);
-        break;
-      case "ArrowRight":
-        event.preventDefault();
-        moveFocus(current + 1);
-        break;
-      case "Home":
-        event.preventDefault();
-        moveFocus(0);
-        break;
-      case "End":
-        event.preventDefault();
-        moveFocus(count - 1);
-        break;
-      default:
-        break;
-    }
-  };
-
-  const activeDescription = `${formatDay(activePoint.timestamp)}, value ${activePoint.value.toFixed(2)}${valueSuffix}, ${formatCoverage(activePoint.coverage)}, observation ${active + 1} of ${count}`;
+  const tablePoints = points ?? allSeries[0]?.points ?? [];
+  const table = buildPerformanceChartRows(tablePoints, valueSuffix);
 
   return (
-    <figure className="border border-pv-ink/[0.1] bg-pv-surface/40 p-3">
+    <figure data-state="available" className="border border-pv-ink/[0.1] bg-pv-surface/40 p-3">
       <svg
         ref={svgRef}
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
@@ -285,28 +316,43 @@ export function PerformanceChart({
           strokeDasharray="3 4"
         />
 
-        <path
-          d={primary.area}
-          fill={`url(#${gradientId})`}
-          style={{ opacity: drawn ? 1 : 0, transition: "opacity 600ms ease-out 250ms" }}
-        />
-        <path
-          ref={pathRef}
-          d={primary.line}
-          fill="none"
-          stroke={stroke}
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          style={{
-            strokeDasharray: length,
-            strokeDashoffset: drawn ? 0 : length,
-            transition: "stroke-dasharray 900ms cubic-bezier(0.22, 1, 0.36, 1)",
-          }}
-        />
+        {/* Primary series area fill */}
+        {(allSeries[0]?.area ?? true) && (
+          <path
+            d={geometry.seriesGeoms[0].area}
+            fill={`url(#${gradientId})`}
+            style={{
+              opacity: drawn ? 1 : 0,
+              transition: "opacity 600ms ease-out 250ms",
+            }}
+          />
+        )}
 
-        {/* Hover targets: one invisible column per point, so the pointer never has
-            to find a 4px dot. */}
+        {/* Render lines for all series in comparison or single mode */}
+        {geometry.seriesGeoms.map((sg, index) => {
+          const s = allSeries[index];
+          const isPrimary = index === 0;
+          const seriesStroke = s?.stroke ?? (isPrimary ? strokeDefault : "rgb(var(--pv-ink) / 0.5)");
+          return (
+            <path
+              key={s?.label ?? index}
+              ref={isPrimary ? pathRef : undefined}
+              d={sg.line}
+              fill="none"
+              stroke={seriesStroke}
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              style={{
+                strokeDasharray: length,
+                strokeDashoffset: drawn ? 0 : length,
+                transition: "stroke-dasharray 900ms cubic-bezier(0.22, 1, 0.36, 1)",
+              }}
+            />
+          );
+        })}
+
+        {/* Hover targets: one invisible column per primary point */}
         {primary.coords.map((coord, index) => (
           <rect
             key={`${coord.timestamp}-${index}`}
@@ -338,8 +384,11 @@ export function PerformanceChart({
           cx={activePoint.x}
           cy={activePoint.y}
           r="4"
-          fill={stroke}
-          style={{ opacity: drawn ? 1 : 0, transition: "opacity 300ms ease-out 700ms" }}
+          fill={allSeries[0]?.stroke ?? strokeDefault}
+          style={{
+            opacity: drawn ? 1 : 0,
+            transition: "opacity 300ms ease-out 700ms",
+          }}
         />
       </svg>
 
@@ -350,7 +399,8 @@ export function PerformanceChart({
       <figcaption className="mt-2 flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-wider text-pv-muted">
         <span>{formatDay(geometry.firstTimestamp)}</span>
         <span className="text-pv-text">
-          {formatDay(activePoint.timestamp)} · {activePoint.value.toFixed(2)}{valueSuffix} · {formatCoverage(activePoint.coverage)}
+          {formatDay(activePoint.timestamp)} · {activePoint.value.toFixed(2)}
+          {valueSuffix}
         </span>
         <span>{formatDay(geometry.lastTimestamp)}</span>
       </figcaption>
@@ -371,9 +421,12 @@ export function PerformanceChart({
               <caption className="py-1 text-left text-pv-muted">{label}</caption>
               <thead>
                 <tr className="text-pv-muted">
-                  <th scope="col" className="py-1 pr-3 font-semibold">Date</th>
-                  <th scope="col" className="py-1 pr-3 font-semibold">Value</th>
-                  <th scope="col" className="py-1 font-semibold">Coverage</th>
+                  <th scope="col" className="py-1 pr-3 font-semibold">
+                    Date
+                  </th>
+                  <th scope="col" className="py-1 font-semibold">
+                    Value
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -391,6 +444,25 @@ export function PerformanceChart({
                 Showing the last {table.rows.length} of {table.total} points.
               </p>
             )}
+          </div>
+        )}
+        {statementManifest && manifestVerification && (
+          <div
+            data-testid="statement-manifest-summary"
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-pv-muted"
+          >
+            <span className={manifestVerification.ok ? "text-pv-accent" : "text-pv-danger"}>
+              {manifestVerification.ok ? "Statement verified" : "Statement mismatch"}
+            </span>
+            <span>
+              Realized: {formatAtomicUsdc(manifestVerification.recomputedTotals.realizedPnlAtomic)} {statementManifest.priceConventions.asset}
+            </span>
+            <span>
+              Coverage: {statementManifest.coverage.settledPositions} settled / {statementManifest.coverage.totalPositions} total
+            </span>
+            <span title={statementManifest.digest}>
+              Digest: {statementManifest.digest.slice(0, 12)}…
+            </span>
           </div>
         )}
       </div>

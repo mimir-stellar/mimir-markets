@@ -76,6 +76,13 @@ impl MimirSquad {
         pool::cancel_market(&env, market_id)
     }
 
+    /// Read-only preview of the refundable liabilities that `cancel_market`
+    /// would create for `market_id`. Performs no value movement or authority
+    /// changes.
+    pub fn preview_cancel_market(env: Env, market_id: u64) -> Result<CancelPreview, Error> {
+        pool::preview_cancel_market(&env, market_id)
+    }
+
     /// Pull-based payout. Solidity used `msg.sender`; Soroban has no equivalent
     /// for a top-level call, so the claimant is an explicit argument that must
     /// authorize. Returns the net amount transferred.

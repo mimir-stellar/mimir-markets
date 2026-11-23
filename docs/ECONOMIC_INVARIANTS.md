@@ -79,6 +79,25 @@ established gross meaning for `total_return_multiple` and gains a `fee_adjusted`
 marker, so the fee-adjusted and fee-unknown cases stay distinguishable without
 renaming an event or an envelope field.
 
+### Settlement explanation
+
+The settlement explanation shown to a participant breaks a payout into its
+components — principal, gain, fees and claimable amount — each as a separate
+labelled integer atomic value. The four figures are derived from the same
+principal-safe split above, so they reconcile exactly:
+
+- `principal + gain = gross`, where `gain = max(gross - principal, 0)`.
+- `fees` is the profit-only fee taken from `gain` using the claim's snapshot,
+  and `claimable = gross - fees`, which is the `netPayout` preview.
+- All values are exact integers at 7 decimals; no floating-point rounding is
+  applied, and the explanation never recomputes fees from live policy.
+- A figure whose underlying observation is unresolved (snapshot `loading`,
+  `unavailable` or `invalid`) is labelled as unresolved rather than shown as a
+  definitive amount, and the claimable figure is then presented as a ceiling.
+- Tests: `tests/node/settlement-explanation.test.ts` covers the component split,
+  the sum identity, the zero-gain (break-even) boundary, and an unresolved
+  snapshot being labelled rather than asserted.
+
 ### Settlement conservation
 
 `conservation_holds_across_every_verdict` asserts, for every `WinnerSide`, that
