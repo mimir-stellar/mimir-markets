@@ -68,6 +68,13 @@ Before opening a PR, run the TypeScript typechecker:
 npm run typecheck
 ```
 
+## Before packaging
+
+`npm pack` runs `npm run prepack` to check tracked files and directories for
+case-only collisions in the Git index. For example, tracking both `Docs/a.md`
+and `docs/b.md` reports `Case-only tracked path collision: "Docs" / "docs"`.
+Rename the conflicting paths in Git and rerun the check.
+
 ## Verified package script contract
 
 All contributor, CI, and release scripts in `package.json` are pinned against real targets on disk by [`lib/ops/package-script-contract.ts`](lib/ops/package-script-contract.ts) and verified offline by:

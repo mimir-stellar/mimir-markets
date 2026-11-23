@@ -1,5 +1,9 @@
 /**
- * Dedupe helpers for the market-creator worker.
+ * Market-creator worker entry point.
+ *
+ * Checkpoint binding: index checkpoints must match the configured network and
+ * contract identities before they are trusted. A mismatched checkpoint is
+ * rejected and the last trusted projection is preserved.
  *
  * Extracted from index.ts so they can be unit-tested offline. Behaviour is
  * unchanged: the worker imports these and the tests pin the normalization and
@@ -53,7 +57,12 @@ import { fetchLaunchEvents, fetchWeatherEvents, type LaunchEvent, type WeatherEv
 import { fetchCryptoEvents, fetchSportsEvents, fetchStockEvents, type CryptoEvent, type SportEvent, type StockEvent } from "./sources";
 import { extractUsdThresholds, cryptoThresholdReason, formatUsd } from "./thresholds";
 import { filterDuplicateCandidates, buildCandidateSignature, normalizeComparableText, normalizeResolutionUrl, type ExistingClaimSignature } from "./dedupe";
-import { draftClaimCandidates } from "./drafting";
+import {
+  draftClaimCandidates as draftCandidatesFromPrompt,
+  reviewStatementRevision,
+  verifyStatementForSigning,
+  type StatementRevisionReview,
+} from "./drafting";
 import {
   cancelClaim,
   createClaim as createClaimOnChain,
@@ -108,9 +117,7 @@ import { reconcileSettlements } from "../../lib/server/settlement-index";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const CONTRACT_ID         = requireMarketContractId();
-const CREATOR_STAKE_USDC = Number(
-  process.env.CREATOR_STAKE_USDC ?? "2"
-);
+const CREATOR_STAKE_USDC = Number(process.env.CREATOR_STAKE_USDC ?? "2");
 const MAX_CLAIMS_PER_RUN  = Number(process.env.MAX_CLAIMS_PER_RUN ?? "5");
 const MAX_ACTIVE_CLAIMS   = Number(process.env.MAX_ACTIVE_CLAIMS ?? "30");
 const RUN_INTERVAL_HOURS  = Number(process.env.RUN_INTERVAL_HOURS ?? "6");
@@ -231,12 +238,10 @@ const PREFLIGHT_DELAY_MS = Number(process.env.MARKET_CREATOR_PREFLIGHT_DELAY_MS 
 requireEnv(["CREATOR_SECRET"]);
 requireAnyLLMKey();
 
-// ── Clients ───────────────────────────────────────────────────────────────────
-const CREATOR        = getCreatorWallet();
-const CREATOR_ADDR   = CREATOR.address;
 const CREATOR_PAYER  = payingWalletFor(CREATOR);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
 
 // ── Source fetchers ───────────────────────────────────────────────────────────
 
@@ -272,6 +277,10 @@ async function applyCouncilPreflight(candidates: ClaimCandidate[]): Promise<Clai
       );
       return null;
     });
+    if (!result) continue;
+    kept.push({ candidate, score: result.score });
+  }
+  return kept.map((entry) => entry.candidate);
 
     if (!result || result.opinions.length === 0 || result.averageScore === null) {
       console.warn(
@@ -477,7 +486,24 @@ function fetchStockEvents(): { text: string; events: StockEvent[] } {
 async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
   // Floor the WHOLE expression: sports candidates get kickoff-pinned
   // fractional deadlineHours, and the contract takes whole seconds.
-  const deadline = Math.floor(Date.now() / 1000 + candidate.deadlineHours * 3600);
+  const deadline =
+    typeof candidate.deadlineSeconds === "number" && Number.isFinite(candidate.deadlineSeconds)
+      ? candidate.deadlineSeconds
+      : Math.floor(Date.now() / 1000 + candidate.deadlineHours * 3600);
+
+  const reviewCheck = verifyStatementForSigning(
+    {
+      ...candidate,
+      deadline: candidate.deadline ?? deadline,
+    },
+    candidate.revisionReview,
+  );
+  if (!reviewCheck.ok) {
+    console.warn(
+      `[market-creator] Reject signing — statement revision verification failed (${reviewCheck.reason}): ${reviewCheck.error ?? "reviewed statement changed"}`,
+    );
+    return null;
+  }
 
   const params: CreateClaimParams = {
     question:              candidate.question,
@@ -678,7 +704,10 @@ async function recordProposal(
   candidate: ClaimCandidate,
   disposition: "create" | "shadow",
 ): Promise<string | null> {
-  const deadline = Math.floor(Date.now() / 1000) + Math.round(candidate.deadlineHours * 3600);
+  const deadline =
+    typeof candidate.deadlineSeconds === "number" && Number.isFinite(candidate.deadlineSeconds)
+      ? candidate.deadlineSeconds
+      : Math.floor(Date.now() / 1000) + Math.round(candidate.deadlineHours * 3600);
   const mode = toCanonicalMode({
     marketType: candidate.marketType,
     oddsMode: "pool",
@@ -712,7 +741,7 @@ async function recordProposal(
         maxChallengers: DEFAULT_MAX_CHALLENGERS,
         challengerPayoutBps: 0,
       },
-      context_pack_hash: null,
+      context_pack_hash: candidate.statementDigest ?? null,
       resolution_url: candidate.resolutionUrl,
       settlement_rule: candidate.settlementRule,
       deadline,
@@ -861,10 +890,35 @@ async function run(): Promise<void> {
     return;
   }
 
-  const approvedCandidates = await applyCouncilPreflight(candidates);
+  const preflightCandidates = await applyCouncilPreflight(candidates);
+
+  if (preflightCandidates.length === 0) {
+    console.log("[market-creator] No candidates passed council preflight this run.");
+    return;
+  }
+
+  const approvedCandidates: ClaimCandidate[] = [];
+  for (const candidate of preflightCandidates) {
+    const deadlineSeconds = Math.floor(Date.now() / 1000 + candidate.deadlineHours * 3600);
+    try {
+      const review = reviewStatementRevision({
+        ...candidate,
+        deadline: deadlineSeconds,
+      });
+      approvedCandidates.push({
+        ...review.candidate,
+        deadlineSeconds,
+        revisionReview: review,
+      });
+    } catch (err) {
+      console.warn(
+        `[market-creator] Drop candidate failing statement revision review: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   if (approvedCandidates.length === 0) {
-    console.log("[market-creator] No candidates passed council preflight this run.");
+    console.log("[market-creator] No candidates passed statement revision review this run.");
     return;
   }
 
@@ -913,7 +967,15 @@ async function run(): Promise<void> {
       categoryEnabled: isCategoryEnabled(candidate.category),
     });
     if (!categoryGate.allowed) {
-      console.log(`[market-creator] Per-category cap blocks this candidate — ${categoryGate.blockedBy}`);
+      const decisionCode =
+        categoryGate.reason === "cap_exceeded"
+          ? "category_budget_exhausted"
+          : categoryGate.reason === "category_disabled"
+            ? "category_disabled"
+            : "category_cap_invalid";
+      console.log(
+        `[market-creator] Per-category cap blocks this candidate [${decisionCode}] — ${categoryGate.blockedBy}`,
+      );
       continue;
     }
 
@@ -1008,4 +1070,3 @@ main().catch((err) => {
   console.error("[market-creator] Fatal:", err);
   process.exit(1);
 });
-

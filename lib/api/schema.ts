@@ -293,6 +293,10 @@ export interface FieldSpec {
   min?: number;
   /** Strings: allowed values. */
   oneOf?: readonly string[];
+  /** Arrays: maximum number of items. */
+  maxItems?: number;
+  /** Arrays: maximum total UTF-8 bytes across string items. */
+  maxTotalBytes?: number;
 }
 
 export type ShapeSpec = Record<string, FieldSpec>;
@@ -340,6 +344,22 @@ export function checkShape(payload: unknown, spec: ShapeSpec): ShapeResult {
       errors.push(`${field} must be a ${rule.type}`);
       continue;
     }
+    if (Array.isArray(value)) {
+      if (rule.maxItems !== undefined && value.length > rule.maxItems) {
+        errors.push(`${field} must have at most ${rule.maxItems} items`);
+      }
+      if (rule.maxTotalBytes !== undefined) {
+        let totalBytes = 0;
+        for (const item of value) {
+          if (typeof item === "string") {
+            totalBytes += new TextEncoder().encode(item).length;
+          }
+        }
+        if (totalBytes > rule.maxTotalBytes) {
+          errors.push(`${field} must total at most ${rule.maxTotalBytes} bytes`);
+        }
+      }
+    }
     if (typeof value === "string") {
       if (rule.min !== undefined && value.length < rule.min) {
         errors.push(`${field} must be at least ${rule.min} characters`);
@@ -382,6 +402,49 @@ export function schemaVersionHeaders(): Record<string, string> {
   return { [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION) };
 }
 
+// ── Conditional read responses ────────────────────────────────────────────────
+
+/**
+ * Visibility of a market read view. Private (invite-scoped) views must never
+ * share a cache key with public ones, so visibility is part of the key input.
+ */
+export type ReadVisibility = "public" | "invite";
+
+export interface SettlementIdentity {
+  marketId: string;
+  settlementId: string;
+  visibility: ReadVisibility;
+  /** Invite scope identifier. Required when visibility is "invite". */
+  inviteScope?: string;
+}
+
+/**
+ * Build the cache-key material for a settled-market read. Visibility and invite
+ * scope are bound into the identity so a private response cannot be served to,
+ * or collide with, a public one.
+ */
+export function settlementCacheKey(id: SettlementIdentity): string {
+  if (id.visibility === "invite" && !id.inviteScope) {
+    throw new Error("invite-scoped settlement identity requires inviteScope");
+  }
+  const scope = id.visibility === "invite" ? `invite:${id.inviteScope}` : "public";
+  return `v${API_SCHEMA_VERSION}|${id.marketId}|${id.settlementId}|${scope}`;
+}
+
+/**
+ * Headers for a conditional response. Private views are marked `private` so
+ * shared caches never store them, and the ETag is derived from the cache key.
+ */
+export function conditionalReadHeaders(id: SettlementIdentity, etag: string): Record<string, string> {
+  const cacheControl = id.visibility === "invite" ? "private, no-cache" : "public, max-age=0, must-revalidate";
+  return {
+    ...schemaVersionHeaders(),
+    ETag: `"${etag}"`,
+    "Cache-Control": cacheControl,
+    Vary: "Accept-Encoding",
+  };
+}
+
 // ── Agent API Drift Check ─────────────────────────────────────────────────────
 
 /**
@@ -394,12 +457,7 @@ export function schemaVersionHeaders(): Record<string, string> {
 export const AGENT_API_REQUEST_SPEC: ShapeSpec = {
   version: { type: "string", required: true, oneOf: ["v1"] },
   agentId: { type: "string", required: true, min: 3, max: 64 },
-  action: { type: "string", required: true, oneOf: ["register", "heartbeat", "proposeMarket", "createMarket", "publishReasoning", "vote", "stake", "listPositions", "listEarnings", "revoke", "dryRun"] },
-  idempotencyKey: { type: "string", required: true, min: 1, max: 128 },
-  nonce: { type: "string", required: true, min: 1, max: 128 },
-  signedAt: { type: "integer", required: true },
-  body: { type: "object", required: true },
-  signature: { type: "string", required: true, min: 16, max: 256 },
+  action: { type: "string", required: true }
 };
 
 /**

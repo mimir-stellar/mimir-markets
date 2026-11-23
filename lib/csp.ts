@@ -233,14 +233,8 @@ export function validateCSP(csp: string): CSPValidationResult {
   }
 
   const frameSrc = parsed.get("frame-src")?.join(" ") ?? "";
-  if (/frame-src\s+https?:\/\//.test(`frame-src ${frameSrc}`) || frameSrc.includes("https:")) {
-    // Allow only explicit origins, not bare https: scheme
-    if (frameSrc.includes("https:") && !frameSrc.includes("https://wallet.xbull.app") && !frameSrc.includes("https://albedo.link")) {
-      // Actually we want to ensure no bare https: wildcard
-    }
-    if (/\bhttps:\b/.test(frameSrc)) {
-      errors.push(`frame-src must not use bare https: wildcard, only explicit origins`);
-    }
+  if (/\bhttps:\b/.test(frameSrc)) {
+    errors.push(`frame-src must not use bare https: wildcard, only explicit origins`);
   }
   if (!frameSrc.includes("https://wallet.xbull.app") || !frameSrc.includes("https://albedo.link")) {
     errors.push(`frame-src must allow wallet.xbull.app and albedo.link`);
@@ -253,12 +247,9 @@ export function validateCSP(csp: string): CSPValidationResult {
 
   const imgSrc = parsed.get("img-src")?.join(" ") ?? "";
   // Tighter than before: should not allow bare https: wildcard
-  if (/\bhttps:\b/.test(imgSrc) && !imgSrc.includes("https://api.dicebear.com")) {
-    // If it contains bare https: token, that's too broad
-    const tokens = imgSrc.split(/\s+/);
-    if (tokens.includes("https:")) {
-      errors.push(`img-src must not use bare https: wildcard, use explicit origins`);
-    }
+  const imgTokens = imgSrc.split(/\s+/);
+  if (imgTokens.includes("https:")) {
+    errors.push(`img-src must not use bare https: wildcard, use explicit origins`);
   }
 
   const connectSrc = parsed.get("connect-src")?.join(" ") ?? "";
@@ -297,23 +288,5 @@ export function validateCSP(csp: string): CSPValidationResult {
  * Fail-closed fallback CSP used when the real CSP cannot be built.
  * Deny everything, no framing, no objects.
  */
-export const FAIL_CLOSED_CSP = "default-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests";
-
-/**
- * Security headers matrix — the complete set expected on every route.
- * Includes CSP plus additional hardening headers.
- */
-export const SECURITY_HEADERS = {
-  "Content-Security-Policy": buildCSP(),
-  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-  "X-Frame-Options": "DENY",
-  "X-Content-Type-Options": "nosniff",
-  "Referrer-Policy": "strict-origin-when-cross-origin",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(self)",
-  "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
-  "Cross-Origin-Resource-Policy": "same-origin",
-  "X-DNS-Prefetch-Control": "off",
-  "X-Permitted-Cross-Domain-Policies": "none",
-} as const;
-
-export type SecurityHeaderKey = keyof typeof SECURITY_HEADERS;
+export const FAIL_CLOSED_CSP =
+  "default-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests";

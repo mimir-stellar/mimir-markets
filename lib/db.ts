@@ -8,6 +8,13 @@ import type { AgentTradeRow } from "@/lib/agents/performance";
 import type { AgentRecord } from "@/lib/agents/registry";
 import type { SpendPermissionRecord } from "@/lib/agents/spend-permissions";
 import type { CopyAuditRecord, CopyPermission } from "@/lib/copy-trading";
+import {
+  enrichProposalWithExpiry,
+  resolveProposalExpiryPolicyRevision,
+  toCanonicalUtc,
+  type EnrichedProposalRow,
+  type ProposalExpiryOptions,
+} from "@/lib/signed-window";
 
 /**
  * ADDRESS INVARIANT — read before touching any statement below.
@@ -477,6 +484,8 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_resource ON payments_v2(resource)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_seller ON payments_v2(seller)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_payments_v2_tx ON payments_v2(network, transaction_hash, resource)" },
+  { sql: "ALTER TABLE payments_v2 ADD COLUMN IF NOT EXISTS resource_digest TEXT" },
+  { sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_v2_digest ON payments_v2(network, payment_identifier, resource_digest)" },
   // The oracle's classic USDC bonus transfer is outside Soroban settlement.
   // Reserve once before submission; an ambiguous failure stays held for manual
   // reconciliation rather than risking a second transfer after a restart.
@@ -608,6 +617,18 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_disposition ON market_proposals(disposition)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_review_status ON market_proposals(review_status)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_market_proposals_queued ON market_proposals(queued_at) WHERE review_status = 'queued'" },
+  { sql: `CREATE TABLE IF NOT EXISTS proposal_review_history (
+    id BIGSERIAL PRIMARY KEY,
+    proposal_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    recorded_at BIGINT NOT NULL,
+    superseded_by_proposal_id TEXT,
+    actor_id TEXT,
+    private_note TEXT
+  )` },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_proposal_review_history_proposal ON proposal_review_history(proposal_id, recorded_at DESC, id DESC)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_proposal_review_history_decision ON proposal_review_history(decision, recorded_at DESC)" },
   { sql: `CREATE TABLE IF NOT EXISTS market_series (
     series_id TEXT PRIMARY KEY,
     schema_version SMALLINT NOT NULL DEFAULT 1,
@@ -1474,6 +1495,18 @@ export function getBigInt(value: unknown): bigint {
   return 0n;
 }
 
+export const REVIEW_STATUSES = [
+  "queued",
+  "in_review",
+  "approved",
+  "rejected",
+  "cancelled",
+  "stale",
+  "dependency_failed",
+] as const;
+
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
 export interface MarketProposalRow {
   proposal_id: string;
   created_at: number;
@@ -1496,7 +1529,7 @@ export interface MarketProposalRow {
   blocked_by: string | null;
   claim_id: number | null;
   /** Explicit review queue state. */
-  review_status: "queued" | "in_review" | "approved" | "rejected" | "cancelled" | "stale" | "dependency_failed";
+  review_status: ReviewStatus;
   /** When the proposal entered the review queue. */
   queued_at: number | null;
   /** When review was claimed by a reviewer. */
@@ -1507,6 +1540,100 @@ export interface MarketProposalRow {
   reviewer: string | null;
   /** Reason for cancellation, staleness, or dependency failure. */
   failure_reason: string | null;
+}
+
+const PROPOSAL_REVIEW_SELECT_COLUMNS = `
+  proposal_id, created_at, question, creator_position, counter_position, category,
+  subject_type, settlement_mode, product_modifiers, mode_rationale, stake_policy,
+  context_pack_hash, resolution_url, settlement_rule, deadline, quality_score,
+  preflight_verdict, disposition, blocked_by, claim_id, review, review_status,
+  queued_at, claimed_at, reviewed_at, reviewer, failure_reason
+`;
+
+/**
+ * Look up a single proposal by its `proposal_id`.
+ * Returns `null` when the proposal is absent so callers can distinguish
+ * an absent proposal from an expired one.
+ */
+export async function getProposalById(
+  proposalId: string,
+): Promise<Record<string, unknown> | null> {
+  const pool = await getDb();
+  const result = await execute(pool, {
+    sql: `SELECT ${PROPOSAL_REVIEW_SELECT_COLUMNS}
+          FROM market_proposals
+          WHERE proposal_id = ?
+          LIMIT 1`,
+    args: [proposalId],
+  });
+  return (result.rows[0] as Record<string, unknown> | undefined) ?? null;
+}
+
+export async function listProposalsForReview(
+  opts: {
+    status?: ReviewStatus | null;
+    limit?: number;
+    offset?: number;
+  } & ProposalExpiryOptions = {},
+): Promise<{
+  proposals: Array<EnrichedProposalRow<Record<string, unknown>>>;
+  limit: number;
+  offset: number;
+  evaluatedAtUtc: string;
+  policyRevision: string;
+}> {
+  const pool = await getDb();
+  const rawLimit =
+    typeof opts.limit === "number" && Number.isFinite(opts.limit)
+      ? Math.trunc(opts.limit)
+      : 50;
+  const rawOffset =
+    typeof opts.offset === "number" && Number.isFinite(opts.offset)
+      ? Math.trunc(opts.offset)
+      : 0;
+  const limit = Math.min(Math.max(rawLimit, 1), 200);
+  const offset = Math.max(rawOffset, 0);
+
+  let whereClause = "";
+  const args: unknown[] = [];
+  if (opts.status) {
+    whereClause = "WHERE review_status = ?";
+    args.push(opts.status);
+  }
+  args.push(limit, offset);
+
+  const result = await execute(pool, {
+    sql: `SELECT ${PROPOSAL_REVIEW_SELECT_COLUMNS}
+          FROM market_proposals
+          ${whereClause}
+          ORDER BY queued_at DESC NULLS LAST, created_at DESC
+          LIMIT ? OFFSET ?`,
+    args,
+  });
+
+  const nowMs =
+    typeof opts.now === "number" && Number.isFinite(opts.now)
+      ? Math.trunc(opts.now)
+      : Date.now();
+  const evaluatedAtUtc = toCanonicalUtc(nowMs);
+  const policyRevision = resolveProposalExpiryPolicyRevision(
+    opts.policyRevision ?? process.env.PROPOSAL_EXPIRY_POLICY_REVISION,
+  );
+  const expiryOptions: ProposalExpiryOptions = {
+    now: nowMs,
+    reviewTtlMs: opts.reviewTtlMs,
+    policyRevision,
+  };
+
+  return {
+    proposals: result.rows.map((row) =>
+      enrichProposalWithExpiry(row as Record<string, unknown>, expiryOptions),
+    ),
+    limit,
+    offset,
+    evaluatedAtUtc,
+    policyRevision,
+  };
 }
 
 /**
@@ -1680,6 +1807,59 @@ export async function markProposalDependencyFailed(proposalId: string, reason: s
   return (result.rowCount ?? 0) > 0;
 }
 
+export interface ListProposalsOptions {
+  status?: ReviewStatus | null;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListProposalsResult {
+  proposals: MarketProposalRow[];
+  limit: number;
+  offset: number;
+}
+
+/**
+ * List proposals for review with optional status filtering and pagination.
+ */
+export async function listProposalsForReview(
+  opts: ListProposalsOptions = {}
+): Promise<ListProposalsResult> {
+  const pool = await getDb();
+  let limit = typeof opts.limit === "number" && Number.isFinite(opts.limit) ? Math.trunc(opts.limit) : 50;
+  limit = Math.max(1, Math.min(200, limit));
+  let offset = typeof opts.offset === "number" && Number.isFinite(opts.offset) ? Math.trunc(opts.offset) : 0;
+  offset = Math.max(0, offset);
+
+  let sql = "SELECT * FROM market_proposals";
+  const args: unknown[] = [];
+  if (opts.status) {
+    sql += " WHERE review_status = ?";
+    args.push(opts.status);
+  }
+  sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  args.push(limit, offset);
+
+  const result = await execute(pool, { sql, args });
+  return {
+    proposals: result.rows as unknown as MarketProposalRow[],
+    limit,
+    offset,
+  };
+}
+
+/**
+ * Fetch a single proposal by its proposal_id.
+ */
+export async function getProposal(proposalId: string): Promise<MarketProposalRow | null> {
+  const pool = await getDb();
+  const result = await execute(pool, {
+    sql: "SELECT * FROM market_proposals WHERE proposal_id = ?",
+    args: [proposalId],
+  });
+  return (result.rows[0] as unknown as MarketProposalRow) ?? null;
+}
+
 /** Link a published claim back to the proposal that produced it. */
 export async function attachProposalClaimId(proposalId: string, claimId: number): Promise<void> {
   const pool = await getDb();
@@ -1687,6 +1867,123 @@ export async function attachProposalClaimId(proposalId: string, claimId: number)
     sql: "UPDATE market_proposals SET claim_id = ? WHERE proposal_id = ?",
     args: [claimId, proposalId],
   });
+}
+
+/**
+ * Append a decision entry to `proposal_review_history`.
+ *
+ * Records accepted, rejected, superseded, and expired decisions with a stable
+ * machine-readable `reasonCode`. Internal-only fields (`actorId`, `privateNote`)
+ * are stored for operator auditability and stripped from public views.
+ */
+export async function recordProposalReviewDecision(
+  input: RecordProposalReviewDecisionInput,
+): Promise<ProposalReviewHistoryRecord> {
+  if (!input.proposalId || typeof input.proposalId !== "string") {
+    throw new Error("proposalId is required");
+  }
+  if (!isProposalReviewDecision(input.decision)) {
+    throw new Error(`Invalid proposal review decision: ${String(input.decision)}`);
+  }
+  const reasonCode: ProposalReviewReasonCode =
+    input.reasonCode ?? defaultReasonCodeForDecision(input.decision);
+  if (!isProposalReviewReasonCode(reasonCode)) {
+    throw new Error(`Invalid proposal review reason code: ${String(reasonCode)}`);
+  }
+
+  const pool = await getDb();
+  const recordedAt = input.recordedAt ?? Date.now();
+  const supersededByProposalId = input.supersededByProposalId ?? null;
+  const actorId = input.actorId ?? null;
+  const privateNote = input.privateNote ?? null;
+
+  const result = await execute(pool, {
+    sql: `INSERT INTO proposal_review_history (
+            proposal_id, decision, reason_code, recorded_at,
+            superseded_by_proposal_id, actor_id, private_note
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          RETURNING id, proposal_id, decision, reason_code, recorded_at,
+                    superseded_by_proposal_id, actor_id, private_note`,
+    args: [
+      input.proposalId,
+      input.decision,
+      reasonCode,
+      recordedAt,
+      supersededByProposalId,
+      actorId,
+      privateNote,
+    ],
+  });
+
+  const row = result.rows[0] as Record<string, unknown> | undefined;
+  return {
+    id: row ? getNumber(row.id) : 0,
+    proposalId: row ? getString(row.proposal_id) : input.proposalId,
+    decision: (row ? getString(row.decision) : input.decision) as ProposalReviewDecision,
+    reasonCode: (row ? getString(row.reason_code) : reasonCode) as ProposalReviewReasonCode,
+    recordedAt: row ? getNumber(row.recorded_at) : recordedAt,
+    supersededByProposalId: row ? getNullableString(row.superseded_by_proposal_id) : supersededByProposalId,
+    actorId: row ? getNullableString(row.actor_id) : actorId,
+    privateNote: row ? getNullableString(row.private_note) : privateNote,
+  };
+}
+
+/**
+ * List proposal review history entries with optional filters and pagination.
+ *
+ * Returns full internal records; callers serving public endpoints MUST project
+ * each entry through `toPublicProposalReviewHistoryEntry`.
+ */
+export async function listProposalReviewHistory(opts: {
+  proposalId?: string | null;
+  decision?: ProposalReviewDecision | null;
+  reasonCode?: ProposalReviewReasonCode | null;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<{ entries: ProposalReviewHistoryRecord[]; limit: number; offset: number }> {
+  const pool = await getDb();
+  const limit = Math.min(Math.max(1, Math.trunc(opts.limit ?? 50)), 200);
+  const offset = Math.max(0, Math.trunc(opts.offset ?? 0));
+
+  const conditions: string[] = [];
+  const args: unknown[] = [];
+
+  if (opts.proposalId) {
+    conditions.push("proposal_id = ?");
+    args.push(opts.proposalId);
+  }
+  if (opts.decision) {
+    conditions.push("decision = ?");
+    args.push(opts.decision);
+  }
+  if (opts.reasonCode) {
+    conditions.push("reason_code = ?");
+    args.push(opts.reasonCode);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const result = await execute(pool, {
+    sql: `SELECT id, proposal_id, decision, reason_code, recorded_at,
+                 superseded_by_proposal_id, actor_id, private_note
+          FROM proposal_review_history
+          ${where}
+          ORDER BY recorded_at DESC, id DESC
+          LIMIT ? OFFSET ?`,
+    args: [...args, limit, offset],
+  });
+
+  const entries: ProposalReviewHistoryRecord[] = result.rows.map((row) => ({
+    id: getNumber(row.id),
+    proposalId: getString(row.proposal_id),
+    decision: getString(row.decision) as ProposalReviewDecision,
+    reasonCode: getString(row.reason_code) as ProposalReviewReasonCode,
+    recordedAt: getNumber(row.recorded_at),
+    supersededByProposalId: getNullableString(row.superseded_by_proposal_id),
+    actorId: getNullableString(row.actor_id),
+    privateNote: getNullableString(row.private_note),
+  }));
+
+  return { entries, limit, offset };
 }
 
 /**
@@ -1718,6 +2015,66 @@ export async function getProposalPrecision(): Promise<{
     reviewed,
     agreed,
     precisionBps: reviewed > 0 ? Math.round((agreed * 10_000) / reviewed) : null,
+  };
+}
+
+/**
+ * All valid review-queue states.
+ * Used by the review route to validate the `status` query/body parameter
+ * without coupling the validation logic to the MarketProposalRow type literal.
+ */
+export const REVIEW_STATUSES = [
+  "queued",
+  "in_review",
+  "approved",
+  "rejected",
+  "cancelled",
+  "stale",
+  "dependency_failed",
+] as const;
+
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
+/**
+ * List market proposals queued for review, optionally filtered by status.
+ *
+ * Pagination parameters are clamped: limit to [1, 200] (default 50), offset
+ * to [0, ∞) (default 0). NaN values fall back to their defaults so that a
+ * caller passing a non-numeric query string still gets a valid response.
+ */
+export async function listProposalsForReview(opts: {
+  status?: ReviewStatus | null;
+  limit?: number;
+  offset?: number;
+}): Promise<{ proposals: MarketProposalRow[]; limit: number; offset: number }> {
+  const pool = await getDb();
+
+  const rawLimit = opts.limit;
+  const rawOffset = opts.offset;
+
+  const limit = Number.isFinite(rawLimit) && !Number.isNaN(rawLimit)
+    ? Math.max(1, Math.min(200, Math.trunc(rawLimit!)))
+    : 50;
+  const offset = Number.isFinite(rawOffset) && !Number.isNaN(rawOffset)
+    ? Math.max(0, Math.trunc(rawOffset!))
+    : 0;
+
+  let sql: string;
+  let args: unknown[];
+
+  if (opts.status != null) {
+    sql = `SELECT * FROM market_proposals WHERE review_status = $1 ORDER BY queued_at ASC LIMIT $2 OFFSET $3`;
+    args = [opts.status, limit, offset];
+  } else {
+    sql = `SELECT * FROM market_proposals ORDER BY queued_at ASC LIMIT $1 OFFSET $2`;
+    args = [limit, offset];
+  }
+
+  const result = await pool.query(sql, args);
+  return {
+    proposals: (result.rows ?? []) as MarketProposalRow[],
+    limit,
+    offset,
   };
 }
 

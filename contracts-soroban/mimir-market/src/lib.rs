@@ -58,3 +58,5 @@ mod test_budgets;
 mod test_oracle_timelock;
 #[config(test)]
 mod test_creator_index;
+#[cfg(test)]
+mod test_fee_policy_compat;

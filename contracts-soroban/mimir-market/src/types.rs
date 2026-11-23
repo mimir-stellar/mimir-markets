@@ -1,7 +1,7 @@
 //! Value types for the Mimir market. Mirrors the structs and enums of
 //! `contracts/MimirV2.sol`.
 
-use soroban_sdk::{contracterror, contracttype, Address, BytesN, String};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, String, Symbol, Vec};
 
 // ── Limits (mirror MimirV2.sol) ──────────────────────────────────────────────
 
@@ -55,6 +55,18 @@ pub const FEE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 /// Same delay as fee policy so participants get equal notice of trust-boundary
 /// changes that control settlement.
 pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
+
+/// Post-deadline resolution expiration window, in seconds.
+///
+/// `0` means there is no post-deadline resolution expiration or permissionless
+/// timeout fallback for `Active` claims: oracle-only resolution remains
+/// authoritative after `deadline`, while unchallenged `Open` claims can still
+/// be permissionlessly cancelled via `transition_deadline` once `deadline` is
+/// reached.
+pub const RESOLUTION_EXPIRY_SECONDS: u64 = 0;
+
+/// Maximum valid oracle confidence score accepted by `resolve_claim` (0..=100).
+pub const MAX_CONFIDENCE: u32 = 100;
 
 /// Upper bound on the byte length of an invite key.
 ///
@@ -224,6 +236,49 @@ pub struct FeeSnapshot {
     pub agent_owner_fee_bps: u32,
     pub platform_recipient: Option<Address>,
     pub agent_owner_recipient: Option<Address>,
+}
+
+/// Current schema version returned by `get_fee_policy_compatibility`.
+pub const FEE_POLICY_COMPAT_VERSION: u32 = 1;
+
+/// Hard upper bound on the number of field identifiers returned in
+/// `FeePolicyCompatibility::supported_fields`.
+pub const FEE_POLICY_COMPAT_MAX_FIELDS: u32 = 5;
+
+/// Rounding semantics applied by `fees::quote_fees` and `fees::apply_fees`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FeeRoundingMode {
+    /// Each fee leg is `floor(profit * bps / BPS_DIVISOR)` computed
+    /// independently; the fractional remainder stays with the participant
+    /// (`owed = gross - fees_taken`), so principal is never reduced and fee
+    /// rounding leaves no dust in escrow.
+    FloorPerLegParticipantRemainder = 0,
+}
+
+/// Bounded fee-policy compatibility descriptor for generated clients.
+///
+/// Returned by `get_fee_policy_compatibility` in O(1) instance storage reads so
+/// generated clients and indexers can verify supported policy fields, hard
+/// caps, timelock, escrow scale, rounding semantics, and live/pending policy
+/// revision without mutating state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeePolicyCompatibility {
+    pub schema_version: u32,
+    pub supported_fields: Vec<Symbol>,
+    pub max_total_fee_bps: u32,
+    pub bps_divisor: i128,
+    pub fee_timelock_seconds: u64,
+    pub usdc_decimals: u32,
+    pub min_stake: i128,
+    pub rounding_mode: FeeRoundingMode,
+    pub profit_only: bool,
+    pub pull_based_payouts: bool,
+    pub exact_usdc_escrow: bool,
+    pub current_revision: u64,
+    pub current_total_fee_bps: u32,
+    pub has_pending_policy: bool,
 }
 
 // ── Claim ────────────────────────────────────────────────────────────────────
@@ -412,6 +467,37 @@ pub struct PlatformStats {
     pub fees_claimed: i128,
 }
 
+// ── Resolution expiration policy ─────────────────────────────────────────────
+
+/// Read-only descriptor of the currently approved oracle resolution and claim
+/// expiration policy enforced on chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolutionExpirationPolicy {
+    /// Whether active claims can only be resolved by the configured oracle.
+    pub oracle_only_resolution: bool,
+    /// Anti-sniping buffer (seconds) before `deadline` during which new
+    /// challenges are rejected (`CHALLENGE_LOCK_SECONDS`).
+    pub challenge_lock_seconds: u64,
+    /// Timelock delay (seconds) for rotating the oracle (`ORACLE_TIMELOCK_SECONDS`).
+    pub oracle_timelock_seconds: u64,
+    /// Post-deadline resolution expiration window in seconds.
+    /// `0` indicates no post-deadline expiry / no permissionless timeout
+    /// fallback for active claims; oracle resolution remains authoritative.
+    pub resolution_expiry_seconds: u64,
+    /// Whether an unchallenged `Open` claim at or after `deadline` can be
+    /// permissionlessly cancelled via `transition_deadline` with full creator
+    /// refund.
+    pub open_claim_expiry_cancels: bool,
+    /// Whether an `Active` claim auto-expires or refunds without oracle
+    /// resolution.
+    pub active_claim_auto_expires: bool,
+    /// Currently supported on-chain verdict encoding version (`VERDICT_VERSION_V1`).
+    pub verdict_version: u32,
+    /// Maximum valid oracle confidence score (`MAX_CONFIDENCE`, 0..=100).
+    pub max_confidence: u32,
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -488,4 +574,8 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    /// A queued fee-policy change was approved against a revision that is no
+    /// longer the active policy. The stale change is rejected and the active
+    /// policy and all balances are left untouched.
+    StaleFeePolicyRevision = 48,
 }

@@ -29,6 +29,7 @@ export const PAUSABLE = [
   "agent_registration",
   "market_creator_worker",
   "council_worker",
+  "trader_worker",
   "oracle_settlement",
   // Outbound source fetches through `lib/research/gateway.ts`. Listed here rather
   // than read ad hoc so `MIMIR_PAUSE_ALL` reaches it like every other switch.

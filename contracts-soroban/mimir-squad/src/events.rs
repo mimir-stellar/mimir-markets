@@ -1,6 +1,6 @@
 /// Typed contract events, mirroring the `event` declarations in MimirSquad.sol.
 
-use soroban_sdk:{contractevent, Address, String};
+use soroban_sdk::{contractevent, Address, BytesN, String};
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -183,7 +183,7 @@ pub struct FeeRecipientQueued {
     pub executable_at: u64,
 }
 
-/// Emitted when a queued fee recipier rotation is executed after the timelock.
+/// Emitted when a queued fee recipient rotation is executed after the timelock.
 /// Any fees accrued but unclaimed at execution time are payable to ``next``.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,4 +213,20 @@ pub struct SquadFull {
     #[topic]
     pub market_id: u64,
     pub total_members: u32,
+}
+
+/// Emitted when a squad settlement manifest is committed for a resolved market.
+/// `digest` binds the winning side, fee policy and pool totals; `version`
+/// identifies the manifest schema so indexers can decode it safely.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementManifestCommitted {
+    #[topic]
+    pub market_id: u64,
+    pub version: u32,
+    pub winning_side: u32,
+    pub fee_bps: u32,
+    pub pool_a: i128,
+    pub pool_b: i128,
+    pub digest: BytesN<32>,
 }

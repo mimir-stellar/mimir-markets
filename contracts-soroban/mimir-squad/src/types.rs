@@ -2,6 +2,10 @@
 
 use soroban_sdk::{contracterror, contracttype, Address};
 
+/// Version tag for the squad settlement manifest. Bump on any change to the
+/// manifest's encoded layout so off-chain indexers can reject unknown shapes.
+pub const SETTLEMENT_MANIFEST_VERSION: u32 = 1;
+
 // ── Constants (mirror MimirSquad.sol) ────────────────────────────────────────
 
 pub const SIDE_A: u32 = 1;
@@ -43,6 +47,13 @@ pub const USDC_DECIMALS: u32 = 7;
 
 /// A queued oracle rotation cannot take effect before this much time passes.
 pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
+
+/// Storage schema version of the squad pool contract, exposed to indexers so
+/// they can refuse to interpret storage written under an unsupported layout.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Lowest schema version an indexer built against this descriptor will accept.
+pub const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 /// A queued fee-recipient rotation cannot take effect before this much time passes.
 pub const FEE_RECIPIENT_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
@@ -88,6 +99,15 @@ pub struct ClaimResult {
     pub gross: i128,
     pub fee: i128,
     pub net: i128,
+}
+
+/// Bounded compatibility descriptor returned to indexers.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchemaDescriptor {
+    pub schema_version: u32,
+    pub min_supported_version: u32,
+    pub usdc_decimals: u32,
 }
 
 /// Explicit claim state for a wallet's position in a squad market.
@@ -163,4 +183,7 @@ pub enum Error {
     /// `cancel_fee_recipient` / `execute_fee_recipient` found no queued
     /// fee-recipient rotation.
     NoFeeRecipientQueued = 34,
+    /// A client requested a schema interpretation this contract does not
+    /// support. Rejected rather than silently misread.
+    UnsupportedSchemaVersion = 35,
 }

@@ -33,6 +33,11 @@
  *  - The evidence hash is SHA-256 (`env.crypto().sha256()`'s client-side twin),
  *    not keccak256, so a contract could verify it.
  *
+ * Evidence acquisition failure classes (unavailable / stale / malformed /
+ * unsupported) are recorded as bounded codes in the decision journal. Dependency
+ * failures keep the conservative skip-and-retry behavior and never become settled
+ * verdicts.
+ *
  * Run: npx tsx agents/oracle/index.ts
  * Env: ORACLE_SECRET, NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID
  *      + one of: GEMINI_API_KEY (preferred) OR ANTHROPIC_API_KEY
@@ -62,6 +67,7 @@ import {
   validateCitationsList,
   MAX_VERDICT_CITATIONS,
 } from "../../lib/verdict";
+import { createHash } from "node:crypto";
 import {
   parseLLMVerdictWithRetry,
   VERDICT_LLM_SCHEMA,
@@ -132,7 +138,7 @@ import { normalizeQuorum } from "../../lib/council/quorum";
 import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tiers";
 import { evaluateClaim as evaluateClaimPure, type EvaluateClaimDeps } from "./evaluate";
 import { RiskManager } from "../../lib/oracle-risk";
-import { isSportsEventFinal } from "./sports-finality";
+import { isSportsEventFinal, revisionChanged, type ReviewedClaimRevision } from "./sports-finality";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -175,6 +181,14 @@ const SETTLEMENT_DELAY_MS = Number(process.env.ORACLE_SETTLEMENT_DELAY_MS ?? "90
 const SETTLEMENT_RETRY_CONFIG_RESULT = loadSettlementRetryConfig();
 const SETTLEMENT_RETRY_CONFIG: SettlementRetryConfig = SETTLEMENT_RETRY_CONFIG_RESULT.config;
 
+// Bounded oracle retry budget per unresolved claim. Evidence acquisition and
+// evaluation are retried at most ORACLE_CLAIM_MAX_ATTEMPTS times across polls;
+// once exhausted, the claim is parked so one failing claim cannot monopolize a
+// worker cycle. Transaction reconciliation is a separate concern and is not
+// governed by this budget (see submitSettlementWithRetry).
+const CLAIM_MAX_ATTEMPTS = Math.max(1, Number(process.env.ORACLE_CLAIM_MAX_ATTEMPTS ?? "3"));
+const CLAIM_RETRY_BACKOFF_MS = Math.max(0, Number(process.env.ORACLE_CLAIM_RETRY_BACKOFF_MS ?? "0"));
+
 // Free-tier Gemini is 5 RPM on new accounts and the oracle has no other rate
 // limiter — every claim in a poll fires an LLM call back-to-back.
 // ORACLE_LLM_THROTTLE_MS spreads them so RPM stays under the quota
@@ -192,6 +206,43 @@ const challengedClaimIds = new Set<number>();
 // Track evaluated-but-not-challenged (to avoid repeated LLM calls)
 const evaluatedClaimIds = new Set<number>();
 const riskManager = new RiskManager();
+
+// ── Per-claim evidence retry budget ──────────────────────────────────────────
+// Tracks how many times evidence acquisition/evaluation has been attempted for
+// a claim that remains unresolved. This is deliberately separate from the
+// transaction reconciliation retry loop: an uncertain Soroban submission must
+// be reconciled against chain state, not counted against the evidence budget.
+export interface ClaimAttemptState {
+  attempts: number;
+  lastAttemptAt: number;
+  exhausted: boolean;
+}
+
+const claimAttempts = new Map<number, ClaimAttemptState>();
+
+export function getClaimAttempts(claimId: number): ClaimAttemptState | undefined {
+  return claimAttempts.get(claimId);
+}
+
+export function recordClaimAttempt(claimId: number, now: number = Date.now()): ClaimAttemptState {
+  const prior = claimAttempts.get(claimId);
+  const attempts = (prior?.attempts ?? 0) + 1;
+  const state: ClaimAttemptState = {
+    attempts,
+    lastAttemptAt: now,
+    exhausted: attempts >= CLAIM_MAX_ATTEMPTS,
+  };
+  claimAttempts.set(claimId, state);
+  return state;
+}
+
+export function clearClaimAttempts(claimId: number): void {
+  claimAttempts.delete(claimId);
+}
+
+export function isClaimRetryBudgetExhausted(claimId: number): boolean {
+  return claimAttempts.get(claimId)?.exhausted === true;
+}
 
 requireEnv(["ORACLE_SECRET"]);
 requireAnyLLMKey();
@@ -294,6 +345,8 @@ export interface SettleDeps {
     evidence: string,
     jurorHistory?: string[],
   ) => Promise<OracleVerdict>;
+  /** Evaluate sports finality. Defaults to evaluateSportsFinality. */
+  evaluateSportsFinality?: typeof evaluateSportsFinality;
   /** Submit `resolve_claim`. Defaults to the real Soroban writer. */
   resolveClaim: (
     signer: typeof ORACLE.signer,
@@ -303,9 +356,27 @@ export interface SettleDeps {
       summary: string;
       confidence: number;
       evidence_hash: string;
+      /** Snapshot of the claim the verdict was reviewed against (#814). */
+      reviewedRevision?: ReviewedClaimRevision;
     },
   ) => Promise<Awaited<ReturnType<typeof resolveClaim>>>;
 }
+
+/**
+ * Outcome of a settlement attempt (#814).
+ *
+ *   - `{ submitted: <resolveClaim return> }`  — the write was accepted
+ *   - `{ refreshRequired: { expected, actual } }` — the claim changed between
+ *     review and sign; no transaction was built, nothing was signed
+ *   - `{ skipped: <reason> }`                 — resolved / cancelled / paused
+ *
+ * Existing callers can treat `submitted` as truthy and everything else as
+ * "no settlement this round".
+ */
+export type SettlementOutcome =
+  | { submitted: Awaited<ReturnType<typeof resolveClaim>> }
+  | { refreshRequired: { expected: ReviewedClaimRevision; actual: ReviewedClaimRevision } }
+  | { skipped: "resolved" | "cancelled" | "paused" | "stale" | "no_signer" | "exhausted" }
 
 // VerdictPayload (verdict + confidence + explanation) is the canonical shape
 // the LLM must emit, defined in lib/verdict.ts. OracleVerdict is an alias kept
@@ -331,6 +402,70 @@ interface EvidenceResult {
   payment?: EvidencePayment;
   /** A source failure is not evidence for an on-chain refund. */
   failure?: SettlementErrorInfo;
+}
+
+// ── Decision evidence manifest ────────────────────────────────────────────────
+// A bounded, secret-free record of what the oracle looked at when it decided.
+// Stores source references, capture times and content digests only — never raw
+// response bodies, LLM credentials or request headers.
+export const MANIFEST_MAX_SOURCES = 8;
+export const MANIFEST_MAX_URL_CHARS = 512;
+
+export interface EvidenceManifestSource {
+  url: string;
+  fetcher: EvidenceFetcherKind | "none";
+  capturedAt?: number;
+  contentSha256: string;
+  byteLength: number;
+}
+
+export interface EvidenceDecisionManifest {
+  claimId: number;
+  generatedAt: number;
+  sources: EvidenceManifestSource[];
+  omittedSources: number;
+}
+
+function redactUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    u.username = "";
+    u.password = "";
+    u.search = "";
+    u.hash = "";
+    return u.toString().slice(0, MANIFEST_MAX_URL_CHARS);
+  } catch {
+    return "(invalid-url)";
+  }
+}
+
+/**
+ * Build a bounded evidence manifest from a single settlement's evidence.
+ * Raw body text is hashed, never stored. Credentials and query strings are
+ * stripped from URLs before recording.
+ */
+export function buildEvidenceManifest(
+  claimId: number,
+  evidence: EvidenceResult,
+  now: number = Date.now(),
+): EvidenceDecisionManifest {
+  const sources: EvidenceManifestSource[] = [];
+  if (evidence.fetcher !== "none" && evidence.sourceUrl) {
+    const body = evidence.text ?? "";
+    sources.push({
+      url: redactUrl(evidence.sourceUrl),
+      fetcher: evidence.fetcher,
+      capturedAt: evidence.fetchedAt,
+      contentSha256: createHash("sha256").update(body, "utf8").digest("hex"),
+      byteLength: Buffer.byteLength(body, "utf8"),
+    });
+  }
+  return {
+    claimId,
+    generatedAt: now,
+    sources: sources.slice(0, MANIFEST_MAX_SOURCES),
+    omittedSources: Math.max(0, sources.length - MANIFEST_MAX_SOURCES),
+  };
 }
 
 /**
@@ -529,13 +664,14 @@ async function submitSettlementWithRetry(
     summary: string;
     confidence: number;
     evidence_hash: string;
+    reviewedRevision?: ReviewedClaimRevision;
   },
-): Promise<Awaited<ReturnType<typeof resolveClaim>> | null> {
+): Promise<SettlementOutcome> {
   for (let attempt = 1; attempt <= SETTLEMENT_RETRY_CONFIG.maxAttempts; attempt += 1) {
     const pause = pauseState("oracle_settlement");
     if (pause.paused) {
       console.warn(`[settle] Claim #${claimId}: settlement paused — ${pause.reason ?? "operator pause"}; deferring without a write.`);
-      return null;
+      return { skipped: "paused" };
     }
 
     // Never submit from the stale snapshot that was collected during the poll.
@@ -550,27 +686,54 @@ async function submitSettlementWithRetry(
         if (decision.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, decision.delayMs));
         continue;
       }
-      return null;
+      return { skipped: "exhausted" };
     }
 
     if (current.state === "resolved") {
       console.log(`[settle] Claim #${claimId}: duplicate avoided — chain is already resolved.`);
-      return null;
+      return { skipped: "resolved" };
     }
     if (current.state === "cancelled") {
       console.log(`[settle] Claim #${claimId}: cancelled on chain — no settlement submitted.`);
-      return null;
+      return { skipped: "cancelled" };
     }
     if (!settlementSnapshotIsReady(current, Math.floor(Date.now() / 1000))) {
       const reason = current.state !== "active"
         ? `state=${current.state}`
         : `deadline=${current.deadline} is still in the future`;
       console.log(`[settle] Claim #${claimId}: stale snapshot (${reason}) — deferring.`);
-      return null;
+      return { skipped: "stale" };
+    }
+
+    // #814: compare the claim revision the verdict was reviewed against with
+    // the freshly-read claim. A mismatch means the claim was edited (state
+    // changed, deadline moved, or it was resolved) between the evidence review
+    // and this write. Return a refresh-required result WITHOUT calling the
+    // signer — no transaction is built, nothing is signed, and the caller can
+    // re-review.
+    if (payload.reviewedRevision !== undefined) {
+      const currentRevision: ReviewedClaimRevision = {
+        state: current.state,
+        deadline: current.deadline,
+        resolvedAt: (current as { resolved_at?: number; resolvedAt?: number }).resolved_at
+          ?? (current as { resolvedAt?: number }).resolvedAt
+          ?? 0,
+      };
+      if (revisionChanged(payload.reviewedRevision, currentRevision)) {
+        console.warn(
+          `[settle] Claim #${claimId}: refresh-required — revision changed between review and sign`,
+        );
+        return {
+          refreshRequired: {
+            expected: payload.reviewedRevision,
+            actual: currentRevision,
+          },
+        };
+      }
     }
 
     try {
-      return await resolveClaim(ORACLE.signer, claimId, payload);
+      return { submitted: await resolveClaim(ORACLE.signer, claimId, payload) };
     } catch (error) {
       const info = classifySettlementError(error);
       const decision = settlementRetryDecision(info, attempt, SETTLEMENT_RETRY_CONFIG);
@@ -586,7 +749,7 @@ async function submitSettlementWithRetry(
       if (decision.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, decision.delayMs));
     }
   }
-  return null;
+  return { skipped: "exhausted" };
 }
 
 // Returns true if resolved on-chain, false if deferred or safely skipped.
@@ -605,19 +768,32 @@ export async function settle(claim: ClaimOnChain, deps?: Partial<SettleDeps>): P
     return false;
   }
 
+  // Bounded retry budget: once evidence acquisition/evaluation has failed
+  // CLAIM_MAX_ATTEMPTS times for this unresolved claim, park it so a single
+  // failing claim cannot monopolize the worker cycle. Reconciliation of an
+  // uncertain transaction is handled separately and does not consume this budget.
+  if (isClaimRetryBudgetExhausted(claim.id)) {
+    console.log(`[settle] Claim #${claim.id}: evidence retry budget exhausted (${CLAIM_MAX_ATTEMPTS} attempts) — parking until resolved on chain.`);
+    return false;
+  }
+
   console.log(`\n[settle] Claim #${claim.id}: "${claim.question.slice(0, 60)}..."`);
 
   const fetchEvidenceFn = deps?.fetchEvidence ?? fetchEvidence;
   const evaluateClaimFn = deps?.evaluateClaim ?? evaluateClaim;
+  const evaluateSportsFinalityFn = deps?.evaluateSportsFinality ?? evaluateSportsFinality;
   const resolveClaimFn  = deps?.resolveClaim  ?? resolveClaim;
 
   const evidence     = await fetchEvidenceFn(claim);
   console.log(`[settle] Evidence fetcher: ${evidence.fetcher}`);
+  const manifest = buildEvidenceManifest(claim.id, evidence);
+  console.log(`[settle] Evidence manifest: ${manifest.sources.length} source(s), ${manifest.omittedSources} omitted`);
   if (evidence.failure) {
     // A missing source is a dependency/malformed input failure, not proof of an
     // UNRESOLVABLE outcome. Defer and let the next poll retry the dependency;
     // otherwise an outage could incorrectly trigger a funded refund.
-    console.warn(`[settle] Claim #${claim.id}: ${evidence.failure.kind} evidence failure — ${evidence.failure.detail}; deferring.`);
+    const attempt = recordClaimAttempt(claim.id);
+    console.warn(`[settle] Claim #${claim.id}: ${evidence.failure.kind} evidence failure — ${evidence.failure.detail}; deferring (attempt ${attempt.attempts}/${CLAIM_MAX_ATTEMPTS}).`);
     return false;
   }
 
@@ -625,7 +801,13 @@ export async function settle(claim: ClaimOnChain, deps?: Partial<SettleDeps>): P
   // (unless we're past the grace window, to avoid locking funds on a data outage).
   if (claim.category.toLowerCase() === "sports") {
     const now = Math.floor(Date.now() / 1000);
-    if (!isSportsEventFinal(claim, evidence.text, now)) {
+    const sportsDecision = evaluateSportsFinalityFn(claim, evidence.text, now, {
+      evidenceTimestamp: evidence.fetchedAt ?? (now * 1000),
+    });
+    console.log(
+      `[settle] Claim #${claim.id}: sports finality decision [${sportsDecision.policyVersion}] — ${sportsDecision.final ? "final" : "defer"} (${sportsDecision.reason})`,
+    );
+    if (!sportsDecision.final) {
       console.log(`[settle] Claim #${claim.id}: match not final yet — deferring to a later poll.`);
       return false;
     }
@@ -777,6 +959,7 @@ export async function settle(claim: ClaimOnChain, deps?: Partial<SettleDeps>): P
   }
 
   console.log(`[settle] ✓ Resolved — ${settledOnChain.explorerUrl ?? settledOnChain.txHash}`);
+  clearClaimAttempts(claim.id);
 
   // Cross-entropy bonuses AFTER the on-chain settle: informative jurors split
   // the pool, parrots and dissenters-from-evidence get nothing. Best-effort —
@@ -949,6 +1132,8 @@ async function poll(): Promise<void> {
   for (const claim of claims) {
     if (claim.state !== "open" && claim.state !== "active") {
       riskManager.release(claim.id);
+      // A claim that is no longer live no longer needs a retry budget.
+      clearClaimAttempts(claim.id);
     }
   }
 
@@ -980,6 +1165,17 @@ async function poll(): Promise<void> {
   expiredActive.sort((a, b) => a.deadline - b.deadline);
   for (let i = 0; i < expiredActive.length; i++) {
     const claim = expiredActive[i];
+    // Skip claims whose evidence retry budget is exhausted so one failing claim
+    // cannot monopolize the cycle. Reconciliation of an uncertain transaction is
+    // handled inside submitSettlementWithRetry and is not gated here.
+    if (isClaimRetryBudgetExhausted(claim.id)) {
+      console.log(`[oracle] Claim #${claim.id}: evidence retry budget exhausted — skipping this cycle.`);
+      continue;
+    }
+    if (CLAIM_RETRY_BACKOFF_MS > 0) {
+      const prior = getClaimAttempts(claim.id);
+      if (prior && Date.now() - prior.lastAttemptAt < CLAIM_RETRY_BACKOFF_MS) continue;
+    }
     try {
       const resolved = await withBackoff("oracle", () => settle(claim), {
         policy: ORACLE_BACKOFF,
@@ -996,6 +1192,11 @@ async function poll(): Promise<void> {
         `[oracle] Error settling claim ${claim.id} [${classified.kind}]${classified.txHash ? ` tx=${classified.txHash}` : ""}:`,
         classified.detail,
       );
+      // Count evaluation/parse failures against the same bounded budget so a
+      // claim that consistently fails to produce a verdict cannot starve others.
+      if (classified.kind !== "duplicate" && classified.kind !== "cancelled") {
+        recordClaimAttempt(claim.id);
+      }
     }
   }
 
@@ -1027,6 +1228,7 @@ async function main(): Promise<void> {
   console.log(`  Throttle   : ${LLM_THROTTLE_MS > 0 ? `${LLM_THROTTLE_MS}ms (${(60_000 / LLM_THROTTLE_MS).toFixed(1)} RPM cap)` : "OFF"}`);
   console.log(`  Settle gap : ${SETTLEMENT_DELAY_MS / 1000}s`);
   console.log(`  Tx retries : ${SETTLEMENT_RETRY_CONFIG.maxAttempts} attempts, ${SETTLEMENT_RETRY_CONFIG.baseDelayMs}–${SETTLEMENT_RETRY_CONFIG.maxDelayMs}ms backoff`);
+  console.log(`  Claim retry: ${CLAIM_MAX_ATTEMPTS} evidence attempt(s) per unresolved claim${CLAIM_RETRY_BACKOFF_MS > 0 ? `, ${CLAIM_RETRY_BACKOFF_MS}ms backoff` : ""}`);
   for (const warning of SETTLEMENT_RETRY_CONFIG_RESULT.warnings) {
     console.warn(`[oracle] settlement retry config: ${warning}`);
   }

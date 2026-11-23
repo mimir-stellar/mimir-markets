@@ -6,12 +6,13 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 use crate::admin;
 use crate::claims;
 use crate::escrow;
+use crate::fees;
 use crate::resolve;
 use crate::storage;
 use crate::types::{
     Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeePolicy,
-    MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict,
-    WinnerSide, MAX_BATCH_SIZE,
+    FeePolicyCompatibility, MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle,
+    PlatformStats, Verdict, WinnerSide, MAX_BATCH_SIZE,
 };
 
 #[contract]
@@ -308,6 +309,18 @@ impl MimirMarket {
         Ok(results)
     }
 
+    /// Versioned snapshot of the contract's resource limits, so clients can size
+    /// batch and pagination requests without probing live failures.
+    ///
+    /// Response layout: `(version, max_batch_size)`. `version` is bumped whenever
+    /// the layout changes; existing fields keep their meaning across versions.
+    pub fn get_contract_limits(env: Env) -> Result<(u32, u32), Error> {
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        Ok((1u32, MAX_BATCH_SIZE))
+    }
+
     pub fn get_claim_market_config(env: Env, claim_id: u64) -> Result<MarketConfig, Error> {
         Ok(storage::get_claim(&env, claim_id)?.market)
     }
@@ -374,6 +387,14 @@ impl MimirMarket {
         storage::fee_policy(&env)
     }
 
+    /// Bounded fee-policy compatibility query for generated clients.
+    ///
+    /// Pure read returning supported policy fields, hard caps, timelock,
+    /// USDC escrow scale, rounding semantics, and current/pending policy state.
+    pub fn get_fee_policy_compatibility(env: Env) -> Result<FeePolicyCompatibility, Error> {
+        fees::fee_policy_compatibility(&env)
+    }
+
     pub fn get_pending_fee_policy(env: Env) -> Option<PendingFeePolicy> {
         storage::pending_fee_policy(&env)
     }
@@ -400,5 +421,14 @@ impl MimirMarket {
 
     pub fn get_accrued_fees(env: Env, who: Address) -> i128 {
         storage::accrued_fees(&env, &who)
+    }
+
+    /// Read-only descriptor of the currently approved oracle resolution and
+    /// claim expiration policy enforced by `claims` and `resolve`.
+    ///
+    /// Pure read: requires no auth, touches no storage, moves no USDC, and
+    /// preserves oracle-only resolution and existing withdrawal rights.
+    pub fn get_resolution_expiration_policy(_env: Env) -> ResolutionExpirationPolicy {
+        resolve::resolution_expiration_policy()
     }
 }

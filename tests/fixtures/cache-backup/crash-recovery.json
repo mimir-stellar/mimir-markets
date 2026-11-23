@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "kind": "mimir-read-index-backup",
+  "hashAlgorithm": "sha256",
+  "createdAt": 1700000800000,
+  "source": {
+    "contractAddress": "CAQPTFHY5VXSWR3CNRGFVLGDNEH4NCOE2PCZL4QZ4JQMWVD54GRCMQPX",
+    "network": "stellar:testnet",
+    "appVersion": "0.1.0"
+  },
+  "checksum": "ed606e1131007210a5022a4ec7519c32b6cc73c82a564400d2b42096f8cabd45",
+  "tables": {
+    "claims": [
+      {
+        "id": 301,
+        "creator": "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE",
+        "question": "Will claim 301 settle?",
+        "creator_position": "Yes",
+        "counter_position": "No",
+        "resolution_url": "https://example.com/301",
+        "creator_stake": 10,
+        "total_challenger_stake": 20,
+        "reserved_creator_liability": 5,
+        "deadline": 1800001000,
+        "state": "resolved",
+        "winner_side": "creator",
+        "resolution_summary": "Settled by oracle",
+        "confidence": 95,
+        "category": "crypto",
+        "parent_id": 0,
+        "market_type": "binary",
+        "odds_mode": "pool",
+        "challenger_payout_bps": 0,
+        "handicap_line": null,
+        "settlement_rule": null,
+        "max_challengers": 5,
+        "visibility": "public",
+        "challenger_count": 2,
+        "total_pot": 30,
+        "first_challenger": "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D",
+        "first_indexed_at": 1700000100000,
+        "updated_at": 1700000200000,
+        "is_final": 1
+      },
+      {
+        "id": 302,
+        "creator": "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE",
+        "question": "Will claim 302 settle?",
+        "creator_position": "Yes",
+        "counter_position": "No",
+        "resolution_url": "https://example.com/302",
+        "creator_stake": 15,
+        "total_challenger_stake": 15,
+        "reserved_creator_liability": 0,
+        "deadline": 1800002000,
+        "state": "resolved",
+        "winner_side": "challenger",
+        "resolution_summary": "Settled by oracle",
+        "confidence": 90,
+        "category": "crypto",
+        "parent_id": 0,
+        "market_type": "binary",
+        "odds_mode": "pool",
+        "challenger_payout_bps": 0,
+        "handicap_line": null,
+        "settlement_rule": null,
+        "max_challengers": 3,
+        "visibility": "public",
+        "challenger_count": 1,
+        "total_pot": 30,
+        "first_challenger": "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D",
+        "first_indexed_at": 1700000200000,
+        "updated_at": 1700000300000,
+        "is_final": 1
+      },
+      {
+        "id": 303,
+        "creator": "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE",
+        "question": null,
+        "creator_position": null,
+        "counter_position": null,
+        "resolution_url": null,
+        "creator_stake": 25,
+        "total_challenger_stake": 0,
+        "reserved_creator_liability": 0,
+        "deadline": 1800003000,
+        "state": "active",
+        "winner_side": "",
+        "resolution_summary": null,
+        "confidence": 0,
+        "category": "custom",
+        "parent_id": 0,
+        "market_type": "binary",
+        "odds_mode": "fixed",
+        "challenger_payout_bps": 2000,
+        "handicap_line": null,
+        "settlement_rule": null,
+        "max_challengers": 1,
+        "visibility": "private",
+        "challenger_count": 0,
+        "total_pot": 25,
+        "first_challenger": "",
+        "first_indexed_at": 1700000300000,
+        "updated_at": 1700000300000,
+        "is_final": 0
+      }
+    ],
+    "challengers": [
+      {
+        "claim_id": 301,
+        "address": "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D",
+        "stake": 12,
+        "potential_payout": 18
+      },
+      {
+        "claim_id": 301,
+        "address": "GCIXSDPXXIJSLEVZSYFCZRNOD6GBFIFKNTEI6X2HC6LE65KUVYMGU4X5",
+        "stake": 8,
+        "potential_payout": 12
+      },
+      {
+        "claim_id": 302,
+        "address": "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D",
+        "stake": 15,
+        "potential_payout": 30
+      }
+    ],
+    "sync_meta": [
+      {
+        "key": "last_claim_count",
+        "value": "303"
+      },
+      {
+        "key": "last_sync_at",
+        "value": "1700000300"
+      },
+      {
+        "key": "settlement_cursor_ledger",
+        "value": "15000"
+      }
+    ],
+    "market_settlements": [
+      {
+        "claim_id": 301,
+        "gross_volume_atomic": "30000000",
+        "payout_atomic": "28500000",
+        "platform_fee_atomic": "1000000",
+        "agent_owner_fee_atomic": "400000",
+        "dust_atomic": "100000",
+        "transaction_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "settled_at": 1700000200
+      },
+      {
+        "claim_id": 302,
+        "gross_volume_atomic": "30000000",
+        "payout_atomic": "29000000",
+        "platform_fee_atomic": "700000",
+        "agent_owner_fee_atomic": "300000",
+        "dust_atomic": "0",
+        "transaction_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "settled_at": 1700000300
+      }
+    ],
+    "fee_accruals": [
+      {
+        "accrual_id": "tx-1111:0",
+        "claim_id": 301,
+        "recipient": "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE",
+        "source": "platform",
+        "amount_atomic": "1000000",
+        "transaction_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "log_index": 0,
+        "accrued_at": 1700000200
+      },
+      {
+        "accrual_id": "tx-1111:1",
+        "claim_id": 301,
+        "recipient": "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D",
+        "source": "agent_owner",
+        "amount_atomic": "400000",
+        "transaction_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "log_index": 1,
+        "accrued_at": 1700000200
+      },
+      {
+        "accrual_id": "tx-2222:0",
+        "claim_id": 302,
+        "recipient": "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE",
+        "source": "platform",
+        "amount_atomic": "700000",
+        "transaction_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "log_index": 0,
+        "accrued_at": 1700000300
+      },
+      {
+        "accrual_id": "tx-2222:1",
+        "claim_id": 302,
+        "recipient": "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D",
+        "source": "agent_owner",
+        "amount_atomic": "300000",
+        "transaction_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "log_index": 1,
+        "accrued_at": 1700000300
+      }
+    ],
+    "fee_claims": [
+      {
+        "claim_event_id": "fee-claim:301:0",
+        "recipient": "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE",
+        "amount_atomic": "1000000",
+        "transaction_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+        "log_index": 0,
+        "claimed_at": 1700000400
+      },
+      {
+        "claim_event_id": "fee-claim:302:0",
+        "recipient": "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE",
+        "amount_atomic": "700000",
+        "transaction_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+        "log_index": 0,
+        "claimed_at": 1700000500
+      }
+    ],
+    "fee_policies": [
+      {
+        "policy_id": "policy-recovery-v1",
+        "platform_fee_bps": 2000,
+        "agent_owner_fee_bps": 800,
+        "platform_recipient": "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE",
+        "effective_at": 1700000000,
+        "transaction_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+        "log_index": 0
+      }
+    ],
+    "agent_revenue_attribution": [
+      {
+        "claim_id": 301,
+        "agent_id": "oracle-agent-1",
+        "owner_fee_recipient": "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D",
+        "transaction_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "log_index": 2,
+        "attributed_at": 1700000200
+      },
+      {
+        "claim_id": 302,
+        "agent_id": "oracle-agent-1",
+        "owner_fee_recipient": "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D",
+        "transaction_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+        "log_index": 2,
+        "attributed_at": 1700000300
+      }
+    ]
+  }
+}
