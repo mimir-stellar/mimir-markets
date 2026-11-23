@@ -144,7 +144,7 @@ export default function ResearchSourceCitations({
                     rel="noopener noreferrer nofollow"
                     className="inline-flex min-w-0 items-center gap-1 font-semibold text-pv-cyan hover:text-pv-text transition-colors"
                   >
-                    <span className="truncate">{row.domain || row.url}</span>
+                    <span className="truncate">{row.domain || t("unsafeLink")}</span>
                     <ExternalLink size={12} aria-hidden />
                   </a>
                 ) : (
