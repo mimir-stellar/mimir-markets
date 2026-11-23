@@ -203,21 +203,28 @@ export function buildCopyPermissionFeedback(
 
   // 1. Loading
   if (input.loading || input.permission === undefined) {
-    return emptyFeedback("loading", "ready", "Querying on-chain allowance and policy bounds.");
+return emptyFeedback(
+  "loading",
+  "Querying on-chain allowance and policy bounds.",
+);
   }
 
   // 2. Disconnected
   if (input.disconnected) {
     return emptyFeedback(
       "disconnected",
-      "wallet_disconnected",
+"wallet_disconnected",
       "Wallet is disconnected. Connect owner wallet to view or manage execution permissions.",
     );
   }
 
   // 3. Not Found
   if (input.permission === null) {
-    return emptyFeedback("invalid", "permission_not_found", "No copy execution permission found for this identifier.");
+return emptyFeedback(
+  "invalid",
+  "permission_not_found",
+  "No copy execution permission found for this identifier.",
+);
   }
 
   const p = input.permission;
@@ -233,10 +240,15 @@ export function buildCopyPermissionFeedback(
     weeklyCapAtomic = parseUsdcAtomic(p.weeklyCapUsdc);
     totalOpenExposureAtomic = parseUsdcAtomic(p.totalOpenExposureUsdc);
   } catch {
-    return emptyFeedback("invalid", "malformed_bounds", "Permission defines malformed numeric financial bounds.", {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-    });
+return emptyFeedback(
+  "invalid",
+  "malformed_bounds",
+  "Permission defines malformed numeric financial bounds.",
+  {
+    permissionId: p.permissionId,
+    ownerWallet: p.ownerWallet,
+  },
+);
   }
 
   // Connected wallet mismatch
@@ -245,10 +257,15 @@ export function buildCopyPermissionFeedback(
     input.connectedWallet !== null &&
     input.connectedWallet.trim() !== p.ownerWallet.trim()
   ) {
-    return emptyFeedback("disconnected", "wallet_mismatch", "Connected wallet does not match permission owner.", {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-    });
+return emptyFeedback(
+  "disconnected",
+  "wallet_mismatch",
+  "Connected wallet does not match permission owner.",
+  {
+    permissionId: p.permissionId,
+    ownerWallet: p.ownerWallet,
+  },
+);
   }
 
   // 4. Invalid policy check
@@ -259,28 +276,38 @@ export function buildCopyPermissionFeedback(
     now,
   );
   if (validationError) {
-    return emptyFeedback("invalid", "policy_invalid", `Policy fails contract constraints: ${validationError}`, {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-      executionAgentId: p.executionAgentId,
-      signalAgentId: p.signalAgentId,
-    });
+return emptyFeedback(
+  "invalid",
+  "policy_invalid",
+  `Policy fails contract constraints: ${validationError}`,
+  {
+    permissionId: p.permissionId,
+    ownerWallet: p.ownerWallet,
+    executionAgentId: p.executionAgentId,
+    signalAgentId: p.signalAgentId,
+  },
+);
   }
 
   // 5. Revoked (terminal). effectiveAt is the revocation time when recorded.
   const isRevoked = p.status === "revoked";
   if (isRevoked) {
-    return emptyFeedback("revoked", "permission_revoked", "Copy execution permission has been revoked by the owner.", {
-      permissionId: p.permissionId,
-      ownerWallet: p.ownerWallet,
-      executionAgentId: p.executionAgentId,
-      signalAgentId: p.signalAgentId,
-      isRevoked: true,
-      isTokenConfigured: true,
-      isSpenderConfigured: true,
-      effectiveAt: p.revokedAt ?? null,
-      expiresAt: p.expiresAt,
-    });
+return emptyFeedback(
+  "revoked",
+  "permission_revoked",
+  "Copy execution permission has been revoked by the owner.",
+  {
+    permissionId: p.permissionId,
+    ownerWallet: p.ownerWallet,
+    executionAgentId: p.executionAgentId,
+    signalAgentId: p.signalAgentId,
+    isRevoked: true,
+    isTokenConfigured: true,
+    isSpenderConfigured: true,
+    effectiveAt: p.revokedAt ?? null,
+    expiresAt: p.expiresAt,
+  },
+);
   }
 
   // 6. Global or permission pause
@@ -288,7 +315,7 @@ export function buildCopyPermissionFeedback(
   if (isPaused) {
     return emptyFeedback(
       "paused",
-      input.globalPaused ? "global_paused" : "permission_paused",
+input.globalPaused ? "global_paused" : "permission_paused",
       "Copy trading execution is currently paused.",
       {
         permissionId: p.permissionId,
@@ -320,9 +347,15 @@ export function buildCopyPermissionFeedback(
 
   // Configured token / spender comparison
   const expectedToken = (input.configuredUsdc ?? getUsdcSacId())?.trim();
-  const expectedSpender = (input.configuredSpender ?? configuredSpender())?.trim();
-  const isTokenConfigured = expectedToken ? p.spendPermission.token.trim() === expectedToken : true;
-  const isSpenderConfigured = expectedSpender ? p.spendPermission.spender.trim() === expectedSpender : true;
+  const expectedSpender = (
+    input.configuredSpender ?? configuredSpender()
+  )?.trim();
+  const isTokenConfigured = expectedToken
+    ? p.spendPermission.token.trim() === expectedToken
+    : true;
+  const isSpenderConfigured = expectedSpender
+    ? p.spendPermission.spender.trim() === expectedSpender
+    : true;
 
   if (!isTokenConfigured) {
     return emptyFeedback(
@@ -373,23 +406,35 @@ export function buildCopyPermissionFeedback(
   let isStale = false;
   if (input.freshness) {
     if (input.freshness.isStale) isStale = true;
-    else if (input.freshness.ttlMs && now - input.freshness.timestamp > input.freshness.ttlMs) {
+    else if (
+      input.freshness.ttlMs &&
+      now - input.freshness.timestamp > input.freshness.ttlMs
+    ) {
       isStale = true;
     }
   }
 
   // 10. Live on-chain allowance and balance verification
-  const onchainAllowance = input.onchainAllowanceAtomic !== undefined ? input.onchainAllowanceAtomic : null;
-  const onchainBalance = input.onchainBalanceAtomic !== undefined ? input.onchainBalanceAtomic : null;
+  const onchainAllowance =
+    input.onchainAllowanceAtomic !== undefined
+      ? input.onchainAllowanceAtomic
+      : null;
+  const onchainBalance =
+    input.onchainBalanceAtomic !== undefined
+      ? input.onchainBalanceAtomic
+      : null;
   const signedAllowance = p.spendPermission.allowanceAtomic;
   const spentInPeriod = input.spentInPeriodAtomic ?? 0n;
 
-  const hasSufficientAllowance = onchainAllowance !== null && onchainAllowance >= maxPerPositionAtomic;
-  const hasSufficientBalance = onchainBalance === null || onchainBalance >= maxPerPositionAtomic;
+  const hasSufficientAllowance =
+    onchainAllowance !== null && onchainAllowance >= maxPerPositionAtomic;
+  const hasSufficientBalance =
+    onchainBalance === null || onchainBalance >= maxPerPositionAtomic;
 
-  const remaining = onchainAllowance !== null && onchainAllowance > spentInPeriod
-    ? onchainAllowance - spentInPeriod
-    : 0n;
+  const remaining =
+    onchainAllowance !== null && onchainAllowance > spentInPeriod
+      ? onchainAllowance - spentInPeriod
+      : 0n;
 
   let status: CopyPermissionStatus = "ready";
   let reasonCode: CopyPermissionReasonCode = "ready";
@@ -397,14 +442,18 @@ export function buildCopyPermissionFeedback(
 
   if (isStale) {
     status = "stale";
-    reasonCode = "snapshot_stale";
-    detail = "Permission or on-chain allowance snapshot may be stale; refresh to confirm latest ledger state.";
-  } else if (!hasSufficientAllowance) {
-    status = "invalid";
-    reasonCode = "allowance_insufficient";
-    detail = onchainAllowance === 0n
+if (isStale) {
+  status = "stale";
+  reasonCode = "snapshot_stale";
+  detail =
+    "Permission or on-chain allowance snapshot may be stale; refresh to confirm latest ledger state.";
+} else if (!hasSufficientAllowance) {
+  status = "invalid";
+  reasonCode = "allowance_insufficient";
+  detail =
+    onchainAllowance === 0n
       ? "On-chain USDC allowance is zero; the spender cannot execute copies until allowance is raised."
-      : "On-chain USDC allowance is less than the per-position stake cap.";
+      : "On-chain USDC allowance is lower than the per-position bound.";
   } else if (!hasSufficientBalance) {
     status = "ready";
     detail = "On-chain USDC balance is below the per-position stake cap; execution may fail until balance is topped up.";
@@ -421,9 +470,14 @@ export function buildCopyPermissionFeedback(
     totalOpenExposureAtomic: totalOpenExposureAtomic.toString(),
     maxRealizedLossAtomic: p.maxRealizedLossAtomic,
     signedAllowanceAtomic: signedAllowance.toString(),
-    principalAtRiskAtomic: input.principalAtRiskAtomic !== undefined ? input.principalAtRiskAtomic.toString() : null,
-    onchainAllowanceAtomic: onchainAllowance === null ? null : onchainAllowance.toString(),
-    onchainBalanceAtomic: onchainBalance === null ? null : onchainBalance.toString(),
+principalAtRiskAtomic:
+  input.principalAtRiskAtomic !== undefined
+    ? input.principalAtRiskAtomic.toString()
+    : null,
+onchainAllowanceAtomic:
+  onchainAllowance === null ? null : onchainAllowance.toString(),
+onchainBalanceAtomic:
+  onchainBalance === null ? null : onchainBalance.toString(),
     remainingAllowanceAtomic: remaining.toString(),
     hasSufficientAllowance,
     hasSufficientBalance,
@@ -435,8 +489,8 @@ export function buildCopyPermissionFeedback(
     minConfidenceBps: p.minConfidenceBps,
     minPayoutBps: p.minPayoutBps,
     expiresAt: p.expiresAt,
-    createdAt: p.createdAt ?? null,
-  });
+  };
+
 }
 
 /**
@@ -449,20 +503,17 @@ export function buildCopyPermissionFeedback(
  * the client is expected to follow up with a live read. For revoked/paused/expired
  * permissions the lifecycle status is returned immediately without a chain call.
  */
-export async function evaluateCopyPermissionOnchain(
+export function evaluateCopyPermissionSnapshot(
   permission: CopyPermission,
-): Promise<CopyPermissionFeedbackView> {
+): CopyPermissionFeedbackView {
   return buildCopyPermissionFeedback({
     permission,
     configuredUsdc: getUsdcSacId() ?? undefined,
     configuredSpender: configuredSpender() ?? undefined,
     now: Date.now(),
-    // No chain read available yet; the client will refresh with live state.
     onchainAllowanceAtomic: null,
   });
 }
-
-/**
  * Spend-permission explanation used by the revoke confirmation dialog.
  *
  * Revoking a copy permission is owner-signed and stops Mimir from executing
@@ -525,4 +576,23 @@ export function buildRevokeConfirmationCopy(
     confirmLabel: "Revoke permission",
     cancelLabel: "Cancel",
   };
+}
+
+export async function evaluateCopyPermissionOnchain(
+  permission: CopyPermission,
+): Promise<CopyPermissionFeedbackView> {
+  const onchainAllowanceAtomic = await getUsdcAllowanceUnits(
+    permission.ownerWallet,
+    permission.spendPermission.spender,
+  );
+
+  const onchainBalanceAtomic = await getUsdcBalanceUnits(
+    permission.ownerWallet,
+  );
+
+  return buildCopyPermissionFeedback({
+    permission,
+    onchainAllowanceAtomic,
+    onchainBalanceAtomic,
+  });
 }

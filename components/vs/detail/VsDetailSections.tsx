@@ -203,3 +203,72 @@ export function VsSectionHeader({ title, subtitle, action }: VsSectionHeaderProp
     </div>
   );
 }
+
+/**
+ * Protocols that may be rendered as a clickable link. Anything else (javascript:,
+ * data:, vbscript:, file:, relative/schemeless values, malformed URLs) is shown
+ * as plain text.
+ */
+export const SAFE_LINK_PROTOCOLS: ReadonlySet<string> = new Set(["https:", "http:"]);
+
+/**
+ * Shared safe-link policy. Returns the normalized absolute URL when it is safe to
+ * link, otherwise `null`. Callers must render the raw text instead of an anchor.
+ */
+export function getSafeLinkHref(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (!SAFE_LINK_PROTOCOLS.has(parsed.protocol)) return null;
+  return parsed.href;
+}
+
+export interface VsSourceLinkProps {
+  url: string | null | undefined;
+  label?: ReactNode;
+  className?: string;
+  testId?: string;
+}
+
+/**
+ * Renders a source URL. Safe http(s) URLs become an anchor; unsafe or unparsable
+ * values stay visible as plain text with an accessible explanation, and never
+ * produce an executable anchor.
+ */
+export function VsSourceLink({ url, label, className, testId }: VsSourceLinkProps) {
+  if (typeof url !== "string" || !url.trim()) return null;
+  const raw = url.trim();
+  const href = getSafeLinkHref(raw);
+
+  if (href) {
+    return (
+      <a
+        data-testid={testId}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={joinClasses("break-all text-sky-700 underline", className)}
+      >
+        {label ?? raw}
+      </a>
+    );
+  }
+
+  return (
+    <span
+      data-testid={testId}
+      className={joinClasses("break-all text-slate-700", className)}
+    >
+      <span>{raw}</span>
+      <span className="ml-2 text-xs text-slate-500">
+        (unsafe link not shown as clickable; only http and https links can be opened)
+      </span>
+    </span>
+  );
+}

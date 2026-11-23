@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import {
-  copyGrantMessage, copyPolicyHash, copyRevokeMessage, validateCopyPermission, worstCaseCopySpend,
+  copyGrantMessage, copyPermissionReviewDigest, copyPolicyHash, copyRevokeMessage,
+  validateCopyPermission, verifyCopyPermissionReviewDigest, worstCaseCopySpend,
   type CopyPermission,
 } from "@/lib/copy-trading";
 import { getCopyPermission, listCopyExecutions, saveCopyPermission } from "@/lib/db";
@@ -115,7 +116,7 @@ export async function POST(req: Request): Promise<Response> {
   };
 
   const parsedBody = await readJsonBody<{
-    permission?: JsonPermission; signature?: string; nonce?: string; expiresAt?: number;
+    permission?: JsonPermission; signature?: string; nonce?: string; expiresAt?: number; reviewDigest?: string;
   }>(req);
   if (!parsedBody.ok) {
     return jsonResponse({ error: parsedBody.error }, { status: parsedBody.status });
@@ -160,18 +161,36 @@ export async function POST(req: Request): Promise<Response> {
     return jsonResponse({ error: validationError }, { status: 400 });
   }
 
+  if (body.reviewDigest !== undefined) {
+    const reviewCheck = verifyCopyPermissionReviewDigest(permission, body.reviewDigest);
+    if (!reviewCheck.ok) {
+      const status = reviewCheck.reason === "invalid_review_digest" ? 400 : 409;
+      return jsonResponse(
+        {
+          error: reviewCheck.reason,
+          detail: reviewCheck.reason === "review_digest_mismatch"
+            ? "copy permission changed after review; regenerate review digest before signing"
+            : "reviewDigest must be a 64-character hex SHA-256 digest",
+        },
+        { status },
+      );
+    }
+  }
+
   const window = validateSignedWindow(body.nonce, body.expiresAt);
   if (!window.ok) {
     return jsonResponse({ error: window.message, field: window.field }, { status: 400 });
   }
 
   const signedPolicyHash = copyPolicyHash(permission);
+  const computedReviewDigest = copyPermissionReviewDigest(permission);
   const valid = await verifyAgentSignature({
     address: permission.ownerWallet,
     message: copyGrantMessage({
       permissionId: permission.permissionId,
       ownerWallet: permission.ownerWallet,
       policyHash: signedPolicyHash,
+      ...(body.reviewDigest !== undefined ? { reviewDigest: computedReviewDigest } : {}),
       nonce: window.nonce,
       expiresAt: window.expiresAt,
     }),
@@ -211,6 +230,7 @@ export async function POST(req: Request): Promise<Response> {
   const feedback = await evaluateCopyPermissionOnchain(record);
   return jsonResponse({
     permission: record,
+    reviewDigest: computedReviewDigest,
     worstCase: worstCaseCopySpend(record),
     feedback,
     details: permissionStatusDetails(record, Math.floor(Date.now() / 1000)),

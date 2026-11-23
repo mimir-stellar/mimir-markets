@@ -2,13 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assetsForRedemption,
+  basketCompositionDigest,
   basketExposure,
+  compareBasketCompositions,
+  createBasketCompositionSnapshot,
   DEFAULT_BASKET_POLICY,
+  evolveBasketCompositionSnapshot,
   highWaterMarkFee,
+  isMaterialCompositionChange,
   previewBasketExposureBeforeCreate,
   sharesForDeposit,
   simulateVirtualBasket,
+  subscriptionMessage,
   validateBasket,
+  verifyBasketCompositionSnapshot,
 } from "../../lib/baskets";
 
 const weights = [
@@ -129,4 +136,219 @@ test("basket validation rejects floating point weight dust", () => {
   ];
   const errors = validateBasket(invalidWeights, DEFAULT_BASKET_POLICY);
   assert.ok(errors.includes("weights_must_be_integers"));
+});
+
+test("composition digest binds canonical member identities and weights independent of input order", () => {
+  const orderA = [
+    { agentId: "statistician", weightBps: 4_000 },
+    { agentId: "optimist", weightBps: 3_500 },
+    { agentId: "contrarian", weightBps: 2_500 },
+  ];
+  const orderB = [
+    { agentId: "contrarian", weightBps: 2_500 },
+    { agentId: "statistician", weightBps: 4_000 },
+    { agentId: "optimist", weightBps: 3_500 },
+  ];
+
+  const digestA = basketCompositionDigest(orderA);
+  const digestB = basketCompositionDigest({ members: orderB });
+  assert.match(digestA, /^[0-9a-f]{64}$/);
+  assert.equal(digestA, digestB);
+
+  // Changing a member weight or member identity must produce a distinct digest.
+  const shiftedWeight = basketCompositionDigest([
+    { agentId: "statistician", weightBps: 4_001 },
+    { agentId: "optimist", weightBps: 3_499 },
+    { agentId: "contrarian", weightBps: 2_500 },
+  ]);
+  const swappedAgent = basketCompositionDigest([
+    { agentId: "statistician", weightBps: 4_000 },
+    { agentId: "pessimist", weightBps: 3_500 },
+    { agentId: "contrarian", weightBps: 2_500 },
+  ]);
+  const caseChangedAgent = basketCompositionDigest([
+    { agentId: "Statistician", weightBps: 4_000 },
+    { agentId: "optimist", weightBps: 3_500 },
+    { agentId: "contrarian", weightBps: 2_500 },
+  ]);
+
+  assert.notEqual(digestA, shiftedWeight);
+  assert.notEqual(digestA, swappedAgent);
+  assert.notEqual(digestA, caseChangedAgent);
+});
+
+test("composition digest rejects malformed members, duplicate agents and control-char delimiter injection", () => {
+  assert.throws(() => basketCompositionDigest([]), /basket_composition_empty/);
+  assert.throws(
+    () => basketCompositionDigest([{ agentId: "   ", weightBps: 10_000 }]),
+    /invalid_member_agent_id/,
+  );
+  assert.throws(
+    () => basketCompositionDigest([{ agentId: "a\u001f1000", weightBps: 10_000 }]),
+    /invalid_member_agent_id/,
+  );
+  assert.throws(
+    () =>
+      basketCompositionDigest([
+        { agentId: "a", weightBps: 5_000 },
+        { agentId: " a ", weightBps: 5_000 },
+      ]),
+    /duplicate_agent/,
+  );
+  assert.throws(
+    () => basketCompositionDigest([{ agentId: "a", weightBps: 0 }]),
+    /single_agent_exposure/,
+  );
+  assert.throws(
+    () => basketCompositionDigest([{ agentId: "a", weightBps: 5_000.25 }]),
+    /weights_must_be_integers/,
+  );
+});
+
+test("versioned composition snapshots track evolution and verify cryptographic integrity", () => {
+  const v1 = createBasketCompositionSnapshot({
+    basketId: "council-core",
+    version: 1,
+    capturedAt: 1_700_000_000_000,
+    members: [
+      { agentId: "optimist", weightBps: 6_000 },
+      { agentId: "contrarian", weightBps: 4_000 },
+    ],
+  });
+
+  assert.equal(v1.version, 1);
+  assert.equal(v1.totalWeightBps, 10_000);
+  assert.equal(v1.previousDigest, null);
+  assert.deepEqual(
+    v1.members.map((m) => m.agentId),
+    ["contrarian", "optimist"],
+  );
+  assert.deepEqual(verifyBasketCompositionSnapshot(v1), { ok: true });
+
+  // Evolving with the same members in a different order keeps version 1 and the same digest.
+  const reordered = evolveBasketCompositionSnapshot(
+    v1,
+    [
+      { agentId: "contrarian", weightBps: 4_000 },
+      { agentId: "optimist", weightBps: 6_000 },
+    ],
+    { capturedAt: 1_700_000_060_000 },
+  );
+  assert.equal(reordered.version, 1);
+  assert.equal(reordered.compositionDigest, v1.compositionDigest);
+  assert.equal(reordered.previousDigest, null);
+
+  // Material weight change advances to version 2 and binds previousDigest to v1.
+  const v2 = evolveBasketCompositionSnapshot(
+    v1,
+    [
+      { agentId: "optimist", weightBps: 5_000 },
+      { agentId: "contrarian", weightBps: 5_000 },
+    ],
+    { capturedAt: 1_700_000_120_000 },
+  );
+  assert.equal(v2.version, 2);
+  assert.notEqual(v2.compositionDigest, v1.compositionDigest);
+  assert.equal(v2.previousDigest, v1.compositionDigest);
+  assert.deepEqual(verifyBasketCompositionSnapshot(v2), { ok: true });
+
+  // Tampering with a member weight without recomputing the digest fails verification.
+  const tampered = {
+    ...v2,
+    members: [
+      { agentId: "contrarian", weightBps: 4_900 },
+      { agentId: "optimist", weightBps: 5_100 },
+    ],
+  };
+  assert.deepEqual(verifyBasketCompositionSnapshot(tampered), {
+    ok: false,
+    error: "composition_digest_mismatch",
+  });
+});
+
+test("material composition comparison enforces weight-drift boundary and flags any member identity change", () => {
+  const baseline = [
+    { agentId: "a", weightBps: 5_000 },
+    { agentId: "b", weightBps: 5_000 },
+  ];
+
+  // Reordered array is unchanged.
+  const unchanged = compareBasketCompositions(baseline, [
+    { agentId: "b", weightBps: 5_000 },
+    { agentId: "a", weightBps: 5_000 },
+  ]);
+  assert.equal(unchanged.digestChanged, false);
+  assert.equal(unchanged.materialChange, false);
+  assert.equal(unchanged.reason, "unchanged");
+
+  // Boundary with materialDriftBps = 100 (1%): 99 bps shift is within tolerance; 100 bps is material.
+  const withinTolerance = compareBasketCompositions(
+    baseline,
+    [
+      { agentId: "a", weightBps: 5_099 },
+      { agentId: "b", weightBps: 4_901 },
+    ],
+    { materialDriftBps: 100 },
+  );
+  assert.equal(withinTolerance.digestChanged, true);
+  assert.equal(withinTolerance.maxWeightDeltaBps, 99);
+  assert.equal(withinTolerance.materialChange, false);
+  assert.equal(withinTolerance.reason, "within_tolerance");
+
+  const atBoundary = compareBasketCompositions(
+    baseline,
+    [
+      { agentId: "a", weightBps: 5_100 },
+      { agentId: "b", weightBps: 4_900 },
+    ],
+    { materialDriftBps: 100 },
+  );
+  assert.equal(atBoundary.digestChanged, true);
+  assert.equal(atBoundary.maxWeightDeltaBps, 100);
+  assert.equal(atBoundary.materialChange, true);
+  assert.equal(atBoundary.reason, "weights_changed");
+
+  // Replacing a member is always material even if the replaced member's weight is tiny (< materialDriftBps).
+  const tinyMemberSwap = isMaterialCompositionChange(
+    [
+      { agentId: "a", weightBps: 9_950 },
+      { agentId: "b", weightBps: 50 },
+    ],
+    [
+      { agentId: "a", weightBps: 9_950 },
+      { agentId: "c", weightBps: 50 },
+    ],
+    { materialDriftBps: 500 },
+  );
+  assert.equal(tinyMemberSwap, true);
+});
+
+test("subscriptionMessage optionally binds compositionVersion and compositionDigest while preserving backward compatibility", () => {
+  const baseArgs = {
+    action: "subscribe" as const,
+    basketId: "council-core",
+    subscriber: "GBAHBL3NSW3KH3HZENA4H6NKTWLDZESHQLNAB2O5HORMZH6GK5FWTTKO",
+    perMarketUsdc: 5,
+    nonce: "nonce-1234567890abcdef",
+    expiresAt: 1_800_000_000_000,
+  };
+  const legacyMsg = subscriptionMessage(baseArgs);
+  assert.equal(legacyMsg.includes("compositionDigest:"), false);
+
+  const snapshot = createBasketCompositionSnapshot({
+    basketId: "council-core",
+    version: 3,
+    capturedAt: 1_800_000_000_000,
+    members: [
+      { agentId: "optimist", weightBps: 5_000 },
+      { agentId: "statistician", weightBps: 5_000 },
+    ],
+  });
+  const versionedMsg = subscriptionMessage({
+    ...baseArgs,
+    compositionVersion: snapshot.version,
+    compositionDigest: snapshot.compositionDigest,
+  });
+  assert.match(versionedMsg, /compositionVersion: 3/);
+  assert.match(versionedMsg, new RegExp(`compositionDigest: ${snapshot.compositionDigest}`));
 });

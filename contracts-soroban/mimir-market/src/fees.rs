@@ -9,9 +9,34 @@ use crate::types::{
     FEE_POLICY_COMPAT_VERSION, FEE_TIMELOCK_SECONDS, MAX_TOTAL_FEE_BPS, MIN_STAKE, USDC_DECIMALS,
 };
 
+/// Exact fee-ledger view for one recipient, in atomic USDC units.
+///
+/// Field meanings are stable:
+/// - `accrued`: lifetime fees credited to the recipient (monotonic).
+/// - `claimed`: lifetime fees the recipient has withdrawn (monotonic).
+/// - `outstanding`: fees still owed to the recipient (`accrued - claimed`).
+///
+/// `accrued == 0` means no accrual ever happened; `accrued > 0` with
+/// `outstanding == 0` means a fully claimed balance. The two are distinct.
+pub struct FeeBalance {
+    pub accrued: i128,
+    pub claimed: i128,
+    pub outstanding: i128,
+}
+
 /// `stake * bps / BPS_DIVISOR`, truncating. Checked multiplication so an
 /// absurd stake errors instead of wrapping, matching Solidity 0.8 revert-on-
 /// overflow semantics.
+/// Returns `Error::StaleFeePolicyRevision` when an approved administrative
+/// change is stale relative to the active fee-policy revision.
+/// Callers must reject such changes and leave the active policy and balances untouched.
+pub fn check_policy_revision(expected: u64, active: u64) -> Result<(), Error> {
+    if expected != active {
+        return Err(Error::StaleFeePolicyRevision);
+    }
+    Ok(())
+}
+
 pub fn gross_payout(stake: i128, bps: u32) -> Result<i128, Error> {
     stake
         .checked_mul(bps as i128)
@@ -33,6 +58,21 @@ pub fn pool_share(
         .checked_mul(creator_stake)
         .map(|p| p / total_challenger_stake)
         .ok_or(Error::Overflow)
+}
+
+/// Read the accrued / claimed / outstanding fee values for `recipient`.
+///
+/// Values are exact atomic integers read from contract state, which remains
+/// authoritative. `outstanding` is derived as `accrued - claimed` and is never
+/// negative under the invariant that claims never exceed accruals.
+pub fn fee_balance(env: &Env, recipient: &Address) -> FeeBalance {
+    let accrued = storage::get_accrued_fees(env, recipient);
+    let claimed = storage::get_claimed_fees(env, recipient);
+    FeeBalance {
+        accrued,
+        claimed,
+        outstanding: accrued - claimed,
+    }
 }
 
 /// The fee split for a gross payout, without accruing anything. Returns
@@ -65,6 +105,57 @@ fn bps_of(amount: i128, bps: u32) -> Result<i128, Error> {
         .checked_mul(bps as i128)
         .map(|p| p / BPS_DIVISOR)
         .ok_or(Error::Overflow)
+}
+
+#[cfg(test)]
+mod settlement_vector_tests {
+    //! Independently derived expected values for tiny atomic USDC stakes.
+    //! Expectations are computed by hand (integer floor division), not by
+    //! calling the contract's own helpers, so they cross-check the logic.
+    use super::*;
+
+    #[test]
+    fn pool_share_splits_with_indivisible_remainder() {
+        // Three challengers stake 1, 1, 1 (total 3) against a creator stake of 2.
+        // Each owes floor(1 * 2 / 3) = 0, so the whole pool remains as dust.
+        assert_eq!(pool_share(1, 2, 3).unwrap(), 0);
+        assert_eq!(pool_share(1, 2, 3).unwrap() + pool_share(1, 2, 3).unwrap() + pool_share(1, 2, 3).unwrap(), 0);
+        // Stakes 2, 3, 5 (total 10) against creator stake 7:
+        // floor(2*7/10)=1, floor(3*7/10)=2, floor(5*7/10)=3 -> sum 6, dust 1.
+        assert_eq!(pool_share(2, 7, 10).unwrap(), 1);
+        assert_eq!(pool_share(3, 7, 10).unwrap(), 2);
+        assert_eq!(pool_share(5, 7, 10).unwrap(), 3);
+    }
+
+    #[test]
+    fn pool_share_zero_total_is_zero() {
+        assert_eq!(pool_share(0, 5, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn pool_share_overflow_errors() {
+        assert_eq!(pool_share(i128::MAX, 2, 1), Err(Error::Overflow));
+    }
+
+    #[test]
+    fn gross_payout_tiny_stakes_round_down() {
+        // 1 atomic unit at 3333 bps: floor(3333 / 10000) = 0.
+        assert_eq!(gross_payout(1, 3333).unwrap(), 0);
+        // 3 atomic units at 5000 bps: floor(15000 / 10000) = 1.
+        assert_eq!(gross_payout(3, 5000).unwrap(), 1);
+    }
+
+    #[test]
+    fn quote_fees_no_profit_takes_nothing() {
+        let fees = FeeSnapshot {
+            platform_fee_bps: 1000,
+            agent_owner_fee_bps: 500,
+            platform_recipient: None,
+            agent_owner_recipient: None,
+        };
+        assert_eq!(quote_fees(10, 10, &fees).unwrap(), (10, 0));
+        assert_eq!(quote_fees(10, 7, &fees).unwrap(), (7, 0));
+    }
 }
 
 /// Split a gross payout into fees and the amount owed.

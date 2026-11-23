@@ -28,6 +28,8 @@ lib/x402/server.ts	x402 v2 seller paywall (@x402/next) + settlement recording
 lib/x402/buyer.ts	x402 v2 buyer with a hard USDC budget cap (@x402/fetch)
 agents/oracle/index.ts	Off-chain AI oracle agent (LLM + local keypair)
 agents/market-creator/index.ts	Autonomous market creator (LLM + local keypair)
+agents/market-creator/drafting.ts	LLM candidate drafting, statement revision review digest binding, and pre-signing verification
+agents/market-creator/dedupe.ts	Candidate signature normalization and post-revision duplicate filtering
 agents/council/	Ten AI personas that stake as economic actors
 fixtures/ledger/	Versioned public-chain captures for deterministic offline replay
 deploy/deploy.ts	Soroban build/deploy/initialize script
@@ -35,6 +37,7 @@ deploy/contract-artifacts.manifest.json	Pinned Wasm digests for fail-closed prov
 lib/ops/artifact-provenance.ts	Offline SHA-256 artifact provenance verifier
 lib/ops/cache-backup.ts	Offline read-index cache-backup verifier (checksum + privacy, no network)
 lib/ops/dependency-audit.ts	Fail-closed npm audit triage (production high/critical, privacy-safe)
+lib/ops/proposal-triage.ts	Operator proposal backlog triage export (grouped by age & blocking reason, privacy-safe)
 lib/server/read-index-backup.ts	DB-backed read-index dump / verified restore (restore fingerprint check)
 scripts/verify-artifact-provenance.ts	CLI: verify or --write-pins contract artifacts
 scripts/verify-cache-backup.ts	CLI: offline cache-backup verification (npm run verify:cache-backup)
@@ -68,6 +71,8 @@ environment behavior.
 | `lib/wallet-connectors.ts` | Connector list and per-wallet capability matrix |
 | `lib/wallet-signing-coordinator.ts` | Cross-tab wallet signing lease & uncertain-recovery coordinator |
 | `lib/stellar-message.ts` | SEP-43 `signMessage` verification (Ed25519, base64) |
+| `lib/api/schema.ts` | Request/response schema versioning and read-index source freshness/availability metadata (`live`, `cached`, `stale`, `unavailable`) |
+| `lib/api/errors.ts` | Machine-readable API errors and read-index feed boundary resolution (`resolveReadIndexFeed`, `upstreamUnavailableError`) |
 | `lib/content-hash.ts` | SHA-256 content hashing — the hash Soroban's host exposes |
 | `lib/agent-wallets.ts` | Local Stellar keypairs for oracle / creator / council |
 | `lib/agents/wallet-adapter.ts` | Vendor-neutral wallet boundary + budget policy for BYOA |
@@ -78,6 +83,8 @@ environment behavior.
 | `lib/x402/buyer.ts` | x402 v2 buyer with a hard USDC budget cap (`@x402/fetch`) |
 | `agents/oracle/index.ts` | Off-chain AI oracle agent (LLM + local keypair) |
 | `agents/market-creator/index.ts` | Autonomous market creator (LLM + local keypair) |
+| `agents/market-creator/drafting.ts` | LLM candidate drafting, statement revision review digest binding, and pre-signing verification |
+| `agents/market-creator/dedupe.ts` | Candidate signature normalization and post-revision duplicate filtering |
 | `agents/council/` | Ten AI personas that stake as economic actors |
 | `fixtures/ledger/` | Versioned public-chain captures for deterministic offline replay |
 | `deploy/deploy.ts` | Soroban build/deploy/initialize script |
@@ -246,6 +253,13 @@ Bash
 
 ## Node test workflow (must stay green on release)
 
+Run `npm run test:node -- --help` for text help. For tools, use
+`npm run --silent test:node -- --help-json` to get a JSON object with a
+`flags` array. Each entry describes the flag name, option key and default.
+Optional fields list aliases, negated forms, a path argument, or an option
+enabled by that flag. Path defaults are repository-relative. A null cache
+directory uses `MIMIR_NODE_TEST_CACHE_DIR` or the built-in cache root.
+
 The release entry point is `npm run test:node`; `test:smoke` remains an alias
 for callers that already use it. The runner discovers all
 `tests/node/*.test.ts` files in deterministic order and explicitly preserves
@@ -260,6 +274,10 @@ a dependency, runtime, or runner change therefore misses the cache. Use
 `--no-cache` for a forced cold run and `--clear-cache` before diagnosing a
 cache problem. CI caches the same directory, but the manifest and versioned
 path prevent stale entries from being trusted.
+
+Before discovering tests or creating a cache, the runner checks the Node version
+against the `engines.node` range in `package.json`. If the version is unsupported,
+run `nvm install` and `nvm use` in the repository root, then retry.
 
 The runner uses a strict child-environment allowlist. It does not load
 `.env.local` and does not pass production seeds, Stellar credentials, LLM keys,
@@ -328,6 +346,28 @@ Explorer: https://stellar.expert/explorer/testnet
 Public endpoints (rate-limited): https://soroban-testnet.stellar.org and
 https://horizon-testnet.stellar.org
 
+## Market-creator statement revision review
+
+Before the market-creator signs `create_claim` on chain, drafted and deduplicated
+candidates pass through the statement revision review step in
+`agents/market-creator/drafting.ts` and `agents/market-creator/dedupe.ts`:
+
+- **Digest binding** (`reviewStatementRevision`, `computeStatementRevisionDigest`,
+  `buildSourceCommitment`): binds the approved statement wording (`question` and
+  any present `settlementRule`, `creatorPosition`, `counterPosition`), canonical
+  ISO-8601 `deadline`, and resolution `sourceCommitment` (derived from the
+  canonical `resolutionUrl` and optional `sourceText`, or validated when supplied
+  explicitly) into a length-framed SHA-256 digest (`statementDigest`).
+- **Post-revision deduplication** (`reviewDraftedCandidates`,
+  `filterDuplicateCandidates`, `buildCandidateSignature`): drops any candidate whose revised statement
+  collides with an earlier candidate in the batch or an active on-chain claim.
+- **Pre-signing verification** (`verifyStatementForSigning`,
+  `assertStatementApprovedForSigning`, `signApprovedCandidate`): recomputes the
+  statement digest and compares every reviewed field against the approved
+  snapshot before signing. Signing is rejected if any reviewed statement field
+  changed, if the review was not approved, or if the digest is missing or
+  mismatched.
+
 ## Traders
 
 Mimir includes three demo BYOA (Bring Your Own Agent) traders in [`agents/traders/`](../agents/traders) that stake their own USDC against open claims:
@@ -355,6 +395,7 @@ npm run workers
 | `TRADER_MAX_STAKES_PER_CYCLE` | `1` | Maximum number of open claims each trader persona will challenge per cycle. |
 | `TRADER_MAX_PAID_READS_PER_CYCLE` | `3` | Maximum number of paid oracle second opinions bought per trader per cycle. Set to `0` to disable paid reads entirely. |
 | `TRADER_DRY_RUN` | `""` (disabled) | When set to `"1"`, logs decisions and planned stakes without broadcasting on-chain transactions or spending USDC. |
+| `TRADER_STATE_DIR` | `.mimir/traders` | Directory for durable trader state (`consumed-signals.json`). Consumed `(agentId, claimId)` signal identities are checked before x402 oracle quote purchase so repeat polling does not re-spend on already-completed decisions. |
 | `MIMIR_URL` | `""` | Base URL of the Mimir app instance (e.g. `http://localhost:3000`) used to buy x402 oracle second opinions via `POST /api/oracle`. Second-opinion purchase is skipped when unset or empty. |
 | `TRADER_BUY_ORACLE` | `"1"` (enabled) | Set to `"0"` to disable purchasing oracle second opinions over x402, evaluating claims using only persona reasoning. Any other value or unset enables oracle purchases. |
 | `TRADER_MOMENTUM_SECRET` | _(none)_ | Stellar secret seed (`S…`) for the Momentum Forecaster persona (`momentum-forecaster`). Trader is skipped if unset or invalid. |
@@ -415,10 +456,12 @@ property testable on a clean checkout and in CI.
   `BACKUP_MISSING_TABLE`, `BACKUP_UNKNOWN_TABLE`, `BACKUP_EMPTY`,
   `BACKUP_CHECKSUM_MISMATCH`, `BACKUP_PRIVATE_CONTENT_LEAK`. A private claim's
   scrubbed content fields must stay `null` in the archive.
-- **Restore** (`npm run restore:read-index -- <file> [--dry-run]`) requires
+- **Restore** (`npm run restore:read-index -- <file> [--dry-run] [--batch-size <n>]`) requires
   `DATABASE_URL`. An unverified archive is refused before any write; writes run
-  in one transaction so a failure rolls back; afterwards the cache is re-read
-  and its fingerprint is compared against the archive's checksum.
+  in checkpointed transactions (or a single transaction when `--batch-size` is unset);
+  afterwards the cache is re-read and its fingerprint is compared against the
+  archive's checksum. Replay after interrupted batches is idempotent and does not
+  double-apply settlement or fee events.
 - **Rollback**: restore any verified archive, or — because contract state is
   the source of truth — re-warm from chain (`npm run warm:vs-index` / `npm run
   sync`). Restoring never writes to the chain.

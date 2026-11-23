@@ -46,7 +46,7 @@
  * in the page component so the boundary between state and rendering is clear.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getVSFull } from "@/lib/contract";
 import { getPendingVS } from "@/lib/pending-vs";
@@ -74,6 +74,12 @@ import {
   VS_DETAIL_MAX_ATTEMPTS,
 } from "@/lib/vs-detail-state";
 import { getNextPollDelay } from "@/lib/poll-schedule";
+import {
+  evaluateMarketExpiry,
+  observationFromFreshness,
+  type ExpiryObservation,
+  type MarketExpiry,
+} from "@/lib/market-expiry";
 import type { VSData } from "@/lib/contract";
 import type { VSCacheFreshness } from "@/lib/vs-freshness";
 
@@ -245,6 +251,14 @@ export function useVsDetail({
   const [fetchAttempts, setFetchAttempts] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
 
+  // ── Observed ledger context ───────────────────────────────────────────────
+  //
+  // Expiry is a ledger timestamp. We can only observe it through a read, so the
+  // hook records when the snapshot arrived and evaluates the deadline against
+  // that observation instead of trusting the browser clock on its own.
+  const [expiryObservation, setExpiryObservation] = useState<ExpiryObservation | null>(null);
+  const [expiryClockMs, setExpiryClockMs] = useState<number>(() => Date.now());
+
   /**
    * Consecutive failure count used to back off the polling interval.
    * Reset to 0 on every successful load.
@@ -354,6 +368,8 @@ export function useVsDetail({
       setFetchAttempts(0);
       consecutiveFailuresRef.current = 0;
       setRefreshing(false);
+      setExpiryObservation(null);
+      setExpiryClockMs(Date.now());
       setPhase(isValidVsId(vsId) ? "loading" : "invalid");
       setActivity([]);
       setActivityLoading(false);
@@ -388,6 +404,12 @@ export function useVsDetail({
         }
         setVs(data);
         setCache(null);
+        setExpiryObservation({
+          source: "sample",
+          receivedAtMs: Date.now(),
+          serverNowMs: null,
+          freshness: null,
+        });
         setPhase("ready");
         return;
       }
@@ -420,6 +442,9 @@ export function useVsDetail({
             return snapshot.item!;
           });
           setCache(snapshot.cache ?? null);
+          setExpiryObservation(
+            observationFromFreshness(snapshot.cache ?? null, Date.now())
+          );
           setFetchAttempts(0);
           consecutiveFailuresRef.current = 0;
           setPhase("ready");
@@ -433,6 +458,14 @@ export function useVsDetail({
           if (myGeneration !== generationRef.current) return;
           setVs(pending);
           setCache(null);
+          // Optimistic local state is not a ledger observation: the deadline is
+          // shown as an estimate until the first on-chain read lands.
+          setExpiryObservation({
+            source: "local_draft",
+            receivedAtMs: Date.now(),
+            serverNowMs: null,
+            freshness: null,
+          });
           consecutiveFailuresRef.current = 0;
           setPhase("ready");
           setRefreshing(false);

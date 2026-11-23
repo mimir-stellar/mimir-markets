@@ -2,6 +2,17 @@
 
 ## Overview
 
+### Storage Schema Version (for indexers)
+
+The `mimir-squad` contract exposes a bounded compatibility descriptor so off-chain indexers can detect the storage schema they are reading. The descriptor is returned by a read-only view and contains:
+
+- `schema_version`: the integer storage schema version (currently `1`).
+- `min_supported_version`: the lowest schema version the indexer must support (currently `1`).
+- `max_supported_version`: the highest schema version defined by this contract (currently `1`).
+
+Indexers MUST verify that their required schema interpretation falls within `[min_supported_version, max_supported_version]` and MUST reject (fail closed on) any unsupported required schema interpretation. Soroban contract state remains authoritative; Postgres is only a read index.
+
+
 This document describes where squad pool state lives in the Soroban ledger for `mimir-squad` (`contracts-soroban/mimir-squad/src/storage.rs`), how long it persists, the TTL (Time-To-Live) bumping policies across storage classes, and operational risks concerning state archival for unclaimed deposits and parked payouts.
 
 ### Claim Status Reporting
@@ -63,6 +74,14 @@ Every storage key is represented by the `DataKey` enum (`contracts-soroban/mimir
 | `DataKey::Deposit(u64, u32, Address)` | Persistent | `i128` | **Write only (`set_deposit`)**; **NEVER on read** | `deposit_of` (storage.rs:133), `set_deposit` (storage.rs:140), `deposit` (pool.rs:22), `withdraw_before_deadline` (pool.rs:72), `claim` (pool.rs:160), `preview_claim` (pool.rs:312), `get_deposit` view (contract.rs:101) |
 | `DataKey::Claimed(u64, u32, Address)` | Persistent | `bool` | **Write only (`mark_claimed`)**; **NEVER on read** | `has_claimed` (storage.rs:152), `mark_claimed` (storage.rs:158), `claim` (pool.rs:160), `has_claimed` view (contract.rs:105). Distinct from claimable amount: a `true` flag yields the `AlreadyClaimed` state, while a missing deposit yields `NoPosition`. |
 | `DataKey::Payout(u64, u32, Address)` | Persistent | `i128` | **Write only (`set_payout`)**; **NEVER on read** | `payout_of` (storage.rs:170), `set_payout` (storage.rs:177), `claim` (pool.rs:232), `claim_parked_payout` (contract.rs:86, pool.rs:254), `parked_payout` view (contract.rs:128) |
+
+### Schema Compatibility Descriptor
+
+| Field | Type | Current Value | Description |
+| :--- | :--- | :--- | :--- |
+| `schema_version` | `u32` | `1` | Storage schema version of this deployment |
+| `min_supported_version` | `u32` | `1` | Lowest schema version indexers must support |
+| `max_supported_version` | `u32` | `1` | Highest schema version defined by this contract |
 
 ---
 

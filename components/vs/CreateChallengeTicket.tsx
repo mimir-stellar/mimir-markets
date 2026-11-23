@@ -4,6 +4,8 @@ import { Activity } from "lucide-react";
 import { createHash } from "crypto";
 import { useTranslations } from "next-intl";
 import { useEffect, useMemo, useState } from "react";
+import { formatDeadline } from "@/lib/constants";
+import { evaluateMarketExpiry } from "@/lib/market-expiry";
 import {
   CREATE_TICKET_BODY_CLASS,
   CREATE_TICKET_META_GRID_CLASS,
@@ -19,6 +21,19 @@ function truncate(s: string, max: number) {
   const t = s.trim();
   if (t.length > max) return t;
   return `${t.slice(0, max - 1)}…`;
+}
+
+/**
+ * Only https URLs may be rendered as links. Anything else (javascript:, data:,
+ * http:, malformed) stays visible as plain text with an accessible note.
+ */
+function isSafeSourceUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw.trim());
+    return u.protocol === "https:" && u.username === "" && u.password === "";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -49,6 +64,12 @@ export type CreateChallengeTicketProps = {
   /** Texto mostrado como vista previa de settlement (regla actual o plantilla guía). */
   settlementPreview: string;
   stakeAmount: number;
+  /**
+   * Unix seconds chosen in the create form. This is a local draft estimate: the
+   * ledger timestamp is only fixed once the claim is created, so the ticket must
+   * never present it as confirmed eligibility.
+   */
+  deadlineUnix?: number | null;
   /** Dirección conectada para la línea AUTH_SIG; si no hay, se muestra un marcador. */
   walletAddress?: string | null;
   /** Monto máximo permitido por mercado (suscripción). Usado para clamp. */
@@ -72,12 +93,50 @@ export default function CreateChallengeTicket({
   visibilityLabel,
   settlementPreview,
   stakeAmount,
+  deadlineUnix,
   walletAddress,
   maxAmount,
   searchParams,
   accountChanged = false,
 }: CreateChallengeTicketProps) {
   const t = useTranslations("create");
+  const locale = useLocale();
+
+  /**
+   * Format the draft deadline only after mount: locale/timezone formatting on
+   * the server would not match the viewer's clock.
+   */
+  const [deadlineLabel, setDeadlineLabel] = useState("");
+  useEffect(() => {
+    if (
+      typeof deadlineUnix !== "number" ||
+      !Number.isFinite(deadlineUnix) ||
+      deadlineUnix <= 0
+    ) {
+      setDeadlineLabel("");
+      return;
+    }
+    setDeadlineLabel(
+      formatDeadline(deadlineUnix, locale.startsWith("es") ? "es" : "en"),
+    );
+  }, [deadlineUnix, locale]);
+
+  // A draft has no ledger observation: the deadline is an estimate until the
+  // claim is created and its on-chain timestamp is read back.
+  const deadlineExpiry = useMemo(
+    () =>
+      evaluateMarketExpiry({
+        deadlineUnix: deadlineUnix ?? null,
+        nowMs: Date.now(),
+        observation: {
+          source: "local_draft",
+          receivedAtMs: Date.now(),
+          serverNowMs: null,
+          freshness: null,
+        },
+      }),
+    [deadlineUnix],
+  );
 
   // Resolve search params from prop or, in the browser, from the URL.
   const [resolvedSearch, setResolvedSearch] = useState<string | undefined>(
@@ -201,6 +260,16 @@ export default function CreateChallengeTicket({
                 {visibilityLabel}
               </span>
             </div>
+            {deadlineLabel ? (
+              <div>
+                <div className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-pv-muted">
+                  {t("ticketDeadline")}
+                </div>
+                <span className="break-words text-sm font-semibold text-pv-text">
+                  {deadlineLabel}
+                </span>
+              </div>
+            ) : null}
             {prefill ? (
               <div>
                 <div className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-pv-muted">
@@ -212,6 +281,15 @@ export default function CreateChallengeTicket({
               </div>
             ) : null}
           </div>
+
+          {deadlineExpiry.estimateStale && deadlineLabel ? (
+            <p
+              role="status"
+              className="text-[11px] leading-relaxed text-pv-gold"
+            >
+              {t("ticketDeadlineStale")}
+            </p>
+          ) : null}
 
           <div className="space-y-2 border-t border-pv-ink/[0.08] pt-6">
             <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-pv-muted">

@@ -56,6 +56,18 @@ pub const FEE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 /// changes that control settlement.
 pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 
+/// Post-deadline resolution expiration window, in seconds.
+///
+/// `0` means there is no post-deadline resolution expiration or permissionless
+/// timeout fallback for `Active` claims: oracle-only resolution remains
+/// authoritative after `deadline`, while unchallenged `Open` claims can still
+/// be permissionlessly cancelled via `transition_deadline` once `deadline` is
+/// reached.
+pub const RESOLUTION_EXPIRY_SECONDS: u64 = 0;
+
+/// Maximum valid oracle confidence score accepted by `resolve_claim` (0..=100).
+pub const MAX_CONFIDENCE: u32 = 100;
+
 /// Upper bound on the byte length of an invite key.
 ///
 /// DEVIATION FROM SOLIDITY: `keccak256(bytes(inviteKey))` accepted any length.
@@ -455,6 +467,37 @@ pub struct PlatformStats {
     pub fees_claimed: i128,
 }
 
+// ── Resolution expiration policy ─────────────────────────────────────────────
+
+/// Read-only descriptor of the currently approved oracle resolution and claim
+/// expiration policy enforced on chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolutionExpirationPolicy {
+    /// Whether active claims can only be resolved by the configured oracle.
+    pub oracle_only_resolution: bool,
+    /// Anti-sniping buffer (seconds) before `deadline` during which new
+    /// challenges are rejected (`CHALLENGE_LOCK_SECONDS`).
+    pub challenge_lock_seconds: u64,
+    /// Timelock delay (seconds) for rotating the oracle (`ORACLE_TIMELOCK_SECONDS`).
+    pub oracle_timelock_seconds: u64,
+    /// Post-deadline resolution expiration window in seconds.
+    /// `0` indicates no post-deadline expiry / no permissionless timeout
+    /// fallback for active claims; oracle resolution remains authoritative.
+    pub resolution_expiry_seconds: u64,
+    /// Whether an unchallenged `Open` claim at or after `deadline` can be
+    /// permissionlessly cancelled via `transition_deadline` with full creator
+    /// refund.
+    pub open_claim_expiry_cancels: bool,
+    /// Whether an `Active` claim auto-expires or refunds without oracle
+    /// resolution.
+    pub active_claim_auto_expires: bool,
+    /// Currently supported on-chain verdict encoding version (`VERDICT_VERSION_V1`).
+    pub verdict_version: u32,
+    /// Maximum valid oracle confidence score (`MAX_CONFIDENCE`, 0..=100).
+    pub max_confidence: u32,
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -531,4 +574,8 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    /// A queued fee-policy change was approved against a revision that is no
+    /// longer the active policy. The stale change is rejected and the active
+    /// policy and all balances are left untouched.
+    StaleFeePolicyRevision = 48,
 }

@@ -516,7 +516,22 @@ export default function VSDetailPage() {
     !isSampleVS &&
     !missingPrivateInvite &&
     isVSJoinable(vs, address) &&
+    // Expiry is a ledger timestamp. Only offer the stake form when the latest
+    // observation can still back that promise; on-chain time is authoritative.
+    expiry.challengeable &&
     isConnected;
+  /**
+   * True when the browser alone would allow a join but the observed ledger
+   * context is too old (or the clocks disagree). Fail closed and ask for a
+   * refresh instead of implying the challenge window is still open.
+   */
+  const expiryBlocksJoin =
+    !isSampleVS &&
+    !missingPrivateInvite &&
+    isConnected &&
+    (vs.state === "open" || vs.state === "accepted") &&
+    isVSJoinable(vs, address) &&
+    !expiry.challengeable;
   const acceptTrustlineGate = evaluateUsdcTrustlineGate({
     action: "accept",
     status: trustline.status,
@@ -1249,6 +1264,11 @@ export default function VSDetailPage() {
                         showPhaseBadge={false}
                         timeClassName="text-base sm:text-lg lg:text-xl"
                       />
+                      {expiry.estimateStale ? (
+                        <p className="mt-1 text-[10px] leading-snug text-pv-gold">
+                          {t("deadlineEstimateShort")}
+                        </p>
+                      ) : null}
                     </div>
                   </div>
                   <div className="flex min-h-[5.75rem] min-w-0 flex-col bg-pv-bg/55 px-4 py-3.5 sm:min-h-[6rem] sm:px-4 sm:py-4">

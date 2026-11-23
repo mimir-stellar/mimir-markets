@@ -16,6 +16,7 @@
  *
  * Redirects are followed MANUALLY (`redirect: "manual"`) — the whole point is to
  * re-validate each hop, which `fetch`'s automatic following makes impossible.
+ * Captured redirect chains can be evaluated offline via `diagnoseRedirectPolicy`.
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -79,13 +80,25 @@ export interface FetchSuccess {
   body: string;
   /** SHA-256 of the body, bare hex, so a reader can verify the capture later. */
   contentHash: string;
+  /**
+   * When the source was actually fetched. A cache hit keeps the original
+   * capture time; it is never replaced with the time the cache was read.
+   */
   capturedAt: number;
+  /** When this result was handed to the caller. Equals `capturedAt` on a fresh fetch. */
+  servedAt: number;
+  /** `fetched` for a new network fetch, `cache` for a replay of an earlier capture. */
+  acquisition: "fetched" | "cache";
   bytes: number;
+  /** Same as `acquisition === "cache"`; kept for existing callers. */
   fromCache: boolean;
   redirects: number;
   /** Complete chain of URLs visited during this fetch. */
   redirectChain: string[];
-  /** Content-validation policy revision bound to this fetch result. */
+  /**
+   * Content-validation policy revision bound to this fetch result. Set on both
+   * paths: a cache hit carries the revision of its original capture.
+   */
   policyRevision?: string;
 }
 
@@ -692,7 +705,18 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
   }
 
   const cached = cacheGet(args.url, now, policyRevision);
-  if (cached) return { ok: true, ...cached, fromCache: true };
+  if (cached) {
+    // Replay, not a new acquisition: keep the original capturedAt and policy
+    // revision, and report the replay time separately as servedAt.
+    return {
+      ok: true,
+      ...cached,
+      redirectChain: [...cached.redirectChain],
+      servedAt: now,
+      acquisition: "cache",
+      fromCache: true,
+    };
+  }
 
   // Reserve bounded request and paid-fetch units before dispatch
   const reserved = reserveBudget({
@@ -876,14 +900,28 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       body: text,
       contentHash: sha256Hex(text),
       capturedAt: now,
+      servedAt: now,
+      acquisition: "fetched",
       bytes,
       fromCache: false,
       redirects,
       redirectChain,
       policyRevision,
     };
-    cacheSet(args.url, success, policyRevision, now);
+    cacheSet(args.url, { ...success, redirectChain: [...redirectChain] }, policyRevision, now);
     return { ok: true, ...success };
   }
 }
+
+// ── Offline redirect diagnostics export ───────────────────────────────────────
+
+export {
+  diagnoseRedirectPolicy,
+  redactUrlIdentity,
+  type HopPolicyVerdict,
+  type RedirectDiagnosticsOpts,
+  type RedirectHopDiagnostic,
+  type RedirectPolicyDiagnostics,
+} from "./content-validation";
+
 

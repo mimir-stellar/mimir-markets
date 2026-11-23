@@ -418,6 +418,27 @@ test("GET handler returns 200 with rows for a valid request", async () => {
   assert.equal(body.offset, 0);
 });
 
+test("GET handler rejects repeated query parameters before database access", async () => {
+  process.env.CRON_SECRET = "test-secret";
+  const { GET } = await import("../../app/api/proposals/review/route");
+  for (const query of [
+    "status=queued&status=approved",
+    "limit=10&limit=20",
+    "nonce=nonce-aaaaaaaaaaaaaaaa&nonce=nonce-bbbbbbbbbbbbbbbb",
+  ]) {
+    reset();
+    const req = new Request(`http://localhost/api/proposals/review?${query}`, {
+      headers: { authorization: "Bearer test-secret" },
+    }) as unknown as Request;
+    const res = await GET(req as never);
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), {
+      error: { message: "Duplicate query parameters are not allowed" },
+    });
+    assert.equal(recorded.length, 0, "ambiguous input must be rejected before querying the database");
+  }
+});
+
 test("GET handler returns 400 for invalid status", async () => {
   reset();
   process.env.CRON_SECRET = "test-secret";

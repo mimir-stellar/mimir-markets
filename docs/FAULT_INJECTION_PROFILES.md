@@ -100,3 +100,21 @@ The full test suite for this module is:
 ```bash
 node --import tsx --test tests/node/fault-injection.test.ts
 ```
+
+
+---
+
+## Trader outage and sequence-race fixtures
+
+For autonomous trader staking, `tests/node/trader-outage-fixtures.ts` provides a deterministic offline harness (`FakeLedgerTransport` and `TraderRaceHarness`) that exercises `agents/traders/policy.ts` (`evaluateExposureAuthorization`, `TraderExposureGuard`, `filterJoinableClaims`) together with `lib/agents/sequence-manager.ts` (`SequenceManager`):
+
+- **Simultaneous opportunities**: verifies integer USDC exposure (`committedUsdc + inFlightUsdc`) never exceeds `maxPositionUsdc` or `maxDailyExposureUsdc`, and serialized sequence reservations never duplicate.
+- **Horizon/RPC outages**: verifies provider read failures release in-flight exposure without corrupting sequence state.
+- **Stale sequences (`tx_bad_seq`)**: verifies out-of-band ledger advances trigger `resync()` and retry cleanly within authorized limits.
+- **Late submission results**: verifies delayed settlements hold in-flight exposure until settled, preventing concurrent over-allocation, and handle out-of-order sequence holes and incident `pause()`/`resume()` cleanly.
+
+Run the focused suite with:
+
+```bash
+node --import tsx --test tests/node/trader-outage-sequence-race.test.ts
+```
