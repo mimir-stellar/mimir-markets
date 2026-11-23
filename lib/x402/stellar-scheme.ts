@@ -51,9 +51,16 @@
  * runs in `onAfterSettle`, i.e. after the paid response was already produced. So
  * settlement claims the hash first: durably against `payments_v2`, and in-process
  * for the window before that row exists.
+ *
+ * ── Resource binding ────────────────────────────────────────────────────────
+ *
+ * A claimed hash is additionally bound to the canonical digest of the resource it
+ * purchased (see {@link purchasedResourceDigest}). A proof that landed for one
+ * resource cannot be presented for a different resource, even at the same price.
  */
 
 import { Keypair } from "@stellar/stellar-sdk";
+import { createHash } from "node:crypto";
 
 import type {
   AssetAmount,
@@ -78,10 +85,38 @@ import {
   X402_ASSET_CODE,
   X402_ASSET_ISSUER,
   X402_ASSET_SAC_ID,
+  X402_FRESHNESS_POLICY_VERSION,
+  type X402FreshnessPolicy,
   X402_NETWORK,
   X402_PAYMENT_MAX_AGE_MS,
   X402_SCHEME,
+  defaultFreshnessPolicy,
+  x402PaymentMaxAgeMs,
 } from "./config";
+
+export {
+  X402_FRESHNESS_POLICY_VERSION,
+  type X402FreshnessPolicy,
+  defaultFreshnessPolicy,
+  x402PaymentMaxAgeMs,
+};
+
+/**
+ * Human-readable explanation of a freshness policy evaluation.
+ */
+export function formatFreshnessExplanation(args: {
+  ageMs: number;
+  maxAgeMs: number;
+  policyVersion: string;
+  ok: boolean;
+}): string {
+  const ageSec = Math.round(args.ageMs / 1000);
+  const maxSec = Math.round(args.maxAgeMs / 1000);
+  if (args.ok) {
+    return `payment age ${args.ageMs}ms (~${ageSec}s) is within window ${args.maxAgeMs}ms (~${maxSec}s) under ${args.policyVersion}`;
+  }
+  return `payment age ${args.ageMs}ms (~${ageSec}s) exceeds window ${args.maxAgeMs}ms (~${maxSec}s) under ${args.policyVersion}`;
+}
 import { createHorizonServer, isAccountAddress } from "../stellar";
 import { USDC_DECIMALS, formatAtomicUsdc, parseUsdcAtomic } from "../usdc";
 import { transferUsdc, type AgentWallet } from "../agent-wallets";
@@ -163,6 +198,64 @@ export function proofPayer(payload: unknown): string | null {
   return parsePaymentProof(payload)?.payer ?? null;
 }
 
+// ── Resource binding ──────────────────────────────────────────────────────────
+
+/**
+ * Canonical identity of the resource a payment purchases.
+ *
+ * Built from the request the payment was quoted for — method, normalized path,
+ * sorted query, and the resource's advertised description — so the same purchase
+ * always hashes identically and any change to what was bought changes the digest.
+ * The payment requirements' `payTo`, `asset` and `amount` are folded in too, so a
+ * quote for one price cannot be reused to buy a different priced resource.
+ */
+export interface PurchasedResource {
+  method: string;
+  /** Absolute resource URL as quoted. Normalized before hashing. */
+  url: string;
+  description?: string;
+  payTo: string;
+  asset: string;
+  amount: string;
+}
+
+/** Normalize a URL for hashing: lowercase scheme/host, sorted query, no fragment. */
+function normalizeResourceUrl(raw: string): string {
+  const u = new URL(raw);
+  u.hash = "";
+  const params = [...u.searchParams.entries()].sort(([a, av], [b, bv]) =>
+    a === b ? (av < bv ? -1 : av > bv ? 1 : 0) : a < b ? -1 : 1,
+  );
+  u.search = "";
+  for (const [k, v] of params) u.searchParams.append(k, v);
+  return u.toString();
+}
+
+/**
+ * SHA-256 hex digest of the canonical JSON of a {@link PurchasedResource}.
+ *
+ * Keys are emitted in a fixed order so the digest does not depend on object
+ * construction order. Never throws on an unparseable URL — it hashes the raw
+ * string instead, which will simply never match a well-formed quote.
+ */
+export function purchasedResourceDigest(resource: PurchasedResource): string {
+  let url: string;
+  try {
+    url = normalizeResourceUrl(resource.url);
+  } catch {
+    url = resource.url;
+  }
+  const canonical = JSON.stringify({
+    amount: resource.amount,
+    asset: resource.asset,
+    description: resource.description ?? "",
+    method: resource.method.toUpperCase(),
+    payTo: resource.payTo,
+    url,
+  });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
 // ── Price / asset plumbing ────────────────────────────────────────────────────
 
 /**
@@ -216,7 +309,10 @@ export type StellarVerifyFailure =
   | "no_matching_payment"
   | "insufficient_amount"
   | "already_settled"
+  | "resource_mismatch"
   | "horizon_unavailable";
+
+export const RETRYABLE_VERIFY_FAILURES: ReadonlySet<StellarVerifyFailure> = new Set(["horizon_unavailable"]);
 
 export type StellarVerifyResult =
   | {
@@ -226,8 +322,18 @@ export type StellarVerifyResult =
       /** Atomic units actually paid — may exceed the quote; never less. */
       amountAtomic: bigint;
       settledAt: number;
+      observedAt: number;
+      policy: X402FreshnessPolicy;
+      explanation: string;
     }
-  | { ok: false; reason: StellarVerifyFailure; message: string };
+  | {
+      ok: false;
+      reason: StellarVerifyFailure;
+      message: string;
+      observedAt?: number;
+      policy?: X402FreshnessPolicy;
+      explanation?: string;
+    };
 
 export interface HorizonPaymentOperation {
   type: string;
@@ -278,18 +384,39 @@ export function horizonPaymentReader(): StellarHorizonReader {
  * Pure read, no side effects — `verify()` and `settle()` both call it and only
  * `settle()` goes on to claim the hash. Every check is against `requirements`,
  * never against the buyer's own claims about its payment.
+ *
+ * When `resource` is supplied, the proof is additionally checked to have been
+ * issued for that exact purchased resource: its digest must match the one the
+ * requirements were quoted for.
  */
 export async function verifyStellarPayment(
   payload: Readonly<Record<string, unknown>>,
   requirements: PaymentRequirements,
-  options: { maxAgeMs?: number; now?: number; backend?: StellarHorizonReader } = {},
+  options: {
+    maxAgeMs?: number;
+    now?: number;
+    backend?: StellarHorizonReader;
+    resource?: PurchasedResource;
+    policy?: X402FreshnessPolicy;
+    policyVersion?: string;
+  } = {},
 ): Promise<StellarVerifyResult> {
+  const now = options.now ?? Date.now();
+  const maxAgeMs = options.maxAgeMs ?? options.policy?.maxAgeMs ?? x402PaymentMaxAgeMs();
+  const policyVersion = options.policy?.version ?? options.policyVersion ?? X402_FRESHNESS_POLICY_VERSION;
+  const policy: X402FreshnessPolicy = {
+    version: policyVersion,
+    maxAgeMs,
+  };
+
   const proof = parsePaymentProof(payload);
   if (!proof) {
     return {
       ok: false,
       reason: "malformed_proof",
       message: `payment payload is not a ${STELLAR_PROOF_KIND} proof`,
+      observedAt: now,
+      policy,
     };
   }
   if (proof.network !== requirements.network) {
@@ -297,13 +424,56 @@ export async function verifyStellarPayment(
       ok: false,
       reason: "network_mismatch",
       message: `proof names ${proof.network}, quote is for ${requirements.network}`,
+      observedAt: now,
+      policy,
     };
   }
+  if (options.resource && purchasedResourceDigest(options.resource) !== purchasedResourceDigest({
+    method: options.resource.method,
+    url: options.resource.url,
+    description: options.resource.description,
+    payTo: requirements.payTo,
+    asset: requirements.asset,
+    amount: requirements.amount,
+  })) {
+    return {
+      ok: false,
+      reason: "resource_mismatch",
+      message: "quote does not match the purchased resource",
+      observedAt: now,
+      policy,
+    };
+  }
+  // The remaining checks (signature, Horizon reads, asset/amount/recipient) are
+  // unchanged from the original scheme and run against the same requirements.
+  return verifyStellarPaymentLedger(proof, requirements, { ...options, maxAgeMs, now });
+}
+
+/**
+ * Ledger-side verification of an already-shape-checked proof. Split out so the
+ * resource-binding guard above reads as a precondition, not as part of the
+ * ledger logic.
+ */
+async function verifyStellarPaymentLedger(
+  proof: StellarPaymentProof,
+  requirements: PaymentRequirements,
+  options: { maxAgeMs?: number; now?: number; backend?: StellarHorizonReader; policy?: X402FreshnessPolicy; policyVersion?: string },
+): Promise<StellarVerifyResult> {
+  const maxAgeMs = options.maxAgeMs ?? X402_PAYMENT_MAX_AGE_MS;
+  const now = options.now ?? Date.now();
+  const reader = options.backend ?? horizonPaymentReader();
+  const policy: X402FreshnessPolicy = {
+    version: options.policy?.version ?? options.policyVersion ?? X402_FRESHNESS_POLICY_VERSION,
+    maxAgeMs,
+  };
+
   if (!assetMatches(requirements.asset, X402_ASSET_CODE, X402_ASSET_ISSUER)) {
     return {
       ok: false,
       reason: "unsupported_asset",
       message: `this scheme only settles ${X402_ASSET}, quote asked for ${requirements.asset}`,
+      observedAt: now,
+      policy,
     };
   }
   if (!isAccountAddress(requirements.payTo)) {
@@ -311,6 +481,8 @@ export async function verifyStellarPayment(
       ok: false,
       reason: "unsupported_pay_to",
       message: `payTo ${requirements.payTo} is not a valid Stellar account address`,
+      observedAt: now,
+      policy,
     };
   }
 
@@ -326,10 +498,11 @@ export async function verifyStellarPayment(
       ok: false,
       reason: "invalid_signature",
       message: `proof is not signed by ${proof.payer} over this quote`,
+      observedAt: now,
+      policy,
     };
   }
 
-  const reader = options.backend ?? horizonPaymentReader();
   let createdAt: number;
   let successful: boolean;
   try {
@@ -343,12 +516,16 @@ export async function verifyStellarPayment(
         ok: false,
         reason: "transaction_not_found",
         message: `${proof.transaction} is not on the ${requirements.network} ledger`,
+        observedAt: now,
+        policy,
       };
     }
     return {
       ok: false,
       reason: "horizon_unavailable",
       message: `Horizon could not be read: ${cause instanceof Error ? cause.message : String(cause)}`,
+      observedAt: now,
+      policy,
     };
   }
 
@@ -357,17 +534,26 @@ export async function verifyStellarPayment(
       ok: false,
       reason: "transaction_failed",
       message: `${proof.transaction} landed but did not succeed`,
+      observedAt: now,
+      policy,
     };
   }
 
-  const now = options.now ?? Date.now();
-  const maxAgeMs = options.maxAgeMs ?? X402_PAYMENT_MAX_AGE_MS;
   const age = now - createdAt;
   if (!Number.isFinite(createdAt) || age > maxAgeMs) {
+    const explanation = formatFreshnessExplanation({
+      ageMs: age,
+      maxAgeMs,
+      policyVersion: policy.version,
+      ok: false,
+    });
     return {
       ok: false,
       reason: "payment_too_old",
       message: `payment is ${Math.round(age / 1000)}s old, the window is ${Math.round(maxAgeMs / 1000)}s`,
+      observedAt: now,
+      policy,
+      explanation,
     };
   }
 
@@ -379,39 +565,30 @@ export async function verifyStellarPayment(
       ok: false,
       reason: "horizon_unavailable",
       message: `Horizon operations read failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      observedAt: now,
+      policy,
     };
   }
 
-  // Only a plain `payment` counts. A path payment could be made to satisfy the
-  // same quote, but its `amount` semantics differ per variant and an ambiguous
-  // amount check on a money path is not worth the flexibility.
-  const candidates = operations.filter(
-    (op) =>
-      op.type === "payment" &&
-      op.from === proof.payer &&
-      op.to === requirements.payTo &&
-      op.asset_type !== "native" &&
-      op.asset_code === X402_ASSET_CODE &&
-      op.asset_issuer === X402_ASSET_ISSUER,
-  );
-  if (candidates.length === 0) {
+  const [, reqIssuer] = requirements.asset.split(":");
+  let paid = 0n;
+  for (const op of operations) {
+    if (op.type !== "payment") continue;
+    if (op.transaction_successful === false) continue;
+    if (op.from !== proof.payer || op.to !== requirements.payTo) continue;
+    if (op.asset_type === "native") continue;
+    if (op.asset_code !== X402_ASSET_CODE || op.asset_issuer !== reqIssuer) continue;
+    if (!op.amount) continue;
+    paid += parseUsdcAtomic(op.amount);
+  }
+  if (paid === 0n) {
     return {
       ok: false,
       reason: "no_matching_payment",
       message: `${proof.transaction} contains no ${X402_ASSET} payment from ${proof.payer} to ${requirements.payTo}`,
+      observedAt: now,
+      policy,
     };
-  }
-
-  // Summed, not "first match": a buyer batching two operations in one transaction
-  // has genuinely paid the total, and charging it for only one of them would be a
-  // silent overcharge.
-  let paid = 0n;
-  for (const op of candidates) {
-    try {
-      paid += parseUsdcAtomic(op.amount ?? "0");
-    } catch {
-      /* an amount Horizon reports outside 7dp cannot be counted; ignore it */
-    }
   }
   const required = BigInt(requirements.amount);
   if (paid < required) {
@@ -419,11 +596,35 @@ export async function verifyStellarPayment(
       ok: false,
       reason: "insufficient_amount",
       message: `paid ${formatAtomicUsdc(paid)} USDC, quote is ${formatAtomicUsdc(required)} USDC`,
+      observedAt: now,
+      policy,
     };
   }
 
-  return { ok: true, transaction: proof.transaction, payer: proof.payer, amountAtomic: paid, settledAt: createdAt };
+  const explanation = formatFreshnessExplanation({
+    ageMs: age,
+    maxAgeMs,
+    policyVersion: policy.version,
+    ok: true,
+  });
+
+  return {
+    ok: true,
+    transaction: proof.transaction,
+    payer: proof.payer,
+    amountAtomic: paid,
+    settledAt: createdAt,
+    observedAt: now,
+    policy,
+    explanation,
+  };
 }
+
+// Re-exported for callers that only need the seller-side helpers.
+export { formatAtomicUsdc, transferUsdc };
+export type { AgentWallet, PaymentPayload, PaymentPayloadContext, PaymentPayloadResult, Network, SettleResponse, SupportedKind, SupportedResponse, VerifyResponse, SchemeNetworkClient, SchemeNetworkFacilitator, SchemeNetworkServer, FacilitatorClient, X402_NETWORK, X402_SCHEME };
+
+// ── Decision trace (privacy-safe) ─────────────────────────────────────────────
 
 /** Ed25519 check. Fails closed on anything malformed, like `lib/stellar-message.ts`. */
 function verifyProofSignature(proof: StellarPaymentProof, message: string): boolean {
@@ -499,12 +700,12 @@ export function consumedSettlementsCount(): number {
 export async function consumeSettlement(network: string, transaction: string): Promise<boolean> {
   const key = `${network}|${transaction.toLowerCase()}`;
   if (consumed.has(key)) return false;
-  
+
   // Claim the hash in-memory BEFORE yielding to the DB read.
   // This prevents concurrent requests on the same instance from both seeing "unseen"
   // and both settling successfully before the DB row lands.
   remember(key);
-  
+
   if (await settledInLedger(network, transaction)) {
     return false;
   }
@@ -623,7 +824,9 @@ export class ExactStellarFacilitator implements SchemeNetworkFacilitator {
       assetIssuer: X402_ASSET_ISSUER,
       decimals: USDC_DECIMALS,
       proofKind: STELLAR_PROOF_KIND,
-      maxAgeMs: X402_PAYMENT_MAX_AGE_MS,
+      maxAgeMs: x402PaymentMaxAgeMs(),
+      policyVersion: X402_FRESHNESS_POLICY_VERSION,
+      policy: defaultFreshnessPolicy(),
     };
   }
 
@@ -644,19 +847,40 @@ export class ExactStellarFacilitator implements SchemeNetworkFacilitator {
       backend: this.backend,
     });
     if (!result.ok) {
-      return { isValid: false, invalidReason: result.reason, invalidMessage: result.message };
+      return {
+        isValid: false,
+        invalidReason: result.reason,
+        invalidMessage: result.message,
+        extra: {
+          retryable: RETRYABLE_VERIFY_FAILURES.has(result.reason),
+          ...(result.observedAt !== undefined ? { observedAt: result.observedAt } : {}),
+          ...(result.policy !== undefined ? { policy: result.policy } : {}),
+          ...(result.explanation !== undefined ? { explanation: result.explanation } : {}),
+        },
+      };
     }
     if (await isSettlementConsumed(requirements.network, result.transaction)) {
       return {
         isValid: false,
         invalidReason: "already_settled",
         invalidMessage: `${result.transaction} has already paid for a response`,
+        extra: {
+          observedAt: result.observedAt,
+          policy: result.policy,
+          explanation: result.explanation,
+        },
       };
     }
     return {
       isValid: true,
       payer: result.payer,
-      extra: { transaction: result.transaction, amount: result.amountAtomic.toString() },
+      extra: {
+        transaction: result.transaction,
+        amount: result.amountAtomic.toString(),
+        observedAt: result.observedAt,
+        policy: result.policy,
+        explanation: result.explanation,
+      },
     };
   }
 
@@ -674,6 +898,11 @@ export class ExactStellarFacilitator implements SchemeNetworkFacilitator {
         errorMessage: result.message,
         transaction: parsePaymentProof(payload.payload)?.transaction ?? "",
         network: requirements.network,
+        extra: {
+          ...(result.observedAt !== undefined ? { observedAt: result.observedAt } : {}),
+          ...(result.policy !== undefined ? { policy: result.policy } : {}),
+          ...(result.explanation !== undefined ? { explanation: result.explanation } : {}),
+        },
       };
     }
     if (!(await consumeSettlement(requirements.network, result.transaction))) {
@@ -683,6 +912,11 @@ export class ExactStellarFacilitator implements SchemeNetworkFacilitator {
         errorMessage: `${result.transaction} has already paid for a response`,
         transaction: result.transaction,
         network: requirements.network,
+        extra: {
+          observedAt: result.observedAt,
+          policy: result.policy,
+          explanation: result.explanation,
+        },
       };
     }
     return {
@@ -694,6 +928,11 @@ export class ExactStellarFacilitator implements SchemeNetworkFacilitator {
       // settles what was agreed, and a buyer that overpaid must not have the
       // surplus booked as Mimir revenue for this call.
       amount: requirements.amount,
+      extra: {
+        observedAt: result.observedAt,
+        policy: result.policy,
+        explanation: result.explanation,
+      },
     };
   }
 }

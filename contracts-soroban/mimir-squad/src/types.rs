@@ -2,6 +2,10 @@
 
 use soroban_sdk::{contracterror, contracttype, Address};
 
+/// Version tag for the squad settlement manifest. Bump on any change to the
+/// manifest's encoded layout so off-chain indexers can reject unknown shapes.
+pub const SETTLEMENT_MANIFEST_VERSION: u32 = 1;
+
 // ── Constants (mirror MimirSquad.sol) ────────────────────────────────────────
 
 pub const SIDE_A: u32 = 1;
@@ -90,6 +94,38 @@ pub struct ClaimResult {
     pub net: i128,
 }
 
+/// Versioned, digest-bound settlement manifest. Binds the winning side, fee
+/// policy and pool totals so that every claim order can be checked against a
+/// single commitment, and so integer conservation (`pool_a + pool_b ==
+/// winners_payout_gross + fee_total + residual`) is verifiable exactly.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementManifest {
+    pub version: u32,
+    pub result: u32,
+    pub fee_bps: u32,
+    pub pool_a: i128,
+    pub pool_b: i128,
+    pub liability_total: i128,
+    pub digest: soroban_sdk::BytesN<32>,
+}
+
+/// Explicit claim state for a wallet's position in a squad market.
+///
+/// Distinguishes the states that were previously collapsed into a zero amount:
+/// a wallet with no position, a wallet whose share is claimable right now, and
+/// a wallet whose payout has already been claimed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaimStatus {
+    /// The wallet has no position in the market (read-only path, no error).
+    NoPosition,
+    /// The wallet has a claimable payout of `net` atomic units.
+    Claimable(i128),
+    /// The wallet's payout has already been claimed.
+    AlreadyClaimed,
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -147,4 +183,8 @@ pub enum Error {
     /// `cancel_fee_recipient` / `execute_fee_recipient` found no queued
     /// fee-recipient rotation.
     NoFeeRecipientQueued = 34,
+    /// The settlement manifest version is not supported by this contract.
+    UnsupportedManifestVersion = 35,
+    /// The settlement manifest digest does not match the bound market state.
+    ManifestDigestMismatch = 36,
 }

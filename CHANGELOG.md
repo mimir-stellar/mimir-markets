@@ -6,6 +6,11 @@ why, the commit history records the what.
 
 ## [Unreleased]
 
+### Added
+
+- **Research-source disagreement report** ([#865](https://github.com/mimir-stellar/mimir-markets/issues/865)). `lib/research/disagreement.ts` compares normalized facts (number, string, boolean; JSON path or regex locators; absolute/relative tolerance) across captured research sources and reports each fact as `agree`, `disagree` or `insufficient`. Each source's cell is `value`, `missing`, `unparseable` or `unavailable`, so a failed, stale or unreadable source is never counted as a dissent. Bounded by `maxSources` (8), `maxFacts` (16), `maxBodyBytes` (512 KiB) and `maxValueChars` (200); overflow is listed as skipped and bodies never appear in the report. See `docs/RESEARCH_DISAGREEMENT.md`.
+- **Research gateway results say whether they came from cache** ([#864](https://github.com/mimir-stellar/mimir-markets/issues/864)). `FetchSuccess` now has `acquisition` (`"fetched"` or `"cache"`) and `servedAt`. A cache hit keeps the original `capturedAt` and the content-validation `policyRevision` it was captured under (#1091), and the replay time goes in `servedAt`, so a replay is never shown as a new acquisition; freshness is still judged from `capturedAt`. Cache hits return a copy of the redirect chain, so a caller cannot rewrite the cached entry. `fromCache` is unchanged for existing callers.
+
 ### Fixed
 
 - **The Oracle Reasoning Trace disclosure now announces its state** ([#522](https://github.com/mimir-stellar/mimir-markets/issues/522)). The `EvidenceInspector` toggle button carried no `aria-expanded` and no `aria-controls`, the expanded panel had no id and no label, and the chevron icons were read out as content — so screen-reader users could not tell whether the panel was open, nor which region the button controlled. The button now exposes `aria-expanded` / `aria-controls` (paired through `useId`), the panel is a labelled `region`, the chevrons are `aria-hidden`, and the toggle keeps a visible focus ring.

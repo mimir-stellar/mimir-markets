@@ -39,3 +39,50 @@ test("does not warn for live contract reads or unavailable metadata", () => {
   assert.equal(isStaleIndexSnapshot({ ...makeContractFreshness(), status: "stale" }), false);
   assert.equal(isStaleIndexSnapshot(null), false);
 });
+
+test("projection completeness carries trusted ledger, known gaps, and projection generation", () => {
+  const freshness = buildVSCacheFreshness({
+    updatedAtMs: Date.now(),
+    freshnessWindowMs: windowMs,
+    source: "index",
+    projection: {
+      trustedLedger: 123456,
+      knownGaps: 0,
+      projectionGeneration: 1,
+    },
+  });
+
+  assert.ok(freshness.projection);
+  assert.equal(freshness.projection.trustedLedger, 123456);
+  assert.equal(freshness.projection.knownGaps, 0);
+  assert.equal(freshness.projection.projectionGeneration, 1);
+});
+
+test("makeContractFreshness provides authoritative live completeness", () => {
+  const live = makeContractFreshness({ trustedLedger: 999999 });
+  assert.equal(live.source, "contract");
+  assert.equal(live.status, "live");
+  assert.ok(live.projection);
+  assert.equal(live.projection.trustedLedger, 999999);
+  assert.equal(live.projection.knownGaps, 0);
+  assert.equal(live.projection.projectionGeneration, 1);
+});
+
+test("boundary and failure: missing or degraded cache state retains unavailable projection completeness", () => {
+  const degraded = buildVSCacheFreshness({
+    updatedAtMs: null,
+    freshnessWindowMs: windowMs,
+    source: "index",
+    projection: {
+      trustedLedger: null,
+      knownGaps: 5,
+      projectionGeneration: 1,
+    },
+  });
+
+  assert.equal(degraded.status, "stale");
+  assert.ok(degraded.projection);
+  assert.equal(degraded.projection.trustedLedger, null);
+  assert.equal(degraded.projection.knownGaps, 5);
+  assert.equal(degraded.projection.projectionGeneration, 1);
+});

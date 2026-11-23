@@ -62,6 +62,7 @@ import {
   validateCitationsList,
   MAX_VERDICT_CITATIONS,
 } from "../../lib/verdict";
+import { createHash } from "node:crypto";
 import {
   parseLLMVerdictWithRetry,
   VERDICT_LLM_SCHEMA,
@@ -133,6 +134,12 @@ import { applyFetcherTrust, tierVerdict } from "../../lib/oracle/confidence-tier
 import { evaluateClaim as evaluateClaimPure, type EvaluateClaimDeps } from "./evaluate";
 import { RiskManager } from "../../lib/oracle-risk";
 import { isSportsEventFinal } from "./sports-finality";
+import { buildBacklogHealthReport, formatBacklogHealthReport, type BacklogClaimSnapshot } from "./backlog-health";
+
+// ── Backlog health report ─────────────────────────────────────────────────────
+// Opt-in operator report (ORACLE_BACKLOG_REPORT=1). Contains only aggregate
+// counts and ages; never raw evidence text, keys, or seeds.
+const BACKLOG_REPORT = process.env.ORACLE_BACKLOG_REPORT === "1";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.ORACLE_POLL_INTERVAL_MS ?? "60000");
@@ -201,6 +208,81 @@ const ORACLE        = getOracleWallet();
 const ORACLE_ADDR   = ORACLE.address;
 const ORACLE_PAYER  = payingWalletFor(ORACLE);
 
+// ── Durable settlement intents ───────────────────────────────────────────────
+// Each settlement is recorded as an intent BEFORE the transaction is signed, so
+// an uncertain submission (timeout, lost response) is reconciled against chain
+// state on restart rather than blindly re-signed. The verdict and evidence are
+// bound together by a canonical digest; a mismatched digest on reconcile means
+// the intent is stale and must not be reused.
+export interface SettlementIntent {
+  claimId: number;
+  verdictDigest: string;
+  evidenceHash: string;
+  status: "pending" | "submitted" | "confirmed" | "abandoned";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function canonicalVerdictDigest(
+  claimId: number,
+  payload: { winner_side: string; summary: string; confidence: number; evidence_hash: string },
+): string {
+  const canonical = JSON.stringify([
+    claimId,
+    payload.winner_side,
+    payload.summary,
+    payload.confidence,
+    payload.evidence_hash,
+  ]);
+  return evidenceCommitmentHash(canonical);
+}
+
+export interface IntentStore {
+  get(claimId: number): Promise<SettlementIntent | null>;
+  put(intent: SettlementIntent): Promise<void>;
+}
+
+export function createFileIntentStore(dir: string): IntentStore {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require("node:fs") as typeof import("node:fs");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require("node:path") as typeof import("node:path");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = (id: number) => path.join(dir, `intent-${id}.json`);
+  return {
+    async get(claimId) {
+      try {
+        return JSON.parse(fs.readFileSync(file(claimId), "utf8")) as SettlementIntent;
+      } catch {
+        return null;
+      }
+    },
+    async put(intent) {
+      const target = file(intent.claimId);
+      const tmp = `${target}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(intent), "utf8");
+      fs.renameSync(tmp, target);
+    },
+  };
+}
+
+/**
+ * Decide whether a settlement may proceed given any prior intent.
+ * - No intent, or abandoned: proceed with a fresh intent.
+ * - Confirmed: never re-settle (chain is authoritative; treat as done).
+ * - Pending/submitted: must reconcile against chain before any new action.
+ */
+export type IntentDecision =
+  | { action: "proceed" }
+  | { action: "skip_confirmed" }
+  | { action: "reconcile"; intent: SettlementIntent };
+
+export function decideIntent(prior: SettlementIntent | null): IntentDecision {
+  if (!prior || prior.status === "abandoned") return { action: "proceed" };
+  if (prior.status === "confirmed") return { action: "skip_confirmed" };
+  return { action: "reconcile", intent: prior };
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ClaimOnChain = ClaimData;
 
@@ -256,6 +338,70 @@ interface EvidenceResult {
   payment?: EvidencePayment;
   /** A source failure is not evidence for an on-chain refund. */
   failure?: SettlementErrorInfo;
+}
+
+// ── Decision evidence manifest ────────────────────────────────────────────────
+// A bounded, secret-free record of what the oracle looked at when it decided.
+// Stores source references, capture times and content digests only — never raw
+// response bodies, LLM credentials or request headers.
+export const MANIFEST_MAX_SOURCES = 8;
+export const MANIFEST_MAX_URL_CHARS = 512;
+
+export interface EvidenceManifestSource {
+  url: string;
+  fetcher: EvidenceFetcherKind | "none";
+  capturedAt?: number;
+  contentSha256: string;
+  byteLength: number;
+}
+
+export interface EvidenceDecisionManifest {
+  claimId: number;
+  generatedAt: number;
+  sources: EvidenceManifestSource[];
+  omittedSources: number;
+}
+
+function redactUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    u.username = "";
+    u.password = "";
+    u.search = "";
+    u.hash = "";
+    return u.toString().slice(0, MANIFEST_MAX_URL_CHARS);
+  } catch {
+    return "(invalid-url)";
+  }
+}
+
+/**
+ * Build a bounded evidence manifest from a single settlement's evidence.
+ * Raw body text is hashed, never stored. Credentials and query strings are
+ * stripped from URLs before recording.
+ */
+export function buildEvidenceManifest(
+  claimId: number,
+  evidence: EvidenceResult,
+  now: number = Date.now(),
+): EvidenceDecisionManifest {
+  const sources: EvidenceManifestSource[] = [];
+  if (evidence.fetcher !== "none" && evidence.sourceUrl) {
+    const body = evidence.text ?? "";
+    sources.push({
+      url: redactUrl(evidence.sourceUrl),
+      fetcher: evidence.fetcher,
+      capturedAt: evidence.fetchedAt,
+      contentSha256: createHash("sha256").update(body, "utf8").digest("hex"),
+      byteLength: Buffer.byteLength(body, "utf8"),
+    });
+  }
+  return {
+    claimId,
+    generatedAt: now,
+    sources: sources.slice(0, MANIFEST_MAX_SOURCES),
+    omittedSources: Math.max(0, sources.length - MANIFEST_MAX_SOURCES),
+  };
 }
 
 /**
@@ -538,6 +684,8 @@ export async function settle(claim: ClaimOnChain, deps?: Partial<SettleDeps>): P
 
   const evidence     = await fetchEvidenceFn(claim);
   console.log(`[settle] Evidence fetcher: ${evidence.fetcher}`);
+  const manifest = buildEvidenceManifest(claim.id, evidence);
+  console.log(`[settle] Evidence manifest: ${manifest.sources.length} source(s), ${manifest.omittedSources} omitted`);
   if (evidence.failure) {
     // A missing source is a dependency/malformed input failure, not proof of an
     // UNRESOLVABLE outcome. Defer and let the next poll retry the dependency;
