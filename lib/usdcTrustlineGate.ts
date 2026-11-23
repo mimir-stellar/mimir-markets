@@ -17,7 +17,9 @@ export type UsdcTrustlineGateStatus =
   | "stale"
   | "dependency_failure"
   | "disconnected"
-  | "cannot_sign";
+  | "cannot_sign"
+  | "rejected"
+  | "transport_unavailable";
 
 export type UsdcTrustlineGateMessageKey =
   | "connectWalletFirst"
@@ -27,7 +29,9 @@ export type UsdcTrustlineGateMessageKey =
   | "trustlineCheckFailed"
   | "trustlineMissing"
   | "trustlineUnfunded"
-  | "trustlineReady";
+  | "trustlineReady"
+  | "trustlineRejected"
+  | "trustlineTransportUnavailable";
 
 export type UsdcTrustlineGateInput = {
   action: UsdcTrustlineAction;
@@ -36,6 +40,8 @@ export type UsdcTrustlineGateInput = {
   stale: boolean;
   isConnected: boolean;
   hasSigner: boolean;
+  failureKind?: "rejected" | "transport_unavailable" | "error" | null;
+  error?: string | null;
 };
 
 export type UsdcTrustlineGateResult = {
@@ -48,6 +54,27 @@ export type UsdcTrustlineGateResult = {
 export function evaluateUsdcTrustlineGate(
   input: UsdcTrustlineGateInput,
 ): UsdcTrustlineGateResult {
+  if (input.failureKind === "rejected" || input.error === "rejected") {
+    return {
+      action: input.action,
+      allowed: false,
+      status: "rejected",
+      messageKey: "trustlineRejected",
+    };
+  }
+
+  if (
+    input.failureKind === "transport_unavailable" ||
+    input.error === "unavailable"
+  ) {
+    return {
+      action: input.action,
+      allowed: false,
+      status: "transport_unavailable",
+      messageKey: "trustlineTransportUnavailable",
+    };
+  }
+
   if (!input.isConnected) {
     return {
       action: input.action,

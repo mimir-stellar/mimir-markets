@@ -144,6 +144,12 @@ impl Fixture {
         self.env.ledger().with_mut(|li| li.timestamp = timestamp);
     }
 
+    /// Current claim revision as seen by a reviewer. Used to build an
+    /// expected-revision guard before a mutation is submitted.
+    pub fn current_revision(&self, claim_id: u64) -> u32 {
+        self.client().get_claim(&claim_id).revision
+    }
+
     pub fn advance_by(&self, seconds: u64) {
         let now = self.env.ledger().timestamp();
         self.advance_to(now + seconds);

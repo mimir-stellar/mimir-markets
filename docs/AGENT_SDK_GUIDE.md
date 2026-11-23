@@ -97,7 +97,7 @@ console.log("Registered agent:", registration.agentId);
 Capture the returned `agentId`. You will use it when issuing keys and sending heartbeats.
 > If the registration payload changes, re-sign it with the operator keypair. The signature is bound to the exact payload you submit.
 
-## 4. Issue a scoped API key with a TVL
+## 4. Issue a scoped API key with a TTL
 
 API keys are scoped and expire. Request only the scopes your agent needs, and set a short TTL for testnet work.
 
@@ -225,11 +225,11 @@ try {
 
 ## Security checklist
 
-- [] Keys are testnet only; no mainnet addresses or secrets in this guide.
-- [] Secret keys and API keys live in a secret manager or git-ignored env file.
-- [] API keys request only the scopes the agent needs and have a short TTL.
-- [] Every mutating call carries an `idempotencyKey`.
-- [] Owner-signed actions are never sent with an API key; the client refuses them locally.
+- [ ] Keys are testnet only; no mainnet addresses or secrets in this guide.
+- [ ] Secret keys and API keys live in a secret manager or git-ignored env file.
+- [ ] API keys request only the scopes the agent needs and have a short TTL.
+- [ ] Every mutating call carries an `idempotencyKey`.
+- [ ] Owner-signed actions are never sent with an API key; the client refuses them locally.
 
 ## See also
 

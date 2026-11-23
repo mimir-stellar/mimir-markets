@@ -19,6 +19,11 @@
  * The card renders even at zero, with "nothing parked" rather than nothing at
  * all: someone who was told a payout failed needs to be able to come here and
  * see that it is now zero because they already pulled it.
+ *
+ * Preflight preview: before a pull is signed, the card shows the fee and reserve
+ * readiness and the exact USDC exposure from the current simulation. This is a
+ * read-only estimate; nothing is submitted until the user confirms the action,
+ * and the preview is clearly labelled as not an executed transaction.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -39,7 +44,7 @@ type Action = "withdraw" | "fees" | null;
 
 export default function AccountBalances({ className = "" }: { className?: string }) {
   const t = useTranslations("wallet");
-  const { address, isConnected, signer } = useWallet();
+  const { address, isConnected, signer, sessionRevision } = useWallet();
   const trustline = useUsdcTrustline();
 
   const [usdc, setUsdc] = useState<number | null>(null);
@@ -82,7 +87,7 @@ export default function AccountBalances({ className = "" }: { className?: string
       console.warn("[AccountBalances] read failed", err);
       setLoadFailed(true);
     }
-  }, [address]);
+  }, [address, sessionRevision]);
 
   useEffect(() => {
     void load();

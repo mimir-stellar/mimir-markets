@@ -65,6 +65,7 @@ export function PendingMirrors() {
     hasSigner: Boolean(signer),
   });
   const [mirrors, setMirrors] = useState<Mirror[]>([]);
+  const [incompleteSummary, setIncompleteSummary] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,8 +78,14 @@ export function PendingMirrors() {
       const response = await fetch(`/api/baskets/mirrors?subscriber=${address}`);
       const payload = await response.json();
       setMirrors(Array.isArray(payload.mirrors) ? payload.mirrors : []);
+      setIncompleteSummary(
+        payload.complete === false && typeof payload.failureSummary?.summary === "string"
+          ? payload.failureSummary.summary
+          : null,
+      );
     } catch {
       setMirrors([]);
+      setIncompleteSummary("Could not load the mirror queue right now.");
     } finally {
       setLoading(false);
     }
@@ -124,7 +131,7 @@ export function PendingMirrors() {
   }
 
   if (!isConnected) return null;
-  if (!loading && mirrors.length === 0) return null;
+  if (!loading && mirrors.length === 0 && !incompleteSummary) return null;
 
   const blocked = !trustlineGate.allowed;
 
@@ -139,6 +146,15 @@ export function PendingMirrors() {
           funds are held on your behalf.
         </p>
       </div>
+
+      {incompleteSummary && (
+        <p
+          role="status"
+          className="mb-3 border border-pv-amber/40 bg-pv-amber/10 px-3 py-2 text-[12px] text-pv-amber"
+        >
+          {incompleteSummary}
+        </p>
+      )}
 
       <UsdcTrustlineGate
         trustline={trustline}

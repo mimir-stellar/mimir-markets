@@ -24,30 +24,33 @@ function msg(
   return { id, sentAtNs, content };
 }
 
+// Cast helper: the test fixtures are structural stand-ins for the SDK's DecodedMessage.
+const asDecoded = (m: DecodedMessage) => m as unknown as Parameters<typeof sortDecodedMessagesBySentAt>[0][number];
+
 describe('sortDecodedMessagesBySentAt', () => {
   it('sorts ascending by bigint sentAtNs', () => {
     const a = msg('a', 300n);
     const b = msg('b', 100n);
     const c = msg('c', 200n);
-    const out = sortDecodedMessagesBySentAt([a, b, c] as any);
-    expect(out.map((m: any) => m.id)).toEqual(['b', 'c', 'a']);
+    const out = sortDecodedMessagesBySentAt([a, b, c].map(asDecoded));
+    expect(out.map((m) => (m as unknown as DecodedMessage).id)).toEqual(['b', 'c', 'a']);
   });
 
   it('preserves stability for equal timestamps', () => {
     const a = msg('a', 100n, { text: 'a' });
     const b = msg('b', 100n, { text: 'b' });
     const c = msg('c', 100n, { text: 'c' });
-    const out = sortDecodedMessagesBySentAt([a, b, c] as any);
-    expect(out.map((m: any) => m.id)).toEqual(['a', 'b', 'c']);
+    const out = sortDecodedMessagesBySentAt([a, b, c].map(asDecoded));
+    expect(out.map((m) => (m as unknown as DecodedMessage).id)).toEqual(['a', 'b', 'c']);
   });
 
   it('does not mutate the input array', () => {
     const a = msg('a', 200n);
     const b = msg('b', 100n);
-    const input = [a, b];
-    const out = sortDecodedMessagesBySentAt(input as any);
-    expect(input.map((m) => m.id)).toEqual(['a', 'b']);
-    expect(out.map((m: any) => m.id)).toEqual(['b', 'a']);
+    const input = [a, b].map(asDecoded);
+    const out = sortDecodedMessagesBySentAt(input);
+    expect(input.map((m) => (m as unknown as DecodedMessage).id)).toEqual(['a', 'b']);
+    expect(out.map((m) => (m as unknown as DecodedMessage).id)).toEqual(['b', 'a']);
   });
 
   it('handles empty array', () => {
@@ -57,21 +60,21 @@ describe('sortDecodedMessagesBySentAt', () => {
 
 describe('getDecodedMessageText', () => {
   it('returns text for plain string content', () => {
-    expect(getDecodedMessageText(msg('a', 1n, 'hello') as any)).toEqual('hello');
+    expect(getDecodedMessageText(asDecoded(msg('a', 1n, 'hello')))).toEqual('hello');
   });
 
   it('returns text field when present', () => {
-    expect(getDecodedMessageText(msg('a', 1n, { text: 'hi' }) as any)).toEqual('hi');
+    expect(getDecodedMessageText(asDecoded(msg('a', 1n, { text: 'hi' })))).toEqual('hi');
   });
 
   it('returns empty string for non-text content', () => {
-    const out = getDecodedMessageText(msg('a', 1n, { attachment: 'file' }) as any);
+    const out = getDecodedMessageText(asDecoded(msg('a', 1n, { attachment: 'file' })));
     expect(typeof out).toBe('string');
     expect(out).toEqual('');
   });
 
   it('handles missing content', () => {
-    expect(getDecodedMessageText(msg('a', 1n) as any)).toEqual('');
+    expect(getDecodedMessageText(asDecoded(msg('a', 1n)))).toEqual('');
   });
 });
 
@@ -94,7 +97,7 @@ describe('peerIdentifierFromAddress', () => {
 
 describe('classifyXmtpThreadError', () => {
   it('classifies XmtpPeerUnreachableError', () => {
-    const err = new XmtpPeerUnreachableError('peer unreachable');
+    const err = new XmtpPeerUnreachableError();
     const out = classifyXmtpThreadError(err);
     expect(out).toBeTruthy();
     expect(typeof out).toBe('string');
@@ -103,7 +106,7 @@ describe('classifyXmtpThreadError', () => {
   it('classifies generic Error', () => {
     const out: any = classifyXmtpThreadError(new Error('boom'));
     expect(typeof out).toBe('string');
-    expect(out.length).toBeGreaterThan(0);
+    expect((out as unknown as string).length).toBeGreaterThan(0);
   });
 
   it('classifies non-Error values', () => {
