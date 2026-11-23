@@ -1,12 +1,26 @@
 export type VSCacheFreshnessSource = "index" | "contract";
 export type VSCacheFreshnessStatus = "live" | "cached" | "stale";
+export type VSCacheStaleReason =
+  | "provider_lag"
+  | "projection_failure"
+  | "unknown_coverage";
+
+export interface ProjectionCompleteness {
+  trustedLedger: number | null;
+  knownGaps: number;
+  projectionGeneration: number;
+}
+
+export const CURRENT_PROJECTION_GENERATION = 1;
 
 export interface VSCacheFreshness {
   source: VSCacheFreshnessSource;
   status: VSCacheFreshnessStatus;
+  staleReason?: VSCacheStaleReason | null;
   lastUpdatedAt: string | null;
   ageMs: number | null;
   freshnessWindowMs: number;
+  projection?: ProjectionCompleteness;
 }
 
 const STALE_MULTIPLIER = 5;
@@ -15,6 +29,8 @@ export function buildVSCacheFreshness(args: {
   updatedAtMs?: number | null;
   freshnessWindowMs: number;
   source: VSCacheFreshnessSource;
+  projection?: ProjectionCompleteness | null;
+  staleReason?: VSCacheStaleReason | null;
 }): VSCacheFreshness {
   const updatedAtMs =
     typeof args.updatedAtMs === "number" && Number.isFinite(args.updatedAtMs)
@@ -31,20 +47,41 @@ export function buildVSCacheFreshness(args: {
     }
   }
 
-  return {
+  const freshness: VSCacheFreshness = {
     source: args.source,
     status,
     lastUpdatedAt: updatedAtMs == null ? null : new Date(updatedAtMs).toISOString(),
     ageMs,
     freshnessWindowMs: args.freshnessWindowMs,
   };
+
+  if (args.projection !== undefined && args.projection !== null) {
+    freshness.projection = args.projection;
+  }
+
+  if (args.source === "index" && status === "stale") {
+    freshness.staleReason = classifyVSCacheStaleReason({
+      updatedAtMs,
+      projection: args.projection,
+      staleReason: args.staleReason,
+    });
+  }
+
+  return freshness;
 }
 
-export function makeContractFreshness(): VSCacheFreshness {
+export function makeContractFreshness(opts?: {
+  trustedLedger?: number | null;
+}): VSCacheFreshness {
   return buildVSCacheFreshness({
     updatedAtMs: Date.now(),
     freshnessWindowMs: 1,
     source: "contract",
+    projection: {
+      trustedLedger: opts?.trustedLedger ?? null,
+      knownGaps: 0,
+      projectionGeneration: CURRENT_PROJECTION_GENERATION,
+    },
   });
 }
 
@@ -103,4 +140,20 @@ export function buildVsFeedEtag(args: {
 
   // Weak ETag: semantically equivalent, byte-identity not required.
   return `W/"${maxUpdatedAt}:${itemCount}"`;
+}
+
+export function classifyVSCacheStaleReason(args: {
+  updatedAtMs?: number | null;
+  projection?: ProjectionCompleteness | null;
+  staleReason?: VSCacheStaleReason | null;
+}): VSCacheStaleReason {
+  if (args.staleReason) return args.staleReason;
+  if ((args.projection?.knownGaps ?? 0) > 0) return "projection_failure";
+  if (
+    args.updatedAtMs == null ||
+    (args.projection != null && args.projection.trustedLedger == null)
+  ) {
+    return "unknown_coverage";
+  }
+  return "provider_lag";
 }

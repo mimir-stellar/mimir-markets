@@ -32,15 +32,37 @@
  *  7. **Dependency failure.** When `vsId` is invalid (NaN, ≤ 0) the hook
  *     moves into `dependency_failure` rather than firing empty requests.
  *
+ *  8. **Uncertain challenge recovery.** A user-signed `challenge_claim` whose
+ *     outcome was never observed (pending receipt, or an error carrying a tx
+ *     hash) is recorded via `beginChallengeRecovery` and exposed as
+ *     `challengeRecovery`.  The hook runs bounded status checks against the
+ *     hash (`CHALLENGE_RECOVERY_MAX_STATUS_CHECKS`), persists the record in
+ *     localStorage so it survives reloads, and `isChallengeRecoveryBlocking`
+ *     lets the page hide any second stake action until the outcome is known.
+ *     Recovery never resubmits — the Soroban contract state stays
+ *     authoritative.
+ *
  * The hook is purely logic.  No JSX, no toast side-effects — all of that stays
  * in the page component so the boundary between state and rendering is clear.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getVSFull } from "@/lib/contract";
 import { getPendingVS } from "@/lib/pending-vs";
 import { SAMPLE_VS } from "@/lib/sampleVs";
+import { waitForTransaction } from "@/lib/stellar";
+import {
+  CHALLENGE_RECOVERY_CHECK_INTERVAL_MS,
+  applyChallengeStatusOutcome,
+  clearChallengeRecoveryRecord,
+  createChallengeRecoveryRecord,
+  hasChallengeStatusBudget,
+  isChallengeRecoveryBlocking,
+  readChallengeRecoveryRecord,
+  saveChallengeRecoveryRecord,
+  type ChallengeRecoveryRecord,
+} from "@/lib/challenge-recovery";
 import {
   MOCK_CREATED_VS_ID,
   mergeMockSnapshotIntoVs,
@@ -52,6 +74,12 @@ import {
   VS_DETAIL_MAX_ATTEMPTS,
 } from "@/lib/vs-detail-state";
 import { getNextPollDelay } from "@/lib/poll-schedule";
+import {
+  evaluateMarketExpiry,
+  observationFromFreshness,
+  type ExpiryObservation,
+  type MarketExpiry,
+} from "@/lib/market-expiry";
 import type { VSData } from "@/lib/contract";
 import type { VSCacheFreshness } from "@/lib/vs-freshness";
 
@@ -77,6 +105,8 @@ export interface ActivityRow {
 
 // Re-export so consumers only need to import from one place.
 export { VS_DETAIL_POLL_INTERVAL_MS, VS_DETAIL_MAX_ATTEMPTS } from "@/lib/vs-detail-state";
+export { CHALLENGE_RECOVERY_MAX_STATUS_CHECKS } from "@/lib/challenge-recovery";
+export type { ChallengeRecoveryRecord };
 import type { VsDetailPhase } from "@/lib/vs-detail-state";
 export type { VsDetailPhase };
 
@@ -143,12 +173,65 @@ export interface UseVsDetailResult {
   activityLoading: boolean;
   /** Error message from the last activity fetch, or null. */
   activityError: string | null;
+  /**
+   * Recovery record for a challenge submission whose outcome is unknown, or
+   * null. While `isChallengeRecoveryBlocking(challengeRecovery)` holds, the
+   * page must not present a second stake action.
+   */
+  challengeRecovery: ChallengeRecoveryRecord | null;
+  /** True while a bounded recovery status check is in flight. */
+  challengeRecoveryChecking: boolean;
+  /** Record a submitted challenge tx whose outcome was not observed. */
+  beginChallengeRecovery: (input: { txHash: string; stakeAmount: number }) => void;
+  /** Run one bounded status check against the recorded tx hash. */
+  checkChallengeRecovery: () => Promise<void>;
+  /** Clear a resolved (or expired) recovery record. No-op while blocking. */
+  dismissChallengeRecovery: () => void;
+  /** Challenge intent review bound to claim, wallet and stake revision. */
+  intentReview: ChallengeIntentReview | null;
+  /** Capture the current challenge intent for review. */
+  captureChallengeIntent: () => ChallengeIntentReview | null;
+  /** Discard the captured challenge intent review. */
+  clearChallengeIntent: () => void;
+  /**
+   * Set to the new account address when the connected wallet changes after
+   * an authorization was given; null otherwise. The submit path must require
+   * re-authorization while this is non-null for the current account.
+   */
+  authorizationClearedFor: string | null;
+}
+
+/**
+ * Challenge intent review: a snapshot of what the user is about to commit to.
+ * It is bound to the account, stake amount and claim revision it was built
+ * from; any change to those inputs invalidates it.
+ */
+export interface ChallengeIntentReview {
+  /** Exact USDC stake (integer base units) the user intends to commit. */
+  stakeAmount: number;
+  /** Current claim statement shown to the user. */
+  claimStatement: string;
+  /** Network the intent applies to. */
+  network: string | null;
+  /** Account the intent was reviewed under. */
+  account: string | null;
+  /** Revision key binding the review to claim + wallet + amount. */
+  revisionKey: string;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /** Holds the mutable generation counter outside React state to avoid stale closures. */
 type GenerationRef = { current: number };
+
+/** Build a deterministic revision key from claim, account and amount. */
+function buildRevisionKey(
+  claimStatement: string | null,
+  account: string | null | undefined,
+  stakeAmount: number | null
+): string {
+  return JSON.stringify([claimStatement ?? "", account ?? "", stakeAmount ?? null]);
+}
 
 // ── Hook implementation ───────────────────────────────────────────────────────
 
@@ -168,6 +251,14 @@ export function useVsDetail({
   const [fetchAttempts, setFetchAttempts] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
 
+  // ── Observed ledger context ───────────────────────────────────────────────
+  //
+  // Expiry is a ledger timestamp. We can only observe it through a read, so the
+  // hook records when the snapshot arrived and evaluates the deadline against
+  // that observation instead of trusting the browser clock on its own.
+  const [expiryObservation, setExpiryObservation] = useState<ExpiryObservation | null>(null);
+  const [expiryClockMs, setExpiryClockMs] = useState<number>(() => Date.now());
+
   /**
    * Consecutive failure count used to back off the polling interval.
    * Reset to 0 on every successful load.
@@ -178,6 +269,13 @@ export function useVsDetail({
   const [activity, setActivity] = useState<ActivityRow[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState<string | null>(null);
+
+  // ── Uncertain challenge recovery ──────────────────────────────────────────
+  const [challengeRecovery, setChallengeRecovery] =
+    useState<ChallengeRecoveryRecord | null>(null);
+  const [challengeRecoveryChecking, setChallengeRecoveryChecking] = useState(false);
+  /** Guards against overlapping status checks from the auto-tick + manual call. */
+  const recoveryCheckInFlight = useRef(false);
 
   // ── User context: challenge stake ─────────────────────────────────────────
 
@@ -207,6 +305,50 @@ export function useVsDetail({
    */
   const generationRef = useRef(0);
 
+  // ── Challenge intent review ───────────────────────────────────────────────
+
+  const [intentReview, setIntentReview] = useState<ChallengeIntentReview | null>(null);
+
+  const currentStakeAmount = Number.parseInt(challengeStake, 10);
+  const currentRevisionKey = buildRevisionKey(
+    vs?.claim_statement ?? null,
+    address,
+    Number.isFinite(currentStakeAmount) ? currentStakeAmount : null
+  );
+
+  /**
+   * Invalidate the review whenever the account, stake amount or claim
+   * revision no longer matches the one it was captured under.
+   */
+  useEffect(() => {
+    setIntentReview((prev) => {
+      if (prev && prev.revisionKey !== currentRevisionKey) {
+        return null;
+      }
+      return prev;
+    });
+  }, [currentRevisionKey]);
+
+  const captureChallengeIntent = useCallback((): ChallengeIntentReview | null => {
+    if (!vs || !Number.isFinite(currentStakeAmount) || currentStakeAmount <= 0) {
+      setIntentReview(null);
+      return null;
+    }
+    const review: ChallengeIntentReview = {
+      stakeAmount: currentStakeAmount,
+      claimStatement: vs.claim_statement,
+      network: (vs as { network?: string }).network ?? null,
+      account: address ?? null,
+      revisionKey: currentRevisionKey,
+    };
+    setIntentReview(review);
+    return review;
+  }, [vs, currentStakeAmount, address, currentRevisionKey]);
+
+  const clearChallengeIntent = useCallback(() => {
+    setIntentReview(null);
+  }, []);
+
   // ── vsId change reset ─────────────────────────────────────────────────────
 
   /**
@@ -226,10 +368,13 @@ export function useVsDetail({
       setFetchAttempts(0);
       consecutiveFailuresRef.current = 0;
       setRefreshing(false);
+      setExpiryObservation(null);
+      setExpiryClockMs(Date.now());
       setPhase(isValidVsId(vsId) ? "loading" : "invalid");
       setActivity([]);
       setActivityLoading(false);
       setActivityError(null);
+      setIntentReview(null);
     }
     prevVsIdRef.current = vsId;
   }, [vsId]);
@@ -259,6 +404,12 @@ export function useVsDetail({
         }
         setVs(data);
         setCache(null);
+        setExpiryObservation({
+          source: "sample",
+          receivedAtMs: Date.now(),
+          serverNowMs: null,
+          freshness: null,
+        });
         setPhase("ready");
         return;
       }
@@ -291,6 +442,9 @@ export function useVsDetail({
             return snapshot.item!;
           });
           setCache(snapshot.cache ?? null);
+          setExpiryObservation(
+            observationFromFreshness(snapshot.cache ?? null, Date.now())
+          );
           setFetchAttempts(0);
           consecutiveFailuresRef.current = 0;
           setPhase("ready");
@@ -304,6 +458,14 @@ export function useVsDetail({
           if (myGeneration !== generationRef.current) return;
           setVs(pending);
           setCache(null);
+          // Optimistic local state is not a ledger observation: the deadline is
+          // shown as an estimate until the first on-chain read lands.
+          setExpiryObservation({
+            source: "local_draft",
+            receivedAtMs: Date.now(),
+            serverNowMs: null,
+            freshness: null,
+          });
           consecutiveFailuresRef.current = 0;
           setPhase("ready");
           setRefreshing(false);
@@ -376,6 +538,85 @@ export function useVsDetail({
   const refresh = useCallback(async (): Promise<void> => {
     await Promise.all([fetchVs({ isManual: true }), fetchActivity()]);
   }, [fetchVs, fetchActivity]);
+
+  // ── Uncertain challenge recovery ──────────────────────────────────────────
+
+  // Load any persisted recovery record for this market+wallet (survives
+  // reloads; a resolved record is kept so the panel can show the outcome).
+  useEffect(() => {
+    if (isSampleVS || !isValidVsId(vsId)) {
+      setChallengeRecovery(null);
+      return;
+    }
+    setChallengeRecovery(readChallengeRecoveryRecord(vsId, address));
+  }, [vsId, address, isSampleVS]);
+
+  const beginChallengeRecovery = useCallback(
+    (input: { txHash: string; stakeAmount: number }) => {
+      if (isSampleVS || !isValidVsId(vsId) || !address) return;
+      const record = createChallengeRecoveryRecord({
+        vsId,
+        txHash: input.txHash,
+        address,
+        stakeAmount: input.stakeAmount,
+      });
+      saveChallengeRecoveryRecord(record);
+      setChallengeRecovery(record);
+    },
+    [vsId, address, isSampleVS]
+  );
+
+  const checkChallengeRecovery = useCallback(async (): Promise<void> => {
+    const record = challengeRecovery;
+    if (!record || record.status !== "unknown") return;
+    if (!hasChallengeStatusBudget(record) || !isChallengeRecoveryBlocking(record)) {
+      // Budget exhausted or record expired: stop checking, keep the explorer
+      // link as the recovery path.
+      return;
+    }
+    if (recoveryCheckInFlight.current) return;
+    recoveryCheckInFlight.current = true;
+    setChallengeRecoveryChecking(true);
+    try {
+      const outcome = await waitForTransaction(record.txHash, { attempts: 1 });
+      const next = applyChallengeStatusOutcome(record, {
+        succeeded: outcome.succeeded,
+        failed: !outcome.succeeded && !outcome.pending,
+      });
+      setChallengeRecovery(next);
+      saveChallengeRecoveryRecord(next);
+      if (next.status !== "unknown") {
+        // Reflect the on-chain outcome in the market snapshot immediately.
+        void fetchVs();
+      }
+    } finally {
+      recoveryCheckInFlight.current = false;
+      setChallengeRecoveryChecking(false);
+    }
+  }, [challengeRecovery, fetchVs]);
+
+  const dismissChallengeRecovery = useCallback(() => {
+    // An unknown, unexpired outcome can never be dismissed: that would
+    // re-open the second stake action while the first may still land.
+    if (isChallengeRecoveryBlocking(challengeRecovery)) return;
+    if (challengeRecovery) {
+      clearChallengeRecoveryRecord(challengeRecovery.vsId, address);
+    }
+    setChallengeRecovery(null);
+  }, [challengeRecovery, address]);
+
+  // Bounded automatic status checks: one tick per ledger close while the
+  // outcome is unknown and the budget holds. Each tick updates statusChecks,
+  // which re-runs this effect and schedules the next (or the final) check.
+  useEffect(() => {
+    if (!challengeRecovery || challengeRecovery.status !== "unknown") return;
+    if (!hasChallengeStatusBudget(challengeRecovery)) return;
+    if (!isChallengeRecoveryBlocking(challengeRecovery)) return;
+    const timer = setTimeout(() => {
+      void checkChallengeRecovery();
+    }, CHALLENGE_RECOVERY_CHECK_INTERVAL_MS);
+    return () => clearTimeout(timer);
+  }, [challengeRecovery, checkChallengeRecovery]);
 
   // ── Push channel (SSE) with background-safe polling fallback ─────────────
 
@@ -514,6 +755,29 @@ export function useVsDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchVs, fetchActivity, inviteKey, isSampleVS, vsId]);
 
+  // ── Account-switch guard (#922) ───────────────────────────────────────────
+  //
+  // `address` may change at any time: the WalletProvider now re-reads the
+  // active account on window focus (lib/wallet.tsx). When it changes, the
+  // previous account's signed authorization is no longer valid — but the
+  // user's draft (challengeStake, typed text) is harmless and must survive.
+  //
+  // We expose `authorizationClearedFor` so the submit path can tell the user
+  // "review and re-authorize" until a fresh signature is obtained for the
+  // current account. Nothing in this file signs anything; the gate is the
+  // parent component's responsibility, driven by this field.
+  const lastAddressRef = useRef<string | null>(null);
+  const [authorizationClearedFor, setAuthorizationClearedFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    const previous = lastAddressRef.current;
+    lastAddressRef.current = address ?? null;
+    if (previous !== null && previous !== address) {
+      // Signed intent cleared; draft kept (challengeStake is not touched).
+      setAuthorizationClearedFor(address ?? null);
+    }
+  }, [address]);
+
   // ── Return ────────────────────────────────────────────────────────────────
 
   return {
@@ -529,5 +793,14 @@ export function useVsDetail({
     activity,
     activityLoading,
     activityError,
+    challengeRecovery,
+    challengeRecoveryChecking,
+    beginChallengeRecovery,
+    checkChallengeRecovery,
+    dismissChallengeRecovery,
+    intentReview,
+    captureChallengeIntent,
+    clearChallengeIntent,
+    authorizationClearedFor,
   };
 }

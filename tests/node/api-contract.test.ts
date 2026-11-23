@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { apiError, isRetryable, statusFor, type ApiErrorCode } from "../../lib/api/errors";
+import {
+  apiError,
+  isRetryable,
+  resolveReadIndexFeed,
+  statusFor,
+  upstreamUnavailableError,
+  type ApiErrorCode,
+} from "../../lib/api/errors";
+import { SCHEMA_VERSION_HEADER, validateFeedSourceMetadata } from "../../lib/api/schema";
 import {
   CLOCK_SKEW_MS,
   REQUEST_TTL_MS,
@@ -131,6 +139,131 @@ test("a validation error can name the offending field", () => {
   assert.equal(result.body.error.field, "stakeUsdc");
   assert.equal(result.body.error.code, "invalid_request");
   assert.equal(result.body.error.retryable, false);
+});
+
+// ── Upstream unavailability vs empty market feed ──────────────────────────────
+
+test("a healthy empty market feed returns 200 with live source metadata, distinct from upstream unavailability", () => {
+  const healthyEmpty = resolveReadIndexFeed<{ id: number }>({
+    ok: true,
+    items: [],
+    updatedAtMs: NOW - 5_000,
+    nowMs: NOW,
+  });
+
+  assert.equal(healthyEmpty.ok, true);
+  assert.equal(healthyEmpty.status, 200);
+  assert.equal(healthyEmpty.degraded, false);
+  assert.equal(healthyEmpty.headers[SCHEMA_VERSION_HEADER], "1");
+  assert.deepEqual(healthyEmpty.body.items, []);
+  assert.equal(healthyEmpty.body.count, 0);
+  assert.equal(healthyEmpty.body.cache.status, "live");
+  assert.equal(healthyEmpty.body.cache.stale, false);
+  assert.equal(healthyEmpty.body.cache.unavailable, false);
+  assert.equal(validateFeedSourceMetadata(healthyEmpty.body.cache).ok, true);
+});
+
+test("a failed read-index query without a verified fallback returns 503 upstream_unavailable instead of misleading empty data", () => {
+  const unavailable = resolveReadIndexFeed<{ id: number }>({
+    ok: false,
+    reason: "read_index_query_failed",
+    nowMs: NOW,
+    fallback: null,
+  });
+
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.status, 503);
+  assert.equal(unavailable.degraded, true);
+  assert.equal(unavailable.headers["retry-after"], "30");
+  assert.equal(unavailable.headers[SCHEMA_VERSION_HEADER], "1");
+  assert.equal(unavailable.body.error.code, "upstream_unavailable");
+  assert.equal(unavailable.body.error.retryable, true);
+  assert.ok(unavailable.body.error.sourceMeta);
+  assert.equal(unavailable.body.error.sourceMeta.status, "unavailable");
+  assert.equal(unavailable.body.error.sourceMeta.unavailable, true);
+  assert.equal(unavailable.body.error.sourceMeta.stale, true);
+  assert.equal(unavailable.body.error.sourceMeta.degraded, true);
+  assert.equal(unavailable.body.error.sourceMeta.reason, "read_index_query_failed");
+  assert.equal(validateFeedSourceMetadata(unavailable.body.error.sourceMeta).ok, true);
+});
+
+test("an unverified empty fallback (updatedAtMs: null, items: []) on a failed query is rejected as 503 upstream_unavailable", () => {
+  const unverifiedEmpty = resolveReadIndexFeed<{ id: number }>({
+    ok: false,
+    reason: "read_index_unavailable",
+    nowMs: NOW,
+    fallback: {
+      items: [],
+      updatedAtMs: null,
+    },
+  });
+
+  assert.equal(unverifiedEmpty.ok, false);
+  assert.equal(unverifiedEmpty.status, 503);
+  assert.equal(unverifiedEmpty.body.error.code, "upstream_unavailable");
+  assert.equal(unverifiedEmpty.body.error.sourceMeta?.status, "unavailable");
+  assert.equal(unverifiedEmpty.body.error.sourceMeta?.unavailable, true);
+});
+
+test("a failed read-index query with a verified fallback snapshot serves stale-source metadata rather than claiming live data", () => {
+  const fallbackWithItems = resolveReadIndexFeed<{ id: number }>({
+    ok: false,
+    reason: "read_index_query_failed",
+    nowMs: NOW,
+    fallback: {
+      items: [{ id: 42 }],
+      updatedAtMs: NOW - 15_000,
+      nextCursor: null,
+    },
+  });
+
+  assert.equal(fallbackWithItems.ok, true);
+  assert.equal(fallbackWithItems.status, 200);
+  assert.equal(fallbackWithItems.degraded, true);
+  assert.deepEqual(fallbackWithItems.body.items, [{ id: 42 }]);
+  assert.equal(fallbackWithItems.body.count, 1);
+  assert.equal(fallbackWithItems.body.cache.status, "stale");
+  assert.equal(fallbackWithItems.body.cache.stale, true);
+  assert.equal(fallbackWithItems.body.cache.unavailable, false);
+  assert.equal(fallbackWithItems.body.cache.degraded, true);
+  assert.equal(fallbackWithItems.body.cache.reason, "read_index_query_failed");
+  assert.equal(validateFeedSourceMetadata(fallbackWithItems.body.cache).ok, true);
+
+  const verifiedEmptySnapshot = resolveReadIndexFeed<{ id: number }>({
+    ok: false,
+    reason: "upstream_timeout",
+    nowMs: NOW,
+    fallback: {
+      items: [],
+      updatedAtMs: NOW - 30_000,
+    },
+  });
+
+  assert.equal(verifiedEmptySnapshot.ok, true);
+  assert.equal(verifiedEmptySnapshot.status, 200);
+  assert.equal(verifiedEmptySnapshot.degraded, true);
+  assert.deepEqual(verifiedEmptySnapshot.body.items, []);
+  assert.equal(verifiedEmptySnapshot.body.cache.status, "stale");
+  assert.equal(verifiedEmptySnapshot.body.cache.stale, true);
+  assert.equal(verifiedEmptySnapshot.body.cache.reason, "upstream_timeout");
+});
+
+test("upstreamUnavailableError attaches deterministic unavailable sourceMeta without altering default apiError shapes", () => {
+  const plain = apiError("upstream_unavailable", "dependency unavailable; retry later");
+  assert.equal(plain.body.error.sourceMeta, undefined);
+
+  const detailed = upstreamUnavailableError("read-index down", {
+    source: "index",
+    reason: "read_index_not_configured",
+    nowMs: NOW,
+    retryAfterSeconds: 45,
+  });
+  assert.equal(detailed.status, 503);
+  assert.equal(detailed.headers["retry-after"], "45");
+  assert.equal(detailed.body.error.code, "upstream_unavailable");
+  assert.equal(detailed.body.error.sourceMeta?.source, "index");
+  assert.equal(detailed.body.error.sourceMeta?.status, "unavailable");
+  assert.equal(detailed.body.error.sourceMeta?.reason, "read_index_not_configured");
 });
 
 // ── Signed requests ───────────────────────────────────────────────────────────

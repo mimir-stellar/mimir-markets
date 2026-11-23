@@ -20,6 +20,11 @@
  * hammering the upstream API on every run.
  */
 
+export const WEATHER_SOURCE_ID = "open-meteo";
+export const WEATHER_CAPTURE_VERSION = "v1";
+export const LAUNCH_SOURCE_ID = "launch-library-2";
+export const LAUNCH_CAPTURE_VERSION = "v1";
+
 export interface WeatherEvent {
   city: string;
   country: string;
@@ -27,6 +32,10 @@ export interface WeatherEvent {
   /** Forecast high for the target day, Celsius. */
   forecastHighC: number;
   targetDate: string;
+  sourceId: string;
+  captureVersion: string;
+  /** Epoch ms at which the snapshot was captured. */
+  capturedAtMs: number;
 }
 
 export interface LaunchEvent {
@@ -36,6 +45,9 @@ export interface LaunchEvent {
   windowStart: string;
   windowStartMs: number;
   resolutionUrl: string;
+  sourceId: string;
+  captureVersion: string;
+  capturedAtMs: number;
 }
 
 /** Stable, machine-readable reasons a source fetch was rejected. */
@@ -174,6 +186,7 @@ export async function fetchWeatherEvents(
   let lastReason: SourceRejectReason | null = null;
 
   for (const spot of CITIES) {
+    const capturedAtMs = Date.now();
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${spot.lat}&longitude=${spot.lon}`
       + `&daily=temperature_2m_max&timezone=auto&forecast_days=2`;
     const result = await getJson<{ daily?: { time?: string[]; temperature_2m_max?: number[] } }>(url);
@@ -190,6 +203,7 @@ export async function fetchWeatherEvents(
     events.push({
       city: spot.city, country: spot.country, resolutionUrl: url,
       forecastHighC: Math.round(high * 10) / 10, targetDate: date,
+      sourceId: WEATHER_SOURCE_ID, captureVersion: WEATHER_CAPTURE_VERSION, capturedAtMs,
     });
   }
 
@@ -259,6 +273,9 @@ export async function fetchLaunchEvents(
       // One launch, so the oracle reads a single record rather than a list it has
       // to search through.
       resolutionUrl: `https://ll.thespacedevs.com/2.2.0/launch/${id}/`,
+      sourceId: LAUNCH_SOURCE_ID,
+      captureVersion: LAUNCH_CAPTURE_VERSION,
+      capturedAtMs,
     });
   }
 

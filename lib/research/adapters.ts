@@ -102,7 +102,10 @@ export async function fetchWithAdapter(
     };
   }
 
-  const gwResult = await gatewayFetch(args);
+  const paidUnits =
+    args.paidUnits ??
+    (adapter.price ? Number(adapter.price.maxAtomicPerRequest) || 0 : 0);
+  const gwResult = await gatewayFetch({ ...args, paidUnits });
   if (!gwResult.ok) {
     // Gateway failure: pass through without validation.
     return gwResult as GatewayFailure;

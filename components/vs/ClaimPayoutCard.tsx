@@ -59,7 +59,7 @@ export default function ClaimPayoutCard({
 }) {
   const t = useTranslations("badges");
   const tWallet = useTranslations("wallet");
-  const { address, isConnected, signer } = useWallet();
+  const { address, isConnected, signer, sessionRevision } = useWallet();
   const trustline = useUsdcTrustline();
   const trustlineGate = evaluateUsdcTrustlineGate({
     action: "payout",
@@ -128,7 +128,7 @@ export default function ClaimPayoutCard({
     } finally {
       setLoading(false);
     }
-  }, [eligible, address, vs.id]);
+  }, [eligible, address, vs.id, sessionRevision]);
 
   useEffect(() => {
     void refresh();
