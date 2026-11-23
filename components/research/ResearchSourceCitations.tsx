@@ -12,6 +12,7 @@ import {
   type ResearchCitationView,
   type ResearchCitationsView,
 } from "@/lib/research/citations";
+import { sanitizeDisplayText } from "@/lib/text/display-safe";
 
 type ResearchSourceCitationsProps = BuildResearchCitationsOptions & {
   className?: string;
@@ -102,7 +103,14 @@ export default function ResearchSourceCitations({
 
       {showRows ? (
         <ol className="space-y-3">
-          {view.displayable.map((row, index) => (
+          {view.displayable.map((row, index) => {
+            // Untrusted source text: strip bidi/terminal controls at the
+            // presentation boundary (stored values and hrefs are unchanged).
+            const displayDomain = sanitizeDisplayText(row.domain);
+            const displayUrl = sanitizeDisplayText(row.url);
+            const displayExcerpt = sanitizeDisplayText(row.excerpt);
+            return (
+
             <li
               key={row.id}
               className="rounded-lg border border-pv-ink/[0.08] bg-pv-ink/[0.02] px-3 py-2.5"
@@ -144,7 +152,7 @@ export default function ResearchSourceCitations({
                     rel="noopener noreferrer nofollow"
                     className="inline-flex min-w-0 items-center gap-1 font-semibold text-pv-cyan hover:text-pv-text transition-colors"
                   >
-                    <span className="truncate">{row.domain || t("unsafeLink")}</span>
+                    <span className="truncate">{displayDomain || t("unsafeLink")}</span>
                     <ExternalLink size={12} aria-hidden />
                   </a>
                 ) : (
@@ -154,7 +162,7 @@ export default function ResearchSourceCitations({
                   </span>
                 )}
                 <span className="min-w-0 truncate font-mono text-[11px] text-pv-muted" data-testid="citation-unsafe-url">
-                  {row.domain || row.url}
+                  {displayDomain || displayUrl}
                 </span>
                 {row.shortHash ? (
                   <span className="inline-flex items-center gap-1 font-mono text-[11px] text-pv-muted">
@@ -166,10 +174,10 @@ export default function ResearchSourceCitations({
                 )}
               </div>
 
-              {row.excerpt ? (
+              {displayExcerpt ? (
                 <p className="mt-2 text-xs leading-relaxed text-pv-muted">
                   <span className="font-semibold text-pv-text/70">{t("excerpt")}: </span>
-                  {row.excerpt}
+                  {displayExcerpt}
                 </p>
               ) : null}
 
@@ -179,7 +187,8 @@ export default function ResearchSourceCitations({
                 </div>
               ) : null}
             </li>
-          ))}
+            );
+          })}
         </ol>
       ) : null}
 
