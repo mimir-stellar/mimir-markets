@@ -202,6 +202,9 @@ docs/AGENT_INCIDENT_RUNBOOK.md and the rollback-rehearsal gate.
 Artifacts. With --out, a deterministic JSON release record (statuses,
 commands and findings only; no timestamps unless --stamp). Two runs over
 the same inputs are byte-identical, so the record can be diffed.
+For machine-readable release review bundles, `npm run report:support-bundle`
+packages the public digests, versions and bounded findings into a reproducible
+support bundle with deterministic serialization and secret shape redaction.
 Secrets. None. The checklist reads tracked repo files only.
 Environment. No .env, no DATABASE_URL, no seeds, no network.
 Tests

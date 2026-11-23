@@ -59,6 +59,10 @@ remediation command. They never include row data, addresses, or secrets.
 
 `npm run report:compat` (and `npm run report:compat -- --json` for machine-readable output) compares the app, bindings, contracts, and schema versions recorded in tracked artifacts and flags incompatible combinations. It reads only committed files and never invokes live services, so it needs no credentials and performs no network calls. A combination is reported as incompatible when the schema snapshot's `schemaVersion` differs from the schema version declared by the app, or when a workspace's declared version does not match the version pinned in the shared compatibility manifest. Findings name the workspaces involved and the remediation step.
 
+## Offline artifact and schema support bundle
+
+`npm run report:support-bundle` (and `npm run report:support-bundle -- --json` or `--out <file>`) packages the offline schema snapshot fingerprint and drift report alongside contract Wasm digests and release readiness validation into a reproducible, deterministic bundle. Like the snapshot gate, it reads only public committed artifacts, never accesses `process.env` or a live database, and scrubs secret-shaped strings.
+
 ## Release, rollback, artifact, and environment
 
 - **Release.** CI runs `npm run check:schema-snapshot` before typecheck. A failing

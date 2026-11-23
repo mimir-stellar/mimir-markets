@@ -273,6 +273,11 @@ export const REVIEWED_PACKAGE_SCRIPTS: Readonly<Record<string, ReviewedScriptSpe
     category: "release",
     supportsArgForwarding: true,
   },
+  "report:support-bundle": {
+    command: "tsx scripts/report-support-bundle.ts",
+    category: "release",
+    supportsArgForwarding: true,
+  },
   "verify:analytics": {
     command: "tsx scripts/check-analytics-gates.ts",
     category: "release",
