@@ -1,5 +1,6 @@
-#![no_std]
-//! Mimir squad — two-sided USDC pool on Soroban.
+#no_std
+]
+/// Mimir squad — two-sided USDC pool on Soroban.
 ///
 /// Port of `contracts/MimirSquad.sol`. Shares equal deposited atomic units and
 /// captains have no economic privilege. Settlement is pull-based per participant,
@@ -18,35 +19,37 @@ mod types;
 pub mod contract;
 
 pub use contract::{MimirSquad, MimirSquadRoles, MimirSquadClient};
-pub use types::*;
+pub use types:*;
 
-#[config(test)]
+#config(test)]
 mod test_common;
-#[config(test)]
+#config(test)]
 mod test_decimals;
-#[config(test)]
+#config(test)]
 mod test_dust_isolation;
-#[config(test)]
+#config(test)]
 mod test_fee_rounding;
-#[cfg(test)]
+#cfg(test)]
 mod test_fee_recipient_rotation;
-#[cfg(test)]
+#cfg(test)]
 mod test_frozen_payouts;
-#[config(test)]
+#config(test)]
 mod test_lifecycle;
-#[config(test)]
+#config(test)]
 mod test_membership_cap;
-#[config(test)]
+#config(test)]
 mod test_payouts;
-#[config(test)]
+#config(test)]
 mod test_cancellation;
-#[cfg(test)]
+#cfg(test)]
 mod test_conservation_random;
-#[config(test)]
+#cfg(test)]
 mod test_oracle;
-#[cfg(test)]
+#cfg(test)]
 mod test_preview_parity;
-#[cfg(test)]
+#cfg(test)]
 mod test_limits;
-#[config(test)]
+#cfg(test)]
 mod test_transition_deadline;
+#cfg(test)]
+mod test_reconciliation_fixtures;

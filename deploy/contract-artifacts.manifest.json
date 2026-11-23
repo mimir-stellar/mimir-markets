@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "hashAlgorithm": "sha256",
-  "description": "Soroban contract artifact provenance pins. Leave sha256 null during develop; pin with `npm run verify:artifacts -- --write-pins` before a funded release. Release mode (`--mode=release` or MIMIR_REQUIRE_ARTIFACT_PROVENANCE=1) fails closed on unpinned or mismatched digests.",
+  "description": "Soroban contract artifact provenance pins. Leave sha256 null during develop; pin with `npm run verify:artifacts -- --write-pins` before a funded release. Release mode (`--mode=release` or MIMIR_REQUIRE_ARTIFACT_PROVENANCE=1) fails closed on unpinned or mismatched digests. Use `npm run report:compat` for an offline cross-workspace compatibility report (app, bindings, contracts and schema versions from tracked artifacts; no live services are invoked).",
   "artifacts": [
     {
       "id": "mimir-market",

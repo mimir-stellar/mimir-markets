@@ -27,6 +27,7 @@ This guide collects causes, code references, and fixes for errors contributors, 
   - [17. Deadline in Past / Not Yet Expired (#10 vs #22)](#17-deadline-in-past--not-yet-expired-10-vs-22)
   - [18. Metadata Exceeds Byte Budget (#41 / #42)](#18-metadata-exceeds-byte-budget-41--42)
   - [19. Unconfigured Council Personas](#19-unconfigured-council-personas)
+  - [20. Uncertain Challenge Stake Submission (Recovery Panel)](#20-uncertain-challenge-stake-submission-recovery-panel)
 - [Contract Error Code Reference](#contract-error-code-reference)
   - [`mimir-market` Error Codes (1–47)](#mimir-market-error-codes-147)
   - [`mimir-squad` Error Codes (1–32)](#mimir-squad-error-codes-132)
@@ -327,6 +328,15 @@ This guide collects causes, code references, and fixes for errors contributors, 
   - `contracts-soroban/mimir-market/src/types.rs:373, 385` (`Error::DeadlineInPast`, `Error::NotYetExpired`)
   - `lib/settlement-retry.ts:219-222, 279, 353-358` (`settlementSnapshotIsReady`)
 
+**Browser-side deadline estimates.** A deadline is a ledger timestamp, so the UI never treats `Date.now()` as the ledger. `lib/market-expiry.ts` evaluates the deadline against the latest observation (the read index snapshot or the on-chain read, with the server clock reconstructed from its freshness metadata) and returns a conservative `challengeable` flag plus an `estimateStale` reason:
+
+- `index_stale` — the read index is behind (see the freshness pill).
+- `observation_too_old` — no successful poll for more than 30 seconds (backgrounded tab, SSE outage).
+- `clock_skew` — the browser clock disagrees with the server clock that stamped the read by more than 5 seconds.
+- `no_ledger_observation` — the deadline is still a local draft (create ticket) or only a pending local snapshot.
+
+When `estimateStale` is set the market page labels the deadline "estimate may be stale", shows a refresh prompt instead of the stake form, and the create ticket marks the chosen deadline as a local estimate. `challengeable` is only true for a fresh observation with more than `CHALLENGE_LOCK_SECONDS` (60s) remaining; Soroban remains authoritative either way.
+
 ---
 
 ### 18. Metadata Exceeds Byte Budget (#41 / #42)
@@ -353,6 +363,19 @@ This guide collects causes, code references, and fixes for errors contributors, 
 - **Code Location**:
   - `agents/council/index.ts:158` (`main`)
   - `agents/council/personas.ts:265-369` (`validatePersona`)
+
+### 20. Uncertain Challenge Stake Submission (Recovery Panel)
+
+- **Message**:
+  - `Your stake was submitted but its outcome is uncertain. Tracking the transaction — do not submit a second stake.`
+  - The market detail page shows a "Stake submission uncertain" panel and hides the stake action.
+- **Cause**: A user-signed `challenge_claim` was submitted but the client never observed the outcome (the wallet reported it pending, or the RPC threw after submission while carrying a transaction hash). Stellar is final on inclusion, so the transaction may still land; offering a second stake could double-stake the wallet.
+- **Fix**: No operator action is needed. The panel displays the submitted transaction hash with an explorer link and runs bounded automatic status checks (`CHALLENGE_RECOVERY_MAX_STATUS_CHECKS = 5`, one per ledger close). The record persists in `localStorage` under `proven_challenge_recovery` and stops blocking once the outcome is observed or the record expires (`CHALLENGE_RECOVERY_MAX_AGE_MS = 30 min`). Recovery never resubmits — Soroban contract state stays authoritative.
+- **Code Location**:
+  - `lib/challenge-recovery.ts` (state machine + storage)
+  - `hooks/useVsDetail.ts` (`challengeRecovery`, `beginChallengeRecovery`, `checkChallengeRecovery`, `dismissChallengeRecovery`)
+  - `components/vs/ChallengeRecoveryPanel.tsx` (UI)
+  - `app/[locale]/vs/[id]/page.tsx` (`handleAccept` pending/uncertain paths)
 
 ---
 
