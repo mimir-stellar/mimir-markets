@@ -265,7 +265,26 @@ interface MarketTotals {
   settledAt: number;
 }
 
-export async function reconcileSettlements(): Promise<SettlementSyncResult> {
+export interface ReconcileSettlementsOptions {
+  onBeforeCheckpoint?: (nextCursor: number) => Promise<void> | void;
+  onAfterCheckpoint?: (nextCursor: number) => Promise<void> | void;
+  interrupt?: {
+    beforeCheckpoint?: boolean | number;
+    afterCheckpoint?: boolean | number;
+  };
+  eventsFetcher?: (
+    contractId: string,
+    opts: { startLedger: number; maxPages: number },
+  ) => Promise<{
+    events: rpc.Api.EventResponse[];
+    latestLedger: number;
+    truncated: boolean;
+  }>;
+}
+
+export async function reconcileSettlements(
+  options: ReconcileSettlementsOptions = {},
+): Promise<SettlementSyncResult> {
   const empty: SettlementSyncResult = {
     settlements: 0, accruals: 0, claims: 0, payouts: 0,
     fromLedger: 0, toLedger: 0, truncated: false,
@@ -282,7 +301,8 @@ export async function reconcileSettlements(): Promise<SettlementSyncResult> {
   // free because every write is idempotent.
   const fromLedger = validatedStored !== null && validatedStored > 0 ? validatedStored : getDeployLedger();
 
-  const scan = await getContractEvents(contractId, {
+  const fetchEvents = options.eventsFetcher ?? getContractEvents;
+  const scan = await fetchEvents(contractId, {
     startLedger: fromLedger,
     maxPages: MAX_PAGES_PER_PASS,
   });
@@ -412,7 +432,17 @@ export async function reconcileSettlements(): Promise<SettlementSyncResult> {
   // where it got to, so the next pass resumes rather than restarting.
   const reached = decoded.reduce((max, event) => Math.max(max, event.ledger), fromLedger);
   const nextCursor = scan.truncated ? reached : Math.max(reached, scan.latestLedger);
-  if (nextCursor > fromLedger) await advanceCursor(CURSOR_KEY, nextCursor);
+  if (nextCursor > fromLedger) {
+    if (options.interrupt?.beforeCheckpoint === true || options.interrupt?.beforeCheckpoint === nextCursor) {
+      throw new Error(`[settlement-index] Crash interrupted before checkpoint commit at ${nextCursor}`);
+    }
+    if (options.onBeforeCheckpoint) await options.onBeforeCheckpoint(nextCursor);
+    await advanceCursor(CURSOR_KEY, nextCursor);
+    if (options.interrupt?.afterCheckpoint === true || options.interrupt?.afterCheckpoint === nextCursor) {
+      throw new Error(`[settlement-index] Crash interrupted after checkpoint commit at ${nextCursor}`);
+    }
+    if (options.onAfterCheckpoint) await options.onAfterCheckpoint(nextCursor);
+  }
   // Freshness for read-only portfolio performance. Advance it only when this pass
   // reached the RPC head. A truncated or failed pass leaves the previous value
   // intact so consumers cannot mistake a partial settlement projection for live data.
