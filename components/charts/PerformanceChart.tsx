@@ -21,9 +21,10 @@
  * observation instead of jumping as the series grows.
  */
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 
 import {
+  PORTFOLIO_CHART_RANGES,
   buildPerformanceChartRows,
   formatChartDay,
   MAX_TABLE_ROWS,
@@ -56,8 +57,32 @@ const VIEW_HEIGHT = 180;
 const PAD_X = 10;
 const PAD_Y = 14;
 
-function formatDay(timestamp: number): string {
-  return formatChartDay(timestamp);
+const RANGE_LABELS: Record<PortfolioChartRange, string> = {
+  "24h": "24h",
+  "7d": "7d",
+  "30d": "30d",
+  all: "All",
+};
+
+export interface PerformanceChartProps {
+  points?: ChartPoint[];
+  series?: ChartSeries[];
+  /** The line drawn as "flat": starting NAV, or zero for cumulative P&L. */
+  baseline: number;
+  label: string;
+  valueSuffix?: string;
+  emptyMessage?: string;
+  invalidMessage?: string;
+  height?: number;
+  /** Initial or controlled chart range */
+  range?: PortfolioChartRange;
+  timeBounds?: TimeBounds;
+  /** Callback fired when the user selects a range */
+  onRangeChange?: (range: PortfolioChartRange, bounds?: TimeBounds) => void;
+  /** Whether to sync selected chart range with normalized URL state (default: true) */
+  syncUrl?: boolean;
+  /** Show range selection buttons (default: true) */
+  showRangeControls?: boolean;
 }
 
 function formatCoverage(coverage: ChartPoint["coverage"]): string {

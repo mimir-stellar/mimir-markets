@@ -319,6 +319,11 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
         enum: [...FRESHNESS_STATUSES],
         description: "`live` within freshnessWindowMs, `cached` within 5x window, `stale` beyond.",
       },
+      staleReason: {
+        type: ["string", "null"],
+        enum: ["provider_lag", "projection_failure", "unknown_coverage", null],
+        description: "Why an index snapshot is stale. Null for live, cached, and direct-contract reads.",
+      },
       lastUpdatedAt: {
         type: ["string", "null"],
         description: "ISO-8601 timestamp of the last sync, or null if the index has not synced.",

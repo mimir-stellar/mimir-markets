@@ -94,6 +94,24 @@ oracle does not settle them and `gatherCouncilVerdict` returns `null` first.
 bytes alone, for readers who only want to check the public body before rebuilding
 the full framed commitment.
 
+## Redacted research incident bundle
+
+A research incident bundle is a redacted, deterministic summary of a research gateway run that operators can share when investigating a failure. It is built from the gateway's request policy, source digests and bounded failure categories.
+
+Included:
+
+- request policy (per-agent budgets and allowed fetch routes),
+- source digests (SHA-256 of the captured snapshot bodies, never the bodies themselves),
+- bounded failure categories (a fixed enum, not raw error messages).
+
+Excluded by construction:
+
+- purchased private content (paid or gated source bodies),
+- provider credentials and API keys,
+- prompts, raw model reasoning, wallet and payout addresses.
+
+The bundle is exported as canonical JSON with fixed key order so two exports of the same run produce identical bytes. Coverage asserts the redaction boundary, including the failure case where a credential appears inside a source URL.
+
 ## Read-index storage
 
 `lib/ops/projection.ts` stores `evidenceHash` from `ClaimResolved` events into the

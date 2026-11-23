@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildVSCacheFreshness,
+  classifyVSCacheStaleReason,
   isStaleIndexSnapshot,
   makeContractFreshness,
 } from "../../lib/vs-freshness";
@@ -85,4 +86,45 @@ test("boundary and failure: missing or degraded cache state retains unavailable 
   assert.equal(degraded.projection.trustedLedger, null);
   assert.equal(degraded.projection.knownGaps, 5);
   assert.equal(degraded.projection.projectionGeneration, 1);
+});
+
+test("distinguishes provider lag, projection failure and unknown coverage", () => {
+  const projection = {
+    trustedLedger: 123456,
+    knownGaps: 0,
+    projectionGeneration: 1,
+  };
+
+  assert.equal(classifyVSCacheStaleReason({
+    updatedAtMs: Date.now() - windowMs * 6,
+    projection,
+  }), "provider_lag");
+
+  assert.equal(classifyVSCacheStaleReason({
+    updatedAtMs: Date.now(),
+    projection: { ...projection, knownGaps: 2 },
+  }), "projection_failure");
+
+  assert.equal(classifyVSCacheStaleReason({
+    updatedAtMs: null,
+    projection: { ...projection, trustedLedger: null },
+  }), "unknown_coverage");
+
+  const stale = buildVSCacheFreshness({
+    updatedAtMs: null,
+    freshnessWindowMs: windowMs,
+    source: "index",
+  });
+  assert.equal(stale.status, "stale");
+  assert.equal(stale.staleReason, "unknown_coverage");
+
+  const cached = buildVSCacheFreshness({
+    updatedAtMs: Date.now() - windowMs * 2,
+    freshnessWindowMs: windowMs,
+    source: "index",
+  });
+  assert.equal(cached.status, "cached");
+  assert.equal(cached.staleReason, undefined);
+
+  assert.equal(makeContractFreshness().staleReason, undefined);
 });

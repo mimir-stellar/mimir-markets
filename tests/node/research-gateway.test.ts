@@ -9,6 +9,7 @@ import {
   MAX_REDIRECTS,
   MAX_RESPONSE_BYTES,
   budgetRemaining,
+  buildResearchIncidentBundle,
   commitReservation,
   gatewayFetch,
   invalidateIncompatibleResearchCache,
