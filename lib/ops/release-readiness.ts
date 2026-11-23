@@ -1265,8 +1265,13 @@ function statusMark(status: EvaluatedGateStatus): string {
 export function formatReleaseReadinessReport(
   report: ReleaseReadinessReport,
 ): string {
+  const outcome = !report.ok
+    ? "FAILED"
+    : report.findings.some((finding) => finding.severity === "warning")
+      ? "WARNINGS"
+      : "OK";
   const lines: string[] = [
-    `release readiness (${report.mode}): ${report.ok ? "OK" : "FAILED"}`,
+    `release readiness (${report.mode}): ${outcome}`,
     `  fingerprint ${report.fingerprint.slice(0, 16)}…`,
     `  gates ${report.summary.passed}/${report.summary.total} passing, ` +
       `${report.summary.failed} failed, ${report.summary.missing} not evidenced ` +

@@ -31,7 +31,7 @@ dependencies is a deliberate lockfile commit, not a side effect of deploying.
 Two modes, and the difference is the whole point:
 
 Mode	Meaning
-develop (default)	The CLI verifies what it can run itself: checklist coherence, artifact provenance, the cache-backup fixture, the saved-ledger replay and the SBOM. Anything not run in this invocation - the remaining offline gates (each of which CI runs as its own step) and everything that needs a live deployment - is reported as not evidenced (a warning), never as passing. Exit code 0 means "the reproducible part of the release is green".
+develop (default)	The CLI verifies what it can run itself: checklist coherence, artifact provenance, the cache-backup fixture, the saved-ledger replay and the SBOM. Anything not run in this invocation - the remaining offline gates (each of which CI runs as its own step) and everything that needs a live deployment - is reported as not evidenced (a warning), never as passing. The text report says WARNINGS when evidence is missing; OK is reserved for a report with no warnings or errors. Exit code 0 means the checks required by this mode passed, not that every release gate has passed.
 release	Every gate must have recorded evidence and pass. A gate with no evidence is an error, so a release cannot be declared ready by omitting the gates that need a deployment.
 CI runs the develop mode on every pull request (the verify job in
 .github/workflows/ci.yml), so a release never discovers these checks late.

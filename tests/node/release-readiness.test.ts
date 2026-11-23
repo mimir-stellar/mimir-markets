@@ -400,6 +400,17 @@ test("regression: secret shapes are labelled and clean values pass", () => {
 
 // ── Formatting and the release record ────────────────────────────────────────
 
+test("positive: a fully evidenced release formats as OK", () => {
+  const report = evaluateReleaseReadiness(
+    parseReleaseEvidence(loadFixture("ready.json")),
+    { mode: "release" },
+  );
+  const text = formatReleaseReadinessReport(report);
+
+  assert.equal(report.releaseReady, true);
+  assert.match(text, /^release readiness \(release\): OK$/m);
+});
+
 test("positive: the report prints every gate, command and finding", () => {
   const report = evaluateReleaseReadiness(
     parseReleaseEvidence(loadFixture("offline-only.json")),
@@ -418,6 +429,42 @@ test("positive: the report prints every gate, command and finding", () => {
   }
   assert.ok(text.includes("release NOT ready"));
   assert.ok(text.includes("GATE_NOT_EVIDENCED"));
+});
+
+test("regression: missing-evidence warnings are not formatted as an OK report", () => {
+  const report = evaluateReleaseReadiness(
+    parseReleaseEvidence(loadFixture("offline-only.json")),
+    { mode: "develop" },
+  );
+  const text = formatReleaseReadinessReport(report);
+
+  assert.equal(report.ok, true);
+  assert.equal(report.releaseReady, false);
+  assert.match(text, /^release readiness \(develop\): WARNINGS/m);
+  assert.match(text, /\[deployment-verification\] missing —/);
+  assert.doesNotMatch(text, /^release readiness \(develop\): OK$/m);
+});
+
+test("regression: failed evidence stays failed in a report that also has warnings", () => {
+  const report = evaluateReleaseEvidence(
+    {
+      schemaVersion: 1,
+      kind: "mimir-release-readiness",
+      results: {
+        "deployment-verification": {
+          status: "fail",
+          detail: "synthetic gate failure",
+        },
+      },
+    },
+    { mode: "develop" },
+  );
+  const text = formatReleaseReadinessReport(report);
+
+  assert.equal(report.ok, false);
+  assert.match(text, /^release readiness \(develop\): FAILED$/m);
+  assert.match(text, /\[deployment-verification\] fail —/);
+  assert.match(text, /\[onchain-smoke\] missing —/);
 });
 
 test("regression: the release record is deterministic and carries no evidence text", () => {
