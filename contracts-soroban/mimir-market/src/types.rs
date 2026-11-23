@@ -190,6 +190,10 @@ pub struct FeePolicy {
     pub platform_fee_bps: u32,
     pub agent_owner_fee_bps: u32,
     pub platform_recipient: Option<Address>,
+    /// Monotonic revision of the effective fee policy. Bumped on every
+    /// successful `execute_fee_policy`, so a recipient rotation leaves an
+    /// auditable trail of which policy (and which recipient) was in force.
+    pub revision: u64,
 }
 
 #[contracttype]
@@ -199,6 +203,10 @@ pub struct PendingFeePolicy {
     pub agent_owner_fee_bps: u32,
     pub platform_recipient: Option<Address>,
     pub executable_at: u64,
+    /// Revision the queued policy will take effect as. Fixed at queue time so
+    /// a later queue cannot silently overwrite an in-flight transition's
+    /// identity.
+    pub revision: u64,
 }
 
 #[contracttype]
@@ -305,6 +313,55 @@ pub struct CreateParams {
     pub agent_owner_recipient: Option<Address>,
 }
 
+// ── Claim transition preflight (#779) ───────────────────────────────────────
+
+/// Why a claim transition would be refused.
+///
+/// Structural eligibility is separated from signed execution: this enum names
+/// only what is wrong *now* with the claim as observed on chain. It says
+/// nothing about whether a subsequent signed `resolve_claim` would succeed
+/// (the oracle still has to authorize it, and the verdict still has to
+/// validate) — see [`ClaimPreflight::requires_oracle_auth`].
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreflightReason {
+    /// Claim is not `Active` (it may be Open, Resolved, or Cancelled).
+    NotActive = 0,
+    /// Claim is Active but its deadline has not yet been reached.
+    NotYetExpired = 1,
+    /// Claim id does not exist.
+    ClaimNotFound = 2,
+}
+
+/// What a read-only preflight of a claim transition would return.
+///
+/// The two booleans separate the two questions a caller needs answered:
+///
+///   - `lifecycle_ok` — is the claim, as currently stored, structurally
+///     eligible for resolution (state + deadline)? This is the exact check
+///     `resolve_claim_versioned` performs, extracted so the two cannot drift.
+///   - `requires_oracle_auth` — will a subsequent signed submission also
+///     require the oracle's authorization? Purely informational: `true` never
+///     means the submission will succeed, only that the signer is required.
+///   - `constraints_ok` — are the public, non-state constraints satisfied
+///     (a bounded resolution summary will fit, etc.)? Empty for callers that
+///     have no candidate payload, `false` only when a candidate payload would
+///     be rejected.
+///
+/// `eligible == lifecycle_ok && constraints_ok` — a convenience so a caller
+/// does not have to re-derive it.
+///
+/// **Read-only.** No `require_auth`, no storage write, no TTL bump, no event.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimPreflight {
+    pub eligible: bool,
+    pub lifecycle_ok: bool,
+    pub constraints_ok: bool,
+    pub requires_oracle_auth: bool,
+    pub missing_reasons: Vec<PreflightReason>,
+}
+
 // ── View return shapes ───────────────────────────────────────────────────────
 
 #[contracttype]
@@ -353,6 +410,25 @@ pub struct PlatformStats {
     pub balance: i128,
     pub fees_accrued: i128,
     pub fees_claimed: i128,
+}
+
+/// Version of the [`ContractLimits`] response shape.
+pub const LIMITS_VERSION_V1: u32 = 1;
+
+/// Bounded, versioned snapshot of the contract's resource and policy limits,
+/// so clients can read them instead of probing live calls for failures.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractLimits {
+    pub version: u32,
+    pub max_challengers: u32,
+    pub max_batch_size: u32,
+    pub max_invite_key_bytes: u32,
+    pub max_metadata_bytes: u32,
+    pub max_claim_metadata_bytes: u32,
+    pub max_total_fee_bps: u32,
+    pub fee_timelock_seconds: u64,
+    pub oracle_timelock_seconds: u64,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -431,4 +507,8 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    /// A queued fee-policy change was approved against a revision that is no
+    /// longer the active policy. The stale change is rejected and the active
+    /// policy and all balances are left untouched.
+    StaleFeePolicyRevision = 48,
 }

@@ -25,6 +25,37 @@
   with an expiry, which does not refresh. The rolling-period budget the follower
   actually signed for is Mimir's own accounting on top; both must pass, so
   exceeding either is a skip.
+- Simultaneous signals: `tests/node/copy-permission-fixtures.ts` models a batch as
+  one shared preview snapshot followed by a stable claim-id-ordered execution pass.
+  Every execution re-reads usage, claim ids, allowance and revocation from a
+  temporary state directory, so a preview can never be replayed as approval and two
+  signals cannot both spend the same signed budget.
+- Revocation between preview and execution: the fixture applies an owner-signed
+  `copyRevokeMessage` before the execution pass (or from an `afterExecution` hook)
+  and expects `permission_revoked`, not a stale preview verdict. A revocation is a
+  separate signed lifecycle action; it does not re-sign the economic policy, so the
+  fixture checks the policy hash with `status` normalised to `active`.
+- Policy integrity: before each execution the fixture recomputes the active-form
+  `signedPolicyHash`. A mutated cap, allowance or allowlist fails closed with
+  `policy_hash_mismatch` before any stake is reserved. Every executed row records
+  that hash, and the fixture's invariant check re-derives atomic 7-decimal USDC
+  caps from the signed policy and the decreasing on-chain allowance.
+
+- Pre-signature review digest: before owner signing, `POST /api/copy/permissions/review`
+  (backed by `buildCopyPermissionReviewDigest` in `lib/copy-trading.ts`) exposes a
+  canonical SHA-256 `reviewDigest` binding the execution/signal agents, allowed
+  categories/modes, thresholds, expiry, and every spending limit (per-position, daily,
+  weekly, open-exposure, realized-loss, and delegated spend permission). Submitting a
+  signed grant to `POST /api/copy/permissions` with `reviewDigest` re-verifies the
+  digest via `verifyCopyPermissionReviewDigest` and rejects with `409 review_digest_mismatch`
+  if any bound field changed between review and signature.
 
 Every decision writes source position, permission, simulation ledger, attribution,
 stake, fee lines, tx hash and status/skip reason to the audit ledger.
+
+- Allowance reconciliation: `lib/copy-allowance-reconciliation.ts` compares the
+  owner-signed copy policy, the authoritative Soroban SAC allowance (and
+  optional `SpendPermissionRecord`), and observed rolling consumption to emit a
+  read-only discrepancy report (`mode: "read_only"`, `remediationApplied: false`)
+  before any remediation action is taken. Malformed or non-atomic inputs fail
+  closed with a `malformed_input` critical discrepancy.

@@ -1,9 +1,17 @@
 /**
- * Pure policy predicates for the demo BYOA traders.
+ * Pure policy predicates and bounded decision journal for the demo BYOA traders.
  *
- * Keeps decision criteria and claim filtering testable in Node without
- * needing live network connections, wallets, or databases.
+ * Keeps decision criteria, claim filtering, and decision journaling testable
+ * in Node without needing live network connections, wallets, or databases.
+ *
+ * The decision journal coordinates with sequence reservations from
+ * `lib/agents/sequence-manager.ts` to track autonomous staking decisions within
+ * strict spending and sequence bounds, recording signal, policy revision, and
+ * disposition digests while strictly excluding private model prompts and signing keys.
  */
+
+import { sha256Hex, isHash32Hex } from "../../lib/content-hash";
+import type { SequenceReservation, ReservationState } from "../../lib/agents/sequence-manager";
 
 export interface JoinableClaimCandidate {
   id: number;
@@ -35,6 +43,55 @@ export function filterJoinableClaims<T extends JoinableClaimCandidate>(
     joinable.push(claim);
   }
   return joinable;
+}
+
+/**
+ * Rounding rule applied when converting a fractional stake into atomic USDC
+ * units. Recorded in every dry-run report so the result is auditable.
+ *
+ * - `policyVersion` bumps whenever the rule changes.
+ * - `rounding` is always `"floor"`: a stake never exceeds the requested
+ *   fraction of the budget, so spending limits are never breached.
+ */
+export const STAKE_ROUNDING_POLICY = {
+  policyVersion: 1,
+  rounding: "floor",
+  atomicDecimals: 7,
+} as const;
+
+export interface StakeSizingResult {
+  /** Stake in atomic USDC units (7 decimals). Integer. */
+  stakeAtomic: bigint;
+  /** Budget remainder left after the stake, in atomic units. Integer. */
+  remainderAtomic: bigint;
+  policyVersion: number;
+  rounding: string;
+}
+
+/**
+ * Size a stake as `budgetAtomic * fractionBps / 10000`, rounded down to an
+ * integer number of atomic units. `fractionBps` is basis points (0..10000).
+ * All arithmetic is integer; no floating point is involved.
+ */
+export function computeStakeSizing(
+  budgetAtomic: bigint,
+  fractionBps: number,
+): StakeSizingResult {
+  if (budgetAtomic < 0n) {
+    throw new Error("budgetAtomic must be non-negative");
+  }
+  if (!Number.isInteger(fractionBps) || fractionBps < 0 || fractionBps > 10000) {
+    throw new Error("fractionBps must be an integer in [0, 10000]");
+  }
+  const product = budgetAtomic * BigInt(fractionBps);
+  const stakeAtomic = product / 10000n; // BigInt division floors for non-negative values
+  const remainderAtomic = budgetAtomic - stakeAtomic;
+  return {
+    stakeAtomic,
+    remainderAtomic,
+    policyVersion: STAKE_ROUNDING_POLICY.policyVersion,
+    rounding: STAKE_ROUNDING_POLICY.rounding,
+  };
 }
 
 export interface SecondOpinionClaimFields {

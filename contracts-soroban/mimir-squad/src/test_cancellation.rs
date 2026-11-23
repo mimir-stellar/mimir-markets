@@ -1,5 +1,6 @@
 #![cfg(test)]
 //! Market cancellation: captain-initiated refunds before or at deadline.
+//! Includes read-only checks of refundable liabilities before cancellation.
 
 extern crate std;
 
@@ -376,6 +377,36 @@ fn cancellation_does_not_accrue_fees() {
 }
 
 // ── Invariants ───────────────────────────────────────────────────────────────
+
+#[test]
+fn refundable_liabilities_are_readable_before_cancellation_without_side_effects() {
+    let f = Fixture::new();
+    let captain = f.user(0);
+    let a1 = f.user(100 * USDC);
+    let b1 = f.user(100 * USDC);
+    let id = f.market(&captain, 0);
+
+    f.client().deposit(&a1, &id, &SIDE_A, &(20 * USDC));
+    f.client().deposit(&b1, &id, &SIDE_B, &(30 * USDC));
+
+    let m_before = f.client().get_market(&id);
+    let escrow_before = f.escrow_balance();
+    let fees_before = f.client().get_accrued_fees();
+    let bal_a_before = f.token().balance(&a1);
+
+    // Reading the liability view must not move value or change state.
+    assert_eq!(f.client().get_deposit(&id, &SIDE_A, &a1), 20 * USDC);
+    assert_eq!(f.client().get_deposit(&id, &SIDE_B, &b1), 30 * USDC);
+    assert_eq!(m_before.pool_a + m_before.pool_b, escrow_before);
+
+    let m_after = f.client().get_market(&id);
+    assert_eq!(m_after.resolved, false);
+    assert_eq!(m_after.pool_a, m_before.pool_a);
+    assert_eq!(m_after.pool_b, m_before.pool_b);
+    assert_eq!(f.escrow_balance(), escrow_before);
+    assert_eq!(f.client().get_accrued_fees(), fees_before);
+    assert_eq!(f.token().balance(&a1), bal_a_before);
+}
 
 #[test]
 fn escrow_balance_is_conserved_through_cancellation_and_claims() {
