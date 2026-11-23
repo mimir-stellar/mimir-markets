@@ -4,10 +4,15 @@ import test from "node:test";
 import {
   API_SCHEMA_VERSION,
   SCHEMA_VERSION_HEADER,
+  buildFeedSourceMetadata,
   checkShape,
   resolveRequestVersion,
   schemaVersionHeaders,
+  staleFeedSourceMetadata,
+  unavailableFeedSourceMetadata,
+  validateFeedSourceMetadata,
   versioned,
+  versionedMarketFeed,
   type ShapeSpec,
 } from "../../lib/api/schema";
 
@@ -164,4 +169,163 @@ test("the version header matches the constant", () => {
   assert.deepEqual(schemaVersionHeaders(), {
     [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION),
   });
+});
+
+// ── Source availability and freshness metadata ────────────────────────────────
+
+const BASE_NOW = 1_780_000_000_000;
+const WINDOW_MS = 60_000;
+
+test("source metadata classifies live, cached, and stale snapshots deterministically across boundaries", () => {
+  const live = buildFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: BASE_NOW - WINDOW_MS,
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+  });
+  assert.equal(live.status, "live");
+  assert.equal(live.stale, false);
+  assert.equal(live.unavailable, false);
+  assert.equal(live.degraded, false);
+  assert.equal(live.ageMs, WINDOW_MS);
+  assert.equal(validateFeedSourceMetadata(live).ok, true);
+
+  const cachedAtLowerBoundary = buildFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: BASE_NOW - (WINDOW_MS + 1),
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+  });
+  assert.equal(cachedAtLowerBoundary.status, "cached");
+  assert.equal(cachedAtLowerBoundary.stale, false);
+  assert.equal(cachedAtLowerBoundary.degraded, false);
+
+  const cachedAtUpperBoundary = buildFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: BASE_NOW - WINDOW_MS * 5,
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+  });
+  assert.equal(cachedAtUpperBoundary.status, "cached");
+  assert.equal(cachedAtUpperBoundary.stale, false);
+
+  const stalePastUpperBoundary = buildFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: BASE_NOW - (WINDOW_MS * 5 + 1),
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+  });
+  assert.equal(stalePastUpperBoundary.status, "stale");
+  assert.equal(stalePastUpperBoundary.stale, true);
+  assert.equal(stalePastUpperBoundary.unavailable, false);
+  assert.equal(stalePastUpperBoundary.degraded, true);
+  assert.equal(validateFeedSourceMetadata(stalePastUpperBoundary).ok, true);
+});
+
+test("an index snapshot without a known update timestamp defaults to stale, never live", () => {
+  const unknownAge = buildFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: null,
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+  });
+  assert.equal(unknownAge.status, "stale");
+  assert.equal(unknownAge.stale, true);
+  assert.equal(unknownAge.unavailable, false);
+  assert.equal(unknownAge.degraded, true);
+  assert.equal(unknownAge.lastUpdatedAt, null);
+  assert.equal(unknownAge.ageMs, null);
+  assert.equal(validateFeedSourceMetadata(unknownAge).ok, true);
+});
+
+test("stale and unavailable source metadata builders emit stable, schema-valid descriptors", () => {
+  const staleFallback = staleFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: BASE_NOW - 10_000,
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+    reason: "read_index_query_failed",
+  });
+  assert.equal(staleFallback.status, "stale");
+  assert.equal(staleFallback.stale, true);
+  assert.equal(staleFallback.unavailable, false);
+  assert.equal(staleFallback.degraded, true);
+  assert.equal(staleFallback.reason, "read_index_query_failed");
+  assert.equal(validateFeedSourceMetadata(staleFallback).ok, true);
+
+  const unavailable = unavailableFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: null,
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+    reason: "read_index_unavailable",
+  });
+  assert.equal(unavailable.status, "unavailable");
+  assert.equal(unavailable.stale, true);
+  assert.equal(unavailable.unavailable, true);
+  assert.equal(unavailable.degraded, true);
+  assert.equal(unavailable.reason, "read_index_unavailable");
+  assert.equal(validateFeedSourceMetadata(unavailable).ok, true);
+});
+
+test("validateFeedSourceMetadata rejects contradictory status flags and mismatched timestamp/age pairs", () => {
+  const validLive = buildFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: BASE_NOW - 5_000,
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+  });
+
+  const contradictoryUnavailable = {
+    ...validLive,
+    status: "unavailable",
+    unavailable: false,
+    stale: false,
+    degraded: false,
+  };
+  const unavailableCheck = validateFeedSourceMetadata(contradictoryUnavailable);
+  assert.equal(unavailableCheck.ok, false);
+  assert.ok(unavailableCheck.errors.some((e) => e.includes("unavailable must be true")));
+  assert.ok(unavailableCheck.errors.some((e) => e.includes("stale must be true")));
+
+  const mismatchedTimestamps = {
+    ...validLive,
+    lastUpdatedAt: null,
+    ageMs: 5_000,
+  };
+  const mismatchCheck = validateFeedSourceMetadata(mismatchedTimestamps);
+  assert.equal(mismatchCheck.ok, false);
+  assert.ok(
+    mismatchCheck.errors.some((e) =>
+      e.includes("lastUpdatedAt and ageMs must either both be present or both be null"),
+    ),
+  );
+});
+
+test("versionedMarketFeed wraps a healthy empty feed and refuses an unavailable source", () => {
+  const liveCache = buildFeedSourceMetadata({
+    source: "index",
+    updatedAtMs: BASE_NOW,
+    freshnessWindowMs: WINDOW_MS,
+    nowMs: BASE_NOW,
+  });
+  const emptyFeed = versionedMarketFeed({
+    items: [],
+    cache: liveCache,
+    nextCursor: null,
+  });
+  assert.equal(emptyFeed.schemaVersion, API_SCHEMA_VERSION);
+  assert.deepEqual(emptyFeed.items, []);
+  assert.equal(emptyFeed.count, 0);
+  assert.equal(emptyFeed.cache.status, "live");
+  assert.equal(emptyFeed.cache.unavailable, false);
+
+  const unavailableCache = unavailableFeedSourceMetadata({
+    source: "index",
+    nowMs: BASE_NOW,
+  });
+  assert.throws(
+    () => versionedMarketFeed({ items: [], cache: unavailableCache }),
+    /unavailable read-index source cannot be wrapped as a successful market feed response/,
+  );
 });

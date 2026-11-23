@@ -339,16 +339,42 @@ export interface ReadIndexRestoreResult {
   applied: boolean;
 }
 
-interface SqlValue {
+export interface SqlValue {
   sql: string;
   args: unknown[];
+}
+
+export interface ReadIndexRestoreOptions {
+  dryRun?: boolean;
+  /**
+   * Maximum SQL statements per checkpoint transaction.
+   * If unset or <= 0, all statements run in a single transaction.
+   */
+  batchSize?: number;
+  /**
+   * Hook called before a batch transaction commits.
+   * Throwing an error simulates a crash/interruption before checkpoint commit.
+   */
+  onBeforeCheckpoint?: (batchIndex: number, statements: SqlValue[]) => void | Promise<void>;
+  /**
+   * Hook called after a batch transaction commits.
+   * Throwing an error simulates a crash/interruption after checkpoint commit.
+   */
+  onAfterCheckpoint?: (batchIndex: number, statements: SqlValue[]) => void | Promise<void>;
+  /**
+   * Deterministic interruption triggers for crash recovery fixtures.
+   */
+  interrupt?: {
+    beforeCheckpoint?: number;
+    afterCheckpoint?: number;
+  };
 }
 
 function toPgPlaceholders(count: number): string {
   return Array.from({ length: count }, (_, i) => `$${i + 1}`).join(", ");
 }
 
-function upsertStatements(name: ReadIndexTableName, rows: BackupRow[]): SqlValue[] {
+export function upsertStatements(name: ReadIndexTableName, rows: BackupRow[]): SqlValue[] {
   const spec = TABLE_SPECS[name];
   const columns = spec.columns;
   const conflictTarget = spec.conflictTarget;
@@ -404,13 +430,13 @@ function mismatchFinding(expected: string, actual: string): CacheBackupFinding {
 /**
  * Restore checks:
  *  - the archive must verify before a single write starts (fail-closed),
- *  - writes happen in one transaction so a failure rolls back to the pre-restore state,
+ *  - writes happen in checkpointed transactions so a failure rolls back to the pre-checkpoint state,
  *  - after commit the tables are re-read and fingerprinted against the archive.
  * `dryRun` verifies and reports what would change without writing.
  */
 export async function restoreReadIndexFromBackup(
   archiveText: string,
-  opts: { dryRun?: boolean } = {},
+  opts: ReadIndexRestoreOptions = {},
 ): Promise<ReadIndexRestoreResult> {
   requireBackupEnv();
   const report = verifyCacheBackup(archiveText);
@@ -430,7 +456,34 @@ export async function restoreReadIndexFromBackup(
     for (const name of READ_INDEX_TABLES) {
       statements.push(...upsertStatements(name, backup.tables[name]));
     }
-    await runInTransaction(pool, statements);
+
+    const batchSize = typeof opts.batchSize === "number" && opts.batchSize > 0 ? opts.batchSize : 0;
+    const batches: SqlValue[][] = [];
+    if (batchSize > 0) {
+      for (let i = 0; i < statements.length; i += batchSize) {
+        batches.push(statements.slice(i, i + batchSize));
+      }
+    } else if (statements.length > 0) {
+      batches.push(statements);
+    }
+
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
+      if (opts.interrupt?.beforeCheckpoint === batchIdx) {
+        throw new Error(`[read-index-backup] Crash interrupted before checkpoint commit (batch ${batchIdx})`);
+      }
+      if (opts.onBeforeCheckpoint) {
+        await opts.onBeforeCheckpoint(batchIdx, batch);
+      }
+      await runInTransaction(pool, batch);
+      if (opts.interrupt?.afterCheckpoint === batchIdx) {
+        throw new Error(`[read-index-backup] Crash interrupted after checkpoint commit (batch ${batchIdx})`);
+      }
+      if (opts.onAfterCheckpoint) {
+        await opts.onAfterCheckpoint(batchIdx, batch);
+      }
+    }
+
     for (const name of READ_INDEX_TABLES) {
       restored.push({ table: name, rows: backup.tables[name].length });
     }

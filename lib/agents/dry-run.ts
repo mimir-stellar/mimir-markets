@@ -2,6 +2,11 @@
  * Pre-flight for a funded agent action: would the policy allow it, does the agent
  * have the money, and what would it actually be paid?
  *
+ * This is a READ-ONLY preflight preview. Nothing here is signed, submitted or
+ * settled; the figures describe what an executed transaction would produce given
+ * the current simulation inputs. Callers must present it as a preview, never as a
+ * completed transaction.
+ *
  * `allowanceAtomic` is a HISTORICAL NAME, kept because the response shape is a
  * public API surface. On the EVM chain it was the ERC-20 allowance the agent had
  * granted the market contract, and a stake could not land without one. Soroban has
@@ -51,13 +56,17 @@ export function buildAgentDryRun(args: {
       agentOwnerRecipient: args.ownerRecipient,
     }),
   });
+  const sufficient = args.allowanceAtomic >= args.requiredAtomic;
   return {
-    allowed: args.policy.allowed && args.allowanceAtomic >= args.requiredAtomic,
+    /** Always false-safe: a preview is never an executed transaction. */
+    preview: true as const,
+    executed: false as const,
+    allowed: args.policy.allowed && sufficient,
     policy: args.policy,
     allowance: {
       currentAtomic: args.allowanceAtomic.toString(),
       requiredAtomic: args.requiredAtomic.toString(),
-      sufficient: args.allowanceAtomic >= args.requiredAtomic,
+      sufficient,
       /** What `currentAtomic` measures, so a caller is not misled by the key name. */
       source: "spendable_usdc_balance",
     },

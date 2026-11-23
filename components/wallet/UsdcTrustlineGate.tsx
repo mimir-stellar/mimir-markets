@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
@@ -10,6 +10,7 @@ import {
 } from "@/lib/wallet";
 import {
   ensureUsdcTrustline,
+  invalidateTrustlineRead,
   readUsdcTrustline,
   type TrustlineState,
 } from "@/lib/stellar-trustline";
@@ -40,14 +41,21 @@ export function useUsdcTrustline(): UsdcTrustline {
   const t = useTranslations("wallet");
   const [state, setState] = useState<TrustlineState>({ status: "unknown", balance: null });
   const [checkedAddress, setCheckedAddress] = useState<string | null>(null);
+  const [checkedRevision, setCheckedRevision] = useState<number | null>(null);
   const [loading, setLoading] = useState(Boolean(address));
   const [adding, setAdding] = useState(false);
   const [tick, setTick] = useState(0);
+
+  const addressRef = useRef(address);
+  addressRef.current = address;
+  const generationRef = useRef(intentGeneration);
+  generationRef.current = intentGeneration;
 
   useEffect(() => {
     if (!address) {
       setState({ status: "unknown", balance: null });
       setCheckedAddress(null);
+      setCheckedRevision(null);
       setLoading(false);
       return;
     }
@@ -55,16 +63,19 @@ export function useUsdcTrustline(): UsdcTrustline {
     let cancelled = false;
     setLoading(true);
     setCheckedAddress(null);
-    readUsdcTrustline(address)
+    setCheckedRevision(null);
+    readUsdcTrustline(address, { sessionRevision })
       .then((next) => {
         if (cancelled) return;
         setState(next);
         setCheckedAddress(address);
+        setCheckedRevision(sessionRevision);
       })
       .catch(() => {
         if (cancelled) return;
         setState({ status: "unknown", balance: null });
         setCheckedAddress(address);
+        setCheckedRevision(sessionRevision);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -73,25 +84,48 @@ export function useUsdcTrustline(): UsdcTrustline {
     return () => {
       cancelled = true;
     };
-  }, [address, tick]);
+  }, [address, tick, sessionRevision]);
 
   const refresh = useCallback(() => {
+    if (address) invalidateTrustlineRead(address);
     setCheckedAddress(null);
+    setCheckedRevision(null);
     setLoading(true);
     setTick((n) => n + 1);
-  }, []);
+  }, [address]);
 
   const add = useCallback(async () => {
     if (!signer) return false;
+    const boundAddress = signer.publicKey;
+    const boundGeneration = generationRef.current;
     setAdding(true);
     setLoading(true);
     try {
-      await ensureUsdcTrustline(signer);
+      await ensureUsdcTrustline(signer, {
+        intentGeneration: boundGeneration,
+        getActiveIntentGeneration: () => generationRef.current,
+        getActiveAddress: () => addressRef.current,
+      });
+
+      // Prevent an account switch from applying a stale result to the new wallet
+      if (addressRef.current !== boundAddress) {
+        return false;
+      }
+
       const next = await readUsdcTrustline(signer.publicKey);
+      if (addressRef.current !== boundAddress) {
+        return false;
+      }
+
       setState(next);
       setCheckedAddress(signer.publicKey);
+      setCheckedRevision(sessionRevision);
       return next.status === "ready";
     } catch (err) {
+      if (isObsoleteSigningIntentError(err)) {
+        // Obsolete signing intent / account switch: ignore late result silently
+        return false;
+      }
       const message = err instanceof Error ? err.message : String(err);
       toast.error(
         /reject|denied|cancel/i.test(message)
@@ -105,7 +139,7 @@ export function useUsdcTrustline(): UsdcTrustline {
       setLoading(false);
       setAdding(false);
     }
-  }, [signer, t]);
+  }, [signer, t, sessionRevision]);
 
   const acknowledgeRecovery = useCallback(() => {
     if (!acknowledgeSigningRecovery) return false;
@@ -116,7 +150,11 @@ export function useUsdcTrustline(): UsdcTrustline {
     ...state,
     connected: isConnected && Boolean(address),
     canSign: Boolean(signer),
-    stale: Boolean(address && checkedAddress !== address),
+    stale: Boolean(
+      address &&
+        (checkedAddress !== address ||
+          (checkedRevision !== null && checkedRevision !== sessionRevision)),
+    ),
     loading,
     adding,
     add,
@@ -125,6 +163,47 @@ export function useUsdcTrustline(): UsdcTrustline {
     signingRecovery,
     acknowledgeSigningRecovery: acknowledgeRecovery,
   };
+}
+
+export function UsdcPreflightPreview({
+  fees,
+  reserveReady,
+  usdcExposure,
+}: {
+  fees: string;
+  reserveReady: boolean;
+  usdcExposure: bigint;
+}) {
+  const t = useTranslations("wallet");
+  return (
+    <div
+      className="border border-pv-ink/[0.12] bg-pv-ink/[0.03] p-4"
+      role="status"
+      aria-live="polite"
+      data-testid="preflight-preview"
+    >
+      <h3 className="font-mono text-[10px] uppercase tracking-wider text-pv-muted">
+        {t("preflightTitle")}
+      </h3>
+      <p className="mt-1 text-[11px] text-pv-muted">{t("preflightNotExecuted")}</p>
+      <dl className="mt-2 space-y-1 text-[12px] text-pv-muted">
+        <div>
+          <dt className="inline">{t("preflightFees")}: </dt>
+          <dd className="inline">{fees} XLM</dd>
+        </div>
+        <div>
+          <dt className="inline">{t("preflightReserve")}: </dt>
+          <dd className="inline">
+            {reserveReady ? t("preflightReserveReady") : t("preflightReserveShort")}
+          </dd>
+        </div>
+        <div>
+          <dt className="inline">{t("preflightExposure")}: </dt>
+          <dd className="inline">{usdcExposure.toString()} USDC (integer units)</dd>
+        </div>
+      </dl>
+    </div>
+  );
 }
 
 function UsdcTrustlineGateView({

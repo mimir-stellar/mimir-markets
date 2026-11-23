@@ -3,6 +3,9 @@ import test from "node:test";
 
 import {
   badgeFor,
+  checkWalletSigningCapability,
+  getWalletCapabilityReport,
+  supportsSigningMethod,
   installUrlFor,
   kindOf,
   shapeWalletOptions,
@@ -149,4 +152,107 @@ test("capability gaps match the kit's real module implementations", () => {
   // No wallet connected: nothing is supported.
   assert.equal(supportsAuthEntrySigning(null), false);
   assert.equal(supportsMessageSigning(undefined), false);
+});
+
+test("getWalletCapabilityReport returns an explicit per-method capability snapshot", () => {
+  assert.deepEqual(getWalletCapabilityReport("freighter", "Freighter"), {
+    walletId: "freighter",
+    walletName: "Freighter",
+    connected: true,
+    methods: {
+      signTransaction: true,
+      signAuthEntry: true,
+      signMessage: true,
+    },
+  });
+
+  assert.deepEqual(getWalletCapabilityReport("xbull", "xBull"), {
+    walletId: "xbull",
+    walletName: "xBull",
+    connected: true,
+    methods: {
+      signTransaction: true,
+      signAuthEntry: false,
+      signMessage: true,
+    },
+  });
+
+  assert.deepEqual(getWalletCapabilityReport("albedo", "Albedo"), {
+    walletId: "albedo",
+    walletName: "Albedo",
+    connected: true,
+    methods: {
+      signTransaction: true,
+      signAuthEntry: false,
+      signMessage: false,
+    },
+  });
+
+  // Disconnected and whitespace-only ids report no capabilities.
+  for (const disconnected of [null, undefined, "", "   "]) {
+    assert.deepEqual(getWalletCapabilityReport(disconnected, "Ignored"), {
+      walletId: null,
+      walletName: null,
+      connected: false,
+      methods: {
+        signTransaction: false,
+        signAuthEntry: false,
+        signMessage: false,
+      },
+    });
+  }
+});
+
+test("checkWalletSigningCapability returns a safe unsupported-method result without requesting a signature", async () => {
+  let signCalls = 0;
+  const fakeSign = async () => {
+    signCalls += 1;
+    return "signed-payload";
+  };
+
+  // Unsupported method: Albedo does not support signMessage.
+  const unsupportedMessage = checkWalletSigningCapability("albedo", "signMessage", "Albedo");
+  assert.equal(unsupportedMessage.supported, false);
+  if (!unsupportedMessage.supported) {
+    assert.equal(unsupportedMessage.code, "unsupported-method");
+    assert.equal(unsupportedMessage.method, "signMessage");
+    assert.equal(unsupportedMessage.walletId, "albedo");
+    assert.equal(unsupportedMessage.walletName, "Albedo");
+    assert.match(unsupportedMessage.reason, /Albedo does not support signMessage/);
+  }
+  if (unsupportedMessage.supported) {
+    await fakeSign();
+  }
+  assert.equal(signCalls, 0, "must not request a signature when the method is unsupported");
+
+  // Unsupported method: Lobstr does not support signAuthEntry.
+  const unsupportedAuth = checkWalletSigningCapability("lobstr", "signAuthEntry", "Lobstr");
+  assert.equal(unsupportedAuth.supported, false);
+  if (!unsupportedAuth.supported) {
+    assert.equal(unsupportedAuth.code, "unsupported-method");
+    assert.equal(unsupportedAuth.method, "signAuthEntry");
+    assert.match(unsupportedAuth.reason, /Lobstr does not support signAuthEntry/);
+  }
+
+  // Disconnected boundary case: returns wallet-disconnected without requesting a signature.
+  const disconnected = checkWalletSigningCapability(null, "signTransaction");
+  assert.equal(disconnected.supported, false);
+  if (!disconnected.supported) {
+    assert.equal(disconnected.code, "wallet-disconnected");
+    assert.equal(disconnected.walletId, null);
+    assert.match(disconnected.reason, /Connect a Stellar wallet first/);
+  }
+  if (disconnected.supported) {
+    await fakeSign();
+  }
+  assert.equal(signCalls, 0, "must not request a signature when disconnected");
+
+  // Supported method proceeds normally.
+  const supported = checkWalletSigningCapability("freighter", "signTransaction", "Freighter");
+  assert.equal(supported.supported, true);
+  assert.equal(supportsSigningMethod("freighter", "signTransaction"), true);
+  if (supported.supported) {
+    await fakeSign();
+  }
+  assert.equal(signCalls, 1);
 });

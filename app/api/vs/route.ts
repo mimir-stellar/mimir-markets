@@ -8,6 +8,10 @@ import { decodeCursor, encodeCursor, type CursorFilters } from "@/lib/api/cursor
 
 export const dynamic = "force-dynamic";
 
+const MAX_CATEGORY_COUNT = 10;
+const MAX_STATE_COUNT = 10;
+const MAX_FILTER_ARRAY_BYTES = 512;
+
 export function computeVsEtag(updatedAt: string | number | null | undefined, count: number): string {
   const maxUpdatedAt = updatedAt == null ? "0" : String(updatedAt);
   return `W/"${maxUpdatedAt}-${count}"`;
@@ -21,6 +25,43 @@ export function isEtagMatch(ifNoneMatch: string | null, ifNoneMatchWeak: string 
   const normalize = (value: string) => value.replace(/^W\//, "");
   const target = normalize(etag);
   return tokens.some((t) => normalize(t) === target);
+}
+
+/**
+ * Validates the size of filter arrays (categories, states) before any
+ * read-index query is constructed. Returns an error body on violation.
+ */
+export function validateFilterArrayBounds(
+  categories: string[],
+  states: string[],
+): { ok: true } | { ok: false; error: ReturnType<typeof apiError> } {
+  if (categories.length > MAX_CATEGORY_COUNT) {
+    return {
+      ok: false,
+      error: apiError("validation_error", `category filter accepts at most ${MAX_CATEGORY_COUNT} values`),
+    };
+  }
+  if (states.length > MAX_STATE_COUNT) {
+    return {
+      ok: false,
+      error: apiError("validation_error", `states filter accepts at most ${MAX_STATE_COUNT} values`),
+    };
+  }
+  const categoryBytes = categories.reduce((sum, v) => sum + Buffer.byteLength(v, "utf8"), 0);
+  if (categoryBytes > MAX_FILTER_ARRAY_BYTES) {
+    return {
+      ok: false,
+      error: apiError("validation_error", `category filter exceeds ${MAX_FILTER_ARRAY_BYTES} bytes`),
+    };
+  }
+  const stateBytes = states.reduce((sum, v) => sum + Buffer.byteLength(v, "utf8"), 0);
+  if (stateBytes > MAX_FILTER_ARRAY_BYTES) {
+    return {
+      ok: false,
+      error: apiError("validation_error", `states filter exceeds ${MAX_FILTER_ARRAY_BYTES} bytes`),
+    };
+  }
+  return { ok: true };
 }
 
 function resolveMaxUpdatedAt(items: Array<Record<string, unknown>>): string | number | null {
@@ -47,6 +88,14 @@ export async function GET(request: Request) {
       return NextResponse.json(parsed.body, { status: parsed.status, headers: parsed.headers });
     }
     const { forceRefresh, cursor, limit, category, states, creator, sort } = parsed.params;
+
+    const bounds = validateFilterArrayBounds(
+      Array.isArray(category) ? category : category ? [category] : [],
+      Array.isArray(states) ? states : states ? [states] : [],
+    );
+    if (!bounds.ok) {
+      return NextResponse.json(bounds.error.body, { status: bounds.error.status, headers: bounds.error.headers });
+    }
 
     // Bind the cursor to the normalized filter selection: a cursor issued for one
     // sort or filter set cannot be replayed against another.

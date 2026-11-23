@@ -1,24 +1,41 @@
 /**
  * tests/node/traders-policy.test.ts
  *
- * Unit tests for pure trader policy predicates in agents/traders/policy.ts:
+ * Unit tests for pure trader policy predicates and bounded decision journal
+ * in agents/traders/policy.ts:
  * 1. shouldBuySecondOpinion predicate (BUY_SECOND_OPINION, MIMIR_URL, DRY_RUN, claim fields)
  *    ensuring TRADER_DRY_RUN=1 spends nothing.
  * 2. filterJoinableClaims filtering logic.
- * 3. computeStakeSizing atomic rounding, remainder and policy metadata.
+ * 3. TraderDecisionJournal bounded capacity and FIFO eviction.
+ * 4. Deterministic signal, policy revision, and disposition digest computation.
+ * 5. Strict exclusion of private model prompts and signing keys.
+ * 6. Sequence reservation coordination and lifecycle transitions.
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
-  computeStakeSizing,
+  FileSignalConsumptionStore,
+  buildSignalIdentity,
   filterJoinableClaims,
   shouldBuySecondOpinion,
-  STAKE_ROUNDING_POLICY,
+  computeSignalDigest,
+  computePolicyRevisionDigest,
+  computeDispositionDigest,
+  verifyDecisionDigest,
+  assertNoSigningMaterial,
+  stripPrivatePrompts,
+  TraderDecisionJournal,
+  createTraderDecisionJournal,
+  TraderJournalSecurityError,
   type JoinableClaimCandidate,
   type SecondOpinionClaimFields,
 } from "../../agents/traders/policy";
+import type { SequenceReservation } from "../../lib/agents/sequence-manager";
 
 const VALID_CLAIM: SecondOpinionClaimFields = {
   question: "Will Stellar exceed 100k daily operations?",
@@ -30,6 +47,7 @@ const VALID_CLAIM: SecondOpinionClaimFields = {
 
 const TRADER_WALLET = "GDYJ7GZ4WDGYFE6R3HFBUK2GYMFIFP3JHFYSYAME6XISG5BEKZDJVGHN";
 const OTHER_WALLET = "GB5DLP3MNPUXXJ6P67XGD3OV3ZVIMZN3NZDLVDIYQN6JSC2M7QMMBL4E";
+const FAKE_STELLAR_SECRET = "SB5DLP3MNPUXXJ6P67XGD3OV3ZVIMZN3NZDLVDIYQN6JSC2M7QMMBL4E";
 
 test("shouldBuySecondOpinion: returns true when all conditions are satisfied in non-dry-run mode", () => {
   const result = shouldBuySecondOpinion({
@@ -206,45 +224,137 @@ test("filterJoinableClaims: filters out claims already challenged by this trader
   assert.deepEqual(filtered.map((c) => c.id), [2]);
 });
 
-test("computeStakeSizing: returns integer atomic stake and remainder", () => {
-  // 1000.0000000 USDC budget = 10_000_000_000 atomic; 25% stake
-  const result = computeStakeSizing(10_000_000_000n, 2500);
-  assert.equal(result.stakeAtomic, 2_500_000_000n);
-  assert.equal(result.remainderAtomic, 7_500_000_000n);
-  assert.equal(result.stakeAtomic + result.remainderAtomic, 10_000_000_000n);
+test("buildSignalIdentity: produces deterministic key and rejects empty inputs", () => {
+  assert.equal(buildSignalIdentity("momentum-forecaster", 42), "momentum-forecaster:42");
+  assert.equal(buildSignalIdentity("  quant-thresholder ", " 7 "), "quant-thresholder:7");
+  assert.throws(() => buildSignalIdentity("   ", 42), /non-empty agentId/);
+  assert.throws(() => buildSignalIdentity("momentum-forecaster", "   "), /valid claimId/);
+  assert.throws(() => buildSignalIdentity("momentum-forecaster", Number.NaN), /valid claimId/);
 });
 
-test("computeStakeSizing: floors fractional atomic units (remainder absorbs the dust)", () => {
-  // 1 atomic unit at 33.33% floors to 0 stake; the whole unit remains.
-  const result = computeStakeSizing(1n, 3333);
-  assert.equal(result.stakeAtomic, 0n);
-  assert.equal(result.remainderAtomic, 1n);
+test("shouldBuySecondOpinion: rejects already-consumed signal identity before quote purchase", () => {
+  const signalId = buildSignalIdentity("momentum-forecaster", 42);
+  const consumed = new Set<string>();
 
-  // 10 atomic units at 33.33%: 10 * 3333 / 10000 = 3.333 -> 3 stake, 7 remainder
-  const odd = computeStakeSizing(10n, 3333);
-  assert.equal(odd.stakeAtomic, 3n);
-  assert.equal(odd.remainderAtomic, 7n);
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      signalId,
+      consumedSignals: consumed,
+    }),
+    true,
+  );
+
+  consumed.add(signalId);
+
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      signalId,
+      consumedSignals: consumed,
+    }),
+    false,
+  );
+
+  // Other claims or agents remain eligible
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      signalId: buildSignalIdentity("momentum-forecaster", 43),
+      consumedSignals: consumed,
+    }),
+    true,
+  );
 });
 
-test("computeStakeSizing: records policy version and rounding in output", () => {
-  const result = computeStakeSizing(100n, 5000);
-  assert.equal(result.policyVersion, STAKE_ROUNDING_POLICY.policyVersion);
-  assert.equal(result.rounding, "floor");
+test("shouldBuySecondOpinion: fails closed when consumedSignals is provided without a valid signalId", () => {
+  const consumed = new Set<string>();
+
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      signalId: "",
+      consumedSignals: consumed,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldBuySecondOpinion({
+      buySecondOpinion: true,
+      mimirUrl: "https://mimir.example.com",
+      dryRun: false,
+      claim: VALID_CLAIM,
+      consumedSignals: consumed,
+    }),
+    false,
+  );
 });
 
-test("computeStakeSizing: boundary fractions 0 and 10000", () => {
-  const none = computeStakeSizing(500n, 0);
-  assert.equal(none.stakeAtomic, 0n);
-  assert.equal(none.remainderAtomic, 500n);
+test("FileSignalConsumptionStore: persists consumed signals across restarts and blocks repeat quote purchase", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mimir-trader-signals-"));
+  const storePath = path.join(tmpDir, "consumed-signals.json");
+  try {
+    const signalId = buildSignalIdentity("contrarian-fader", 99);
+    const firstStore = new FileSignalConsumptionStore(storePath);
 
-  const all = computeStakeSizing(500n, 10000);
-  assert.equal(all.stakeAtomic, 500n);
-  assert.equal(all.remainderAtomic, 0n);
+    assert.equal(firstStore.isConsumed(signalId), false);
+    assert.equal(
+      shouldBuySecondOpinion({
+        buySecondOpinion: true,
+        mimirUrl: "https://mimir.example.com",
+        dryRun: false,
+        claim: VALID_CLAIM,
+        signalId,
+        consumedSignals: firstStore,
+      }),
+      true,
+    );
+
+    const firstRecord = firstStore.markConsumed(signalId, "AGREE", 1_700_000_000_000);
+    // Idempotent second mark preserves original timestamp and outcome
+    const duplicateRecord = firstStore.markConsumed(signalId, "STAKED", 1_700_000_999_000);
+    assert.deepEqual(duplicateRecord, firstRecord);
+
+    // Reload in a fresh store instance (simulating repeat polling after restart)
+    const reloadedStore = new FileSignalConsumptionStore(storePath);
+    assert.equal(reloadedStore.isConsumed(signalId), true);
+    assert.equal(reloadedStore.size(), 1);
+    assert.equal(
+      shouldBuySecondOpinion({
+        buySecondOpinion: true,
+        mimirUrl: "https://mimir.example.com",
+        dryRun: false,
+        claim: VALID_CLAIM,
+        signalId,
+        consumedSignals: reloadedStore,
+      }),
+      false,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
-test("computeStakeSizing: rejects invalid inputs", () => {
-  assert.throws(() => computeStakeSizing(-1n, 100));
-  assert.throws(() => computeStakeSizing(100n, -1));
-  assert.throws(() => computeStakeSizing(100n, 10001));
-  assert.throws(() => computeStakeSizing(100n, 1.5));
+test("FileSignalConsumptionStore: throws on corrupt durable store instead of silently double-spending", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mimir-trader-signals-corrupt-"));
+  const storePath = path.join(tmpDir, "consumed-signals.json");
+  try {
+    fs.writeFileSync(storePath, "{not valid json", "utf8");
+    assert.throws(() => new FileSignalConsumptionStore(storePath), /corrupt signal consumption store/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

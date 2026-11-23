@@ -9,6 +9,11 @@ export type CopyDryRunContext = Omit<CopyExecutionContext, "globalPaused" | "sim
  * insert, reservation or transaction is made here. In particular, a positive
  * result is never an authorization to stake: the executor must re-read live
  * state and simulate the exact invocation before any funded action.
+ *
+ * The preflight preview is explicitly labelled as such: `preflight: true`,
+ * `transactionSubmitted: false`, `executionReady: false`. Exposure is the exact
+ * integer USDC atomic amount from the signal; no XLM fee estimate is produced
+ * here because no simulation was run (`feeQuote` stays null).
  */
 export function buildCopyExecutionDryRun(args: {
   permission: CopyPermission;
@@ -36,6 +41,7 @@ export function buildCopyExecutionDryRun(args: {
 
   return {
     mode: "dry_run" as const,
+    preflight: true as const,
     stateSource: "supplied_snapshot" as const,
     policyEligible: previewGate.allowed && decision.allowed,
     reason: !decision.allowed ? decision.reason : !previewGate.allowed ? previewGate.reason : null,
@@ -43,6 +49,15 @@ export function buildCopyExecutionDryRun(args: {
     fundedGateOpen: writeGate.allowed,
     fundedGateBlock: writeGate.reason ?? null,
     stakeAtomic,
+    exposure: {
+      unit: "usdc_atomic" as const,
+      amountAtomic: stakeAtomic,
+      source: "signal_stake" as const,
+    },
+    reserve: {
+      readiness: "not_checked" as const,
+      unit: "xlm" as const,
+    },
     simulation: "not_run" as const,
     executionReady: false as const,
     transactionSubmitted: false as const,

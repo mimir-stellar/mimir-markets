@@ -1,5 +1,6 @@
 //! Market lifecycle: create, deposit, withdraw, resolve, claim.
 
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{Address, Env, String};
 
 use crate::escrow;
@@ -98,6 +99,46 @@ fn winner_gross(market: &Market, principal: i128) -> Result<i128, Error> {
         .checked_mul(principal)
         .map(|p| p / winner_pool)
         .ok_or(Error::Overflow)
+}
+
+/// Versioned digest binding the winning side, fee policy and pool totals of a
+/// resolved market. The digest is a SHA-256 over a fixed-layout preimage so the
+/// settlement manifest can be verified off-chain against the on-chain state.
+///
+/// Preimage layout (all integers big-endian):
+///   version (u32) || market_id (u64) || result (u32) || fee_bps (u32) ||
+///   pool_a (i128) || pool_b (i128) || remaining_escrow (i128)
+pub const SETTLEMENT_MANIFEST_VERSION: u32 = 1;
+
+pub(crate) fn settlement_manifest_digest(
+    env: &Env,
+    market_id: u64,
+    market: &Market,
+) -> soroban_sdk::BytesN<32> {
+    let mut preimage = soroban_sdk::Bytes::new(env);
+    preimage.extend_from_array(&SETTLEMENT_MANIFEST_VERSION.to_be_bytes());
+    preimage.extend_from_array(&market_id.to_be_bytes());
+    preimage.extend_from_array(&market.result.to_be_bytes());
+    preimage.extend_from_array(&market.fee_bps.to_be_bytes());
+    preimage.extend_from_array(&market.pool_a.to_be_bytes());
+    preimage.extend_from_array(&market.pool_b.to_be_bytes());
+    preimage.extend_from_array(&market.remaining_escrow.to_be_bytes());
+    env.crypto().sha256(&preimage).into()
+}
+
+/// Exact liability totals for a resolved market: the remaining escrow that is
+/// still owed to winners, which must equal the sum of all unclaimed gross
+/// payouts. Any residual that is not exactly accounted for is a conservation
+/// violation.
+pub(crate) fn settlement_liability(market: &Market) -> Result<i128, Error> {
+    if !market.resolved {
+        return Err(Error::NotClaimable);
+    }
+    let total = market.pool_a.checked_add(market.pool_b).ok_or(Error::Overflow)?;
+    if market.remaining_escrow < 0 || market.remaining_escrow > total {
+        return Err(Error::ConservationViolation);
+    }
+    Ok(market.remaining_escrow)
 }
 
 pub fn initialize(
@@ -485,6 +526,38 @@ pub fn cancel_market(env: &Env, market_id: u64) -> Result<(), Error> {
     }
     .publish(env);
     Ok(())
+}
+
+/// Describe the refundable liabilities a cancellation of `market_id` would
+/// create, without performing it.
+///
+/// Read-only: no state is written, no tokens move, and no authority changes.
+/// The returned `ClaimResult` reports the refund owed to each side as
+/// `gross == net == pool total` and `fee == 0`, matching what `cancel_market`
+/// followed by `claim` would pay. Returns [`Error::AlreadyResolved`] if the
+/// market is settled and [`Error::MarketClosed`] once the deadline has passed,
+/// mirroring `cancel_market`'s own gating.
+pub fn preview_cancel_market(env: &Env, market_id: u64) -> Result<(ClaimResult, ClaimResult), Error> {
+    let market = storage::get_market(env, market_id)?;
+
+    if market.resolved {
+        return Err(Error::AlreadyResolved);
+    }
+    if env.ledger().timestamp() >= market.deadline {
+        return Err(Error::MarketClosed);
+    }
+
+    let refund_a = ClaimResult {
+        gross: market.pool_a,
+        fee: 0,
+        net: market.pool_a,
+    };
+    let refund_b = ClaimResult {
+        gross: market.pool_b,
+        fee: 0,
+        net: market.pool_b,
+    };
+    Ok((refund_a, refund_b))
 }
 
 pub fn claim(

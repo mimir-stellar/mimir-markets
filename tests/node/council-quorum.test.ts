@@ -2,16 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BALLOT_COMMITMENT_VERSION,
+  BallotCommitmentError,
+  COUNCIL_BALLOT_COMMITMENT_VERSION,
   DEFAULT_COUNCIL_QUORUM,
   MAX_COUNCIL_QUORUM,
   buildBallot,
+  canonicalBallotCommitmentPayload,
   classifyVoteAttempt,
+  commitCouncilBallot,
+  createBallotCommitment,
   evaluateQuorum,
   isDecisiveVerdict,
+  isEquivocatedVote,
+  isExpiredQuorumEvaluation,
   isInvalidQuorumConfig,
   normalizeQuorum,
   shouldFallbackSolo,
   shouldUseCouncil,
+  simulateCouncilScenario,
   type ClassifiedVote,
   type VoteAttemptInput,
 } from "../../lib/council/quorum";
@@ -273,4 +282,176 @@ test("boundary: paused dispositions appear in counts and do not pad quorum", () 
   assert.equal(eval_.dispositions.paused, 2);
   assert.match(eval_.reason, /paused/);
   assert.equal(shouldUseCouncil(eval_), false);
+});
+
+// ── Equivocation and Conflicting Votes ────────────────────────────────────────
+
+test("equivocation: conflicting verdicts for same persona disqualify all with rejectEquivocation", () => {
+  const v1 = valid("optimist", "CREATOR_WINS");
+  const v2 = valid("optimist", "CHALLENGERS_WIN");
+  const v3 = valid("doomer", "CREATOR_WINS");
+
+  const { ballot, rejected } = buildBallot([v1, v2, v3], { rejectEquivocation: true });
+
+  assert.equal(ballot.length, 1);
+  assert.equal(ballot[0].slug, "doomer");
+  assert.equal(rejected.length, 2);
+  assert.equal(rejected[0].slug, "optimist");
+  assert.equal(rejected[0].disposition, "equivocation");
+  assert.equal(isEquivocatedVote(rejected[0]), true);
+  assert.equal(rejected[1].slug, "optimist");
+  assert.equal(rejected[1].disposition, "equivocation");
+  assert.equal(isEquivocatedVote(rejected[1]), true);
+});
+
+test("equivocation: subsequent attempts by disqualified persona remain rejected", () => {
+  const v1 = valid("optimist", "CREATOR_WINS");
+  const v2 = valid("optimist", "CHALLENGERS_WIN");
+  const v3 = valid("optimist", "DRAW");
+
+  const { ballot, rejected } = buildBallot([v1, v2, v3], { rejectEquivocation: true });
+  assert.equal(ballot.length, 0);
+  assert.equal(rejected.length, 3);
+  assert.ok(rejected.every((r) => r.disposition === "equivocation"));
+});
+
+test("equivocation: reject_subsequent policy keeps prior vote and rejects conflicting attempt", () => {
+  const v1 = valid("optimist", "CREATOR_WINS");
+  const v2 = valid("optimist", "CHALLENGERS_WIN");
+
+  const { ballot, rejected } = buildBallot([v1, v2], { equivocationPolicy: "reject_subsequent" });
+  assert.equal(ballot.length, 1);
+  assert.equal(ballot[0].verdict, "CREATOR_WINS");
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].disposition, "equivocation");
+});
+
+test("equivocation: identical duplicate votes are not treated as equivocation", () => {
+  const v1 = valid("optimist", "CREATOR_WINS");
+  const v2 = valid("optimist", "CREATOR_WINS");
+
+  const { ballot, rejected } = buildBallot([v1, v2], { rejectEquivocation: true });
+  assert.equal(ballot.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].disposition, "duplicated");
+});
+
+test("equivocation: evicting equivocator causes decisive count to fall below quorum -> fallback_solo", () => {
+  const attempts = [
+    valid("a", "CREATOR_WINS"),
+    valid("b", "CREATOR_WINS"),
+    valid("c", "CREATOR_WINS"),
+    valid("c", "CHALLENGERS_WIN"), // c equivocates
+  ];
+
+  const eval_ = evaluateQuorum(attempts, 3, { rejectEquivocation: true });
+  assert.equal(eval_.action, "fallback_solo");
+  assert.equal(eval_.decisiveCount, 2);
+  assert.equal(eval_.dispositions.equivocation, 2);
+  assert.match(eval_.reason, /equivocation/);
+  assert.equal(shouldUseCouncil(eval_), false);
+});
+
+// ── Expired Ballots and Delayed Votes ──────────────────────────────────────────
+
+test("expired: vote attempt with expired claimState or flag is classified as expired", () => {
+  const v1 = classifyVoteAttempt(attempt({ slug: "a", claimState: "expired" }));
+  assert.equal(v1.disposition, "expired");
+  assert.equal(v1.decisive, false);
+
+  const v2 = classifyVoteAttempt(attempt({ slug: "b", expired: true }));
+  assert.equal(v2.disposition, "expired");
+  assert.equal(v2.decisive, false);
+});
+
+test("expired: vote attempt submitted past ballot deadline is classified as expired", () => {
+  const v = classifyVoteAttempt(
+    attempt({ slug: "a", ballotDeadlineMs: 1_000, submittedAtMs: 1_500 }),
+  );
+  assert.equal(v.disposition, "expired");
+  assert.equal(v.decisive, false);
+  assert.match(v.reason, /exceeds deadline/);
+});
+
+test("expired: ballotExpired option aborts quorum evaluation", () => {
+  const eval_ = evaluateQuorum([valid("a"), valid("b"), valid("c")], 3, { ballotExpired: true });
+  assert.equal(eval_.action, "abort_expired");
+  assert.equal(isExpiredQuorumEvaluation(eval_), true);
+  assert.equal(eval_.ballot.length, 0);
+  assert.equal(eval_.decisiveCount, 0);
+  assert.match(eval_.reason, /ballot expired/);
+});
+
+test("expired: ballotAgeMs exceeding maxBallotAgeMs aborts quorum", () => {
+  const eval_ = evaluateQuorum([valid("a"), valid("b"), valid("c")], 3, {
+    ballotAgeMs: 30_000,
+    maxBallotAgeMs: 10_000,
+  });
+  assert.equal(eval_.action, "abort_expired");
+  assert.equal(isExpiredQuorumEvaluation(eval_), true);
+});
+
+test("expired: nowMs exceeding ballotDeadlineMs aborts quorum", () => {
+  const eval_ = evaluateQuorum([valid("a"), valid("b"), valid("c")], 3, {
+    nowMs: 2_000,
+    ballotDeadlineMs: 1_000,
+  });
+  assert.equal(eval_.action, "abort_expired");
+});
+
+// ── Partial Provider Outages ──────────────────────────────────────────────────
+
+test("outage: partial provider outage leaving insufficient decisive votes falls back solo", () => {
+  const attempts = [
+    valid("juror-1"),
+    valid("juror-2"),
+    classifyVoteAttempt(attempt({ slug: "juror-3", status: "http_error", httpStatus: 503 })),
+    classifyVoteAttempt(attempt({ slug: "juror-4", status: "timeout" })),
+    classifyVoteAttempt(attempt({ slug: "juror-5", status: "network_error" })),
+  ];
+
+  const eval_ = evaluateQuorum(attempts, 3);
+  assert.equal(eval_.action, "fallback_solo");
+  assert.equal(eval_.decisiveCount, 2);
+  assert.equal(eval_.dispositions.dependency_failure, 3);
+  assert.match(eval_.reason, /dependency_failure/);
+  assert.equal(shouldFallbackSolo(eval_), true);
+});
+
+test("outage: partial provider outage still uses council if decisive votes meet quorum", () => {
+  const attempts = [
+    valid("juror-1"),
+    valid("juror-2"),
+    valid("juror-3"),
+    classifyVoteAttempt(attempt({ slug: "juror-4", status: "http_error", httpStatus: 504 })),
+  ];
+
+  const eval_ = evaluateQuorum(attempts, 3);
+  assert.equal(eval_.action, "use_council");
+  assert.equal(eval_.decisiveCount, 3);
+  assert.equal(eval_.dispositions.dependency_failure, 1);
+  assert.equal(shouldUseCouncil(eval_), true);
+});
+
+// ── simulateCouncilScenario ───────────────────────────────────────────────────
+
+test("simulateCouncilScenario: reproduces equivocation, outages, and delays synthetically", () => {
+  const eval_ = simulateCouncilScenario(
+    [
+      { slug: "a", verdict: "CREATOR_WINS" },
+      { slug: "b", verdict: "CREATOR_WINS", equivocateWith: "CHALLENGERS_WIN" },
+      { slug: "c", verdict: "error", httpStatus: 503 },
+      { slug: "d", verdict: "timeout" },
+      { slug: "e", verdict: "delayed", delayedByMs: 5_000, maxAgeMs: 1_000 },
+    ],
+    3,
+    { rejectEquivocation: true },
+  );
+
+  assert.equal(eval_.action, "fallback_solo");
+  assert.equal(eval_.decisiveCount, 1); // only 'a' is valid and decisive
+  assert.equal(eval_.dispositions.equivocation, 2); // 'b' cast 2 conflicting votes
+  assert.equal(eval_.dispositions.dependency_failure, 2); // 'c' and 'd'
+  assert.equal(eval_.dispositions.expired, 1); // 'e' was delayed past maxAgeMs
+  assert.equal(shouldFallbackSolo(eval_), true);
 });

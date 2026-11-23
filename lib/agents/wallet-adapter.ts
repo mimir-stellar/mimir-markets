@@ -69,6 +69,42 @@ export interface StellarAgentWalletAdapter {
   send(call: AgentWalletCall): Promise<string>;
 }
 
+/**
+ * Read-only preview of what a call would cost and expose, derived from
+ * simulation. Never sends; `executed` is always `false` so UIs cannot mistake
+ * a preflight for a submitted transaction.
+ */
+export interface AgentWalletPreflight {
+  readonly executed: false;
+  /** Whether simulation reports the call as runnable. */
+  simulationOk: boolean;
+  /** Simulation failure reason, when `simulationOk` is false. */
+  reason?: string;
+  /** Exact atomic USDC exposure this call would add. */
+  exposureAtomic: bigint;
+  /** XLM fee in stroops as estimated by simulation (fee only, never value). */
+  feeStroops: bigint;
+  /** Whether the account keeps its XLM reserve after paying the fee. */
+  reserveReady: boolean;
+}
+
+export async function previewWalletCall(args: {
+  adapter: StellarAgentWalletAdapter;
+  call: AgentWalletCall;
+  feeStroops: bigint;
+  reserveReady: boolean;
+}): Promise<AgentWalletPreflight> {
+  const result = await args.adapter.simulate(args.call);
+  return {
+    executed: false,
+    simulationOk: result.ok,
+    reason: result.ok ? undefined : result.reason,
+    exposureAtomic: args.call.exposureAtomic,
+    feeStroops: args.feeStroops,
+    reserveReady: args.reserveReady,
+  };
+}
+
 export interface WalletBudgetPolicy {
   maxPerCallAtomic: bigint;
   maxPerSessionAtomic: bigint;

@@ -16,11 +16,18 @@ scheduled path below must be protected by the `internal_worker` tier (they are).
 | `/api/cron/challenge-opportunities` | `0 * * * *` | **Cron** | Refreshes the challenge-opportunities index (TTL 24 h). No worker calls `refreshChallengeOpportunitiesIndex`; the cron route is the only sweep. The oracle agent's auto-challenger (`challengeIfMispriced`) is a separate job and is not scheduled here. |
 | `/api/cron/proposals/mark-stale` | `*/30 * * * *` | **Cron** | Marks queued/in-review market proposals past their deadline as stale. No worker calls `markStaleProposals`; the cron route is the only sweep (the `POST /api/proposals/review` route also calls it, but only as part of a manual review). |
 
+## Manual proposal review API
+
+`GET /api/proposals/review` accepts optional `status`, `limit`, and `offset`
+query parameters. Each query key must appear at most once; a repeated key returns
+`400` with `Duplicate query parameters are not allowed` before database access.
+The route's existing worker bearer authentication is unchanged.
+
 ## Interval rationale
 
 - `sync`: `*/5 * * * *` matches `SYNC_POLL_INTERVAL_MS` (default 300000 ms = 5 min). The `sync` heartbeat declares `intervalSec` from the same value, and `lib/ops/health.ts` judges staleness against `max(workerStaleWarnSec, interval * 2)` warn / `max(workerStaleCriticalSec, interval * 4)` critical, so a healthy 5-minute cadence warns at 10 min and pages at 20 min rather than alarming on a healthy worker.
 - `challenge-opportunities`: hourly, well inside the 24 h index TTL.
-- `proposals/mark-stale`: every 30 min, consistent with the `indexStaleCriticalSec` (1800 s) heartbeat threshold so stale proposals are surfaced promptly without racing the review window.
+- `proposals/mark-stale`: every 30 min, consistent with the `indexStaleCriticalSec` (1800 s) heartbeat threshold so stale proposals are surfaced promptly without racing the review window. The `/api/proposals/review` endpoint evaluates effective proposal expiry on read and write as the earlier of the market `deadline` and the review window (`PROPOSAL_REVIEW_TTL_MS`, default 24 h, capped at 7 d) under `PROPOSAL_EXPIRY_POLICY_REVISION` (default `proposal-expiry:v1`), returning canonical UTC timestamps (`effectiveExpiresAtUtc`, `evaluatedAtUtc`) and distinguishing an absent proposal (`404`, `proposal_not_found`, `status: "absent"`) from an expired one (`409`, `proposal_expired`, `status: "expired"`).
 
 ## Adding a new cron route
 

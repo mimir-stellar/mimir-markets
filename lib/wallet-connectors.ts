@@ -78,11 +78,143 @@ export const WALLETS_WITHOUT_AUTH_ENTRY_SIGNING: readonly string[] = [
 export const WALLETS_WITHOUT_MESSAGE_SIGNING: readonly string[] = ["albedo"];
 
 export function supportsAuthEntrySigning(walletId: string | null | undefined): boolean {
-  return Boolean(walletId) && !WALLETS_WITHOUT_AUTH_ENTRY_SIGNING.includes(walletId!);
+  const normalized = walletId?.trim();
+  return Boolean(normalized) && !WALLETS_WITHOUT_AUTH_ENTRY_SIGNING.includes(normalized!);
 }
 
 export function supportsMessageSigning(walletId: string | null | undefined): boolean {
-  return Boolean(walletId) && !WALLETS_WITHOUT_MESSAGE_SIGNING.includes(walletId!);
+  const normalized = walletId?.trim();
+  return Boolean(normalized) && !WALLETS_WITHOUT_MESSAGE_SIGNING.includes(normalized!);
+}
+
+/**
+ * Signing methods a transaction or wallet flow may require before prompting
+ * the selected connector.
+ */
+export type WalletSigningMethod =
+  | "signTransaction"
+  | "signAuthEntry"
+  | "signMessage";
+
+/**
+ * Explicit capability snapshot for a selected wallet connector.
+ */
+export interface WalletCapabilityReport {
+  /** Selected connector id (e.g. `"freighter"`, `"albedo"`), or null when disconnected. */
+  walletId: string | null;
+  /** Human-readable connector name, or null when disconnected. */
+  walletName: string | null;
+  /** Whether a wallet connector is currently selected/connected. */
+  connected: boolean;
+  /** Per-method support map for the selected connector. */
+  methods: Record<WalletSigningMethod, boolean>;
+}
+
+/**
+ * Safe pre-flight result returned before starting a transaction or signing flow.
+ * When `supported` is false, callers can surface `reason` / `code` without
+ * invoking the wallet extension or requesting a signature.
+ */
+export type WalletCapabilityCheckResult =
+  | {
+      supported: true;
+      method: WalletSigningMethod;
+      walletId: string;
+      walletName: string | null;
+      report: WalletCapabilityReport;
+    }
+  | {
+      supported: false;
+      code: "wallet-disconnected" | "unsupported-method";
+      method: WalletSigningMethod;
+      walletId: string | null;
+      walletName: string | null;
+      reason: string;
+      report: WalletCapabilityReport;
+    };
+
+/**
+ * Check whether the selected connector supports a specific signing method.
+ * Every connected Stellar Wallet Kit module supports `signTransaction`;
+ * `signAuthEntry` and `signMessage` depend on the connector's SEP-43 coverage.
+ */
+export function supportsSigningMethod(
+  walletId: string | null | undefined,
+  method: WalletSigningMethod,
+): boolean {
+  const normalized = walletId?.trim();
+  if (!normalized) return false;
+  if (method === "signTransaction") return true;
+  if (method === "signAuthEntry") return supportsAuthEntrySigning(normalized);
+  return supportsMessageSigning(normalized);
+}
+
+/**
+ * Build an explicit capability report for the selected wallet connector.
+ */
+export function getWalletCapabilityReport(
+  walletId: string | null | undefined,
+  walletName?: string | null,
+): WalletCapabilityReport {
+  const normalizedId = walletId?.trim() || null;
+  const normalizedName = normalizedId ? walletName?.trim() || null : null;
+
+  return {
+    walletId: normalizedId,
+    walletName: normalizedName,
+    connected: Boolean(normalizedId),
+    methods: {
+      signTransaction: supportsSigningMethod(normalizedId, "signTransaction"),
+      signAuthEntry: supportsSigningMethod(normalizedId, "signAuthEntry"),
+      signMessage: supportsSigningMethod(normalizedId, "signMessage"),
+    },
+  };
+}
+
+/**
+ * Pre-flight capability check for a required signing method before starting a
+ * transaction. Returns a safe unsupported-method (or disconnected) result
+ * without requesting a signature from the wallet.
+ */
+export function checkWalletSigningCapability(
+  walletId: string | null | undefined,
+  method: WalletSigningMethod,
+  walletName?: string | null,
+): WalletCapabilityCheckResult {
+  const report = getWalletCapabilityReport(walletId, walletName);
+
+  if (!report.connected || !report.walletId) {
+    return {
+      supported: false,
+      code: "wallet-disconnected",
+      method,
+      walletId: null,
+      walletName: null,
+      reason: "Connect a Stellar wallet first.",
+      report,
+    };
+  }
+
+  if (!report.methods[method]) {
+    const label = report.walletName ?? report.walletId;
+    return {
+      supported: false,
+      code: "unsupported-method",
+      method,
+      walletId: report.walletId,
+      walletName: report.walletName,
+      reason: `${label} does not support ${method}.`,
+      report,
+    };
+  }
+
+  return {
+    supported: true,
+    method,
+    walletId: report.walletId,
+    walletName: report.walletName,
+    report,
+  };
 }
 
 export function kindOf(wallet: WalletOptionInput): WalletKind {

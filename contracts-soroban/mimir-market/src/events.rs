@@ -68,6 +68,19 @@ pub struct VerdictEncoded {
     pub winner_side: WinnerSide,
 }
 
+/// Canonical resolution intent digest recorded at settlement. Binds the verdict,
+/// the evidence digest, the claim revision and the oracle identity so an indexer
+/// can verify that the settled record matches the authorized intent.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolutionIntentRecorded {
+    #[topic]
+    pub id: u64,
+    pub intent_digest: BytesN<32>,
+    pub claim_revision: u64,
+    pub oracle: Address,
+}
+
 /// The creator's refund of an unchallenged claim. `refund` lets an indexer
 /// reconcile the refund against `creator_stake` and escrow without a second
 /// read; `parked` distinguishes a delivered refund from one parked as a
