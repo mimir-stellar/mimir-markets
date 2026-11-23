@@ -68,6 +68,19 @@ pub struct VerdictEncoded {
     pub winner_side: WinnerSide,
 }
 
+/// Canonical resolution intent digest recorded at settlement. Binds the verdict,
+/// the evidence digest, the claim revision and the oracle identity so an indexer
+/// can verify that the settled record matches the authorized intent.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolutionIntentRecorded {
+    #[topic]
+    pub id: u64,
+    pub intent_digest: BytesN<32>,
+    pub claim_revision: u64,
+    pub oracle: Address,
+}
+
 /// The creator's refund of an unchallenged claim. `refund` lets an indexer
 /// reconcile the refund against `creator_stake` and escrow without a second
 /// read; `parked` distinguishes a delivered refund from one parked as a
@@ -157,6 +170,24 @@ pub struct FeePolicyUpdated {
     pub platform_fee_bps: u32,
     pub agent_owner_fee_bps: u32,
     pub platform_recipient: Option<Address>,
+}
+
+/// Transition receipt emitted when a queued fee policy (and possibly its
+/// recipient) takes effect.
+///
+/// `previous_platform_recipient` is the identity that accrued liabilities
+/// under the prior policy still belong to; `platform_recipient` is the new
+/// effective recipient. Together with `effective_revision` this lets an
+/// indexer attribute every accrued fee to the policy revision that was in
+/// force when it was minted, so a recipient rotation can never obscure
+/// existing liabilities.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeRecipientTransitioned {
+    pub effective_revision: u64,
+    pub previous_platform_recipient: Option<Address>,
+    pub platform_recipient: Option<Address>,
+    pub effective_at: u64,
 }
 
 #[contractevent]
@@ -282,4 +313,17 @@ pub struct LiquidityUpdated {
     pub reserved_liability: i128,
     pub available_liquidity: i128,
     pub total_creator_stake: i128,
+}
+
+/// Emitted on every successful market mutation with the claim's explicit
+/// revision after the change. The revision increments only after a successful
+/// state change; a rejected invocation leaves both revision and escrow intact,
+/// so indexers can order mutations and detect gaps without replaying state.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimRevisionUpdated {
+    #[topic]
+    pub id: u64,
+    pub revision: u64,
+    pub escrow: i128,
 }

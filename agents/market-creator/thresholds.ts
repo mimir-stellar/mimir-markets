@@ -3,6 +3,10 @@
  *
  * These are used to sanity-check the USD thresholds that the LLM proposes for
  * crypto markets. They are pure (no I/O) so they can be tested in isolation.
+ *
+ * Source-fetch retry scheduling (bounded creator retry queue) keeps per-source
+ * stable rejection reasons and next-eligibility timestamps. Low-quality drafts
+ * whose thresholds fail these checks must never reach a transaction attempt.
  */
 
 export interface ExtractedThreshold {

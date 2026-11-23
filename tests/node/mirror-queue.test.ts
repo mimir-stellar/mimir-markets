@@ -29,12 +29,6 @@ const MEMBER_ADDRESS = "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D
 const OTHER_ADDRESS  = "GCIXSDPXXIJSLEVZSYFCZRNOD6GBFIFKNTEI6X2HC6LE65KUVYMGU4X5";
 const NOW = 1_000_000; // seconds since epoch
 
-const BASKET = {
-  id: "b",
-  name: "Basket",
-  members: [{ agentId: "a1", weightBps: 10_000 }],
-};
-
 const AGENT = { id: "a1", displayName: "Agent One", address: MEMBER_ADDRESS };
 
 type ClaimStub     = { id: number; question?: string | null; deadline: number; creator?: string | null };

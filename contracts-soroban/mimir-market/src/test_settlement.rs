@@ -1,6 +1,10 @@
 #![cfg(test)]
 //! Settlement: conservation, principal protection, and the four verdict branches.
 //!
+//! Resolution intent digest: settlement records bind verdict, evidence digest,
+//! claim revision and oracle identity; substituted evidence is rejected without
+//! changing escrow state.
+//!
 //! Settlement is split in two, mirroring mimir-squad: `resolve_claim` is O(1) and
 //! pays the creator's leg inline, then each challenger pulls via
 //! `claim_challenger_payout`. Conservation is asserted over the whole lifecycle.
@@ -133,6 +137,11 @@ fn challengers_win_pool_mode_is_pro_rata_and_conserved() {
 
 /// Pool-mode shares truncate. The final claimant absorbs the remainder, so the
 /// escrow empties completely instead of stranding dust.
+///
+/// Expected values are derived here from integer arithmetic on the fixture
+/// stakes, independent of the contract's settlement code: each non-final
+/// claimant's share is floor(stake * pool / total_stake), and the final claimant
+/// receives whatever remains.
 #[test]
 fn pool_mode_truncation_dust_is_absorbed_by_the_last_claimant() {
     let f = Fixture::new(0, 0);

@@ -176,6 +176,19 @@ impl MimirMarket {
 
     // ── Views ────────────────────────────────────────────────────────────────
 
+    /// Read-only preflight for a claim resolution (#779).
+    ///
+    /// Returns structural eligibility (lifecycle + constraints) separately
+    /// from the "a signed submission will still need the oracle's auth"
+    /// signal. **Never mutates state**: no `require_auth`, no storage write,
+    /// no TTL bump, no event. Callers that want to know whether a later
+    /// `resolve_claim` *will succeed* must still treat a successful
+    /// preflight as necessary, not sufficient — `preflight_claim` says
+    /// nothing about the verdict the oracle would submit.
+    pub fn preflight_claim(env: Env, claim_id: u64) -> Result<ClaimPreflight, Error> {
+        resolve::preflight_claim(&env, claim_id)
+    }
+
     pub fn get_claim(env: Env, claim_id: u64) -> Result<Claim, Error> {
         storage::get_claim(&env, claim_id)
     }
@@ -293,6 +306,18 @@ impl MimirMarket {
             results.push_back(storage::get_claim_opt(&env, id));
         }
         Ok(results)
+    }
+
+    /// Versioned snapshot of the contract's resource limits, so clients can size
+    /// batch and pagination requests without probing live failures.
+    ///
+    /// Response layout: `(version, max_batch_size)`. `version` is bumped whenever
+    /// the layout changes; existing fields keep their meaning across versions.
+    pub fn get_contract_limits(env: Env) -> Result<(u32, u32), Error> {
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        Ok((1u32, MAX_BATCH_SIZE))
     }
 
     pub fn get_claim_market_config(env: Env, claim_id: u64) -> Result<MarketConfig, Error> {

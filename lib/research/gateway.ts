@@ -16,8 +16,12 @@
  *
  * Redirects are followed MANUALLY (`redirect: "manual"`) — the whole point is to
  * re-validate each hop, which `fetch`'s automatic following makes impossible.
+ * Captured redirect chains can be evaluated offline via `diagnoseRedirectPolicy`.
  */
 
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { sha256Hex } from "@/lib/content-hash";
 import { isPaused } from "@/lib/ops/flags";
@@ -34,6 +38,7 @@ import {
   type SsrfReason,
 } from "./ssrf";
 import { recordAllowlistReject, recordSourceFailure } from "./telemetry";
+import { getContentValidationPolicyRevision } from "./content-validation";
 
 export const MAX_REDIRECTS = 3;
 export const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -75,72 +80,380 @@ export interface FetchSuccess {
   body: string;
   /** SHA-256 of the body, bare hex, so a reader can verify the capture later. */
   contentHash: string;
+  /**
+   * When the source was actually fetched. A cache hit keeps the original
+   * capture time; it is never replaced with the time the cache was read.
+   */
   capturedAt: number;
+  /** When this result was handed to the caller. Equals `capturedAt` on a fresh fetch. */
+  servedAt: number;
+  /** `fetched` for a new network fetch, `cache` for a replay of an earlier capture. */
+  acquisition: "fetched" | "cache";
   bytes: number;
+  /** Same as `acquisition === "cache"`; kept for existing callers. */
   fromCache: boolean;
   redirects: number;
   /** Complete chain of URLs visited during this fetch. */
   redirectChain: string[];
+  /**
+   * Content-validation policy revision bound to this fetch result. Set on both
+   * paths: a cache hit carries the revision of its original capture.
+   */
+  policyRevision?: string;
 }
 
 export type FetchResult =
   | ({ ok: true } & FetchSuccess)
   | ({ ok: false } & FetchFailure);
 
-// ── Per-agent budget ──────────────────────────────────────────────────────────
+// ── Per-agent budget & reservations ──────────────────────────────────────────
 
 export interface AgentBudget {
   /** Requests this agent may make in the current window. */
   maxRequests: number;
   /** Bytes this agent may download in the current window. */
   maxBytes: number;
+  /** Maximum paid-fetch units (USDC atomic integers) this agent may spend in current window. */
+  maxPaidUnits?: number;
+  /** Window duration in milliseconds. Defaults to 1 hour (3_600_000 ms). */
+  windowMs?: number;
 }
 
-interface BudgetUsage {
+export type ReservationStatus = "reserved" | "committed" | "released" | "interrupted";
+
+export interface BudgetReservation {
+  id: string;
+  agentId: string;
+  requests: number;
+  paidUnits: number;
+  createdAt: number;
+  status: ReservationStatus;
+  url?: string;
+  stateDir?: string;
+}
+
+export interface BudgetUsage {
   requests: number;
   bytes: number;
+  paidUnits: number;
   windowStartedAt: number;
+}
+
+export interface ReserveBudgetArgs {
+  agentId: string;
+  requests?: number;
+  paidUnits?: number;
+  budget?: AgentBudget;
+  now?: number;
+  url?: string;
+  stateDir?: string;
+}
+
+export type ReserveBudgetResult =
+  | { ok: true; reservation: BudgetReservation }
+  | { ok: false; kind: "budget"; detail: string };
+
+export interface ReconcileResult {
+  reconciledCount: number;
+  releasedRequests: number;
+  releasedPaidUnits: number;
+  interruptedReservations: BudgetReservation[];
 }
 
 const BUDGET_WINDOW_MS = 60 * 60 * 1000;
 const usage = new Map<string, BudgetUsage>();
+const reservations = new Map<string, BudgetReservation>();
 
 export function defaultAgentBudget(): AgentBudget {
   return {
     maxRequests: Number(process.env.RESEARCH_MAX_REQUESTS_PER_AGENT ?? 120),
     maxBytes: Number(process.env.RESEARCH_MAX_BYTES_PER_AGENT ?? 8 * 1024 * 1024),
+    maxPaidUnits: Number(process.env.RESEARCH_MAX_PAID_FETCH_UNITS_PER_AGENT ?? 100_000),
   };
 }
 
-function currentUsage(agentId: string, now: number): BudgetUsage {
+function getStateFilePath(stateDir?: string): string | null {
+  const dir = stateDir?.trim() || process.env.RESEARCH_STATE_DIR?.trim();
+  if (!dir) return null;
+  return join(dir, "budget-state.json");
+}
+
+function loadFromDisk(filePath: string): void {
+  try {
+    if (!existsSync(filePath)) return;
+    const raw = readFileSync(filePath, "utf8");
+    const data = JSON.parse(raw);
+    if (data && typeof data === "object") {
+      if (data.usage && typeof data.usage === "object") {
+        for (const [k, v] of Object.entries(data.usage)) {
+          const val = v;
+          usage.set(k, {
+            requests: Number(val.requests) || 0,
+            bytes: Number(val.bytes) || 0,
+            paidUnits: Number(val.paidUnits) || 0,
+            windowStartedAt: Number(val.windowStartedAt) || 0,
+          });
+        }
+      }
+      if (data.reservations && typeof data.reservations === "object") {
+        for (const [k, v] of Object.entries(data.reservations)) {
+          const val = v;
+          reservations.set(k, {
+            id: String(val.id || k),
+            agentId: String(val.agentId),
+            requests: Number(val.requests) || 0,
+            paidUnits: Number(val.paidUnits) || 0,
+            createdAt: Number(val.createdAt) || 0,
+            status: val.status,
+            url: val.url ? String(val.url) : undefined,
+            stateDir: val.stateDir ? String(val.stateDir) : undefined,
+          });
+        }
+      }
+    }
+  } catch {
+    // If state cannot be read or is corrupted, fail-safe without throwing
+  }
+}
+
+function saveToDisk(filePath: string): void {
+  try {
+    mkdirSync(dirname(filePath), { recursive: true });
+    const payload = {
+      version: 1,
+      usage: Object.fromEntries(usage.entries()),
+      reservations: Object.fromEntries(reservations.entries()),
+    };
+    writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf8");
+  } catch {
+    // Fail-safe write
+  }
+}
+
+function currentUsage(
+  agentId: string,
+  now: number,
+  windowMs = BUDGET_WINDOW_MS,
+  stateDir?: string,
+): BudgetUsage {
   const existing = usage.get(agentId);
-  if (!existing || now - existing.windowStartedAt >= BUDGET_WINDOW_MS) {
-    const fresh = { requests: 0, bytes: 0, windowStartedAt: now };
+  if (!existing || now - existing.windowStartedAt >= windowMs) {
+    const fresh: BudgetUsage = { requests: 0, bytes: 0, paidUnits: 0, windowStartedAt: now };
     usage.set(agentId, fresh);
+    const statePath = getStateFilePath(stateDir);
+    if (statePath) {
+      saveToDisk(statePath);
+    }
     return fresh;
   }
   return existing;
 }
 
-/** Remaining allowance, for the agent-facing status endpoint. */
-export function budgetRemaining(agentId: string, budget = defaultAgentBudget(), now = Date.now()) {
-  const used = currentUsage(agentId, now);
+function getPendingReserved(
+  agentId: string,
+  now: number,
+  windowMs = BUDGET_WINDOW_MS,
+): { reservedRequests: number; reservedPaidUnits: number } {
+  let reservedRequests = 0;
+  let reservedPaidUnits = 0;
+  for (const res of reservations.values()) {
+    if (res.agentId === agentId && res.status === "reserved") {
+      if (now - res.createdAt < windowMs) {
+        reservedRequests += res.requests;
+        reservedPaidUnits += res.paidUnits;
+      }
+    }
+  }
+  return { reservedRequests, reservedPaidUnits };
+}
+
+/**
+ * Reserve bounded request and paid-fetch units before network dispatch.
+ */
+export function reserveBudget(args: ReserveBudgetArgs): ReserveBudgetResult {
+  const now = args.now ?? Date.now();
+  const budget = args.budget ?? defaultAgentBudget();
+  const windowMs = budget.windowMs ?? BUDGET_WINDOW_MS;
+  const requests = args.requests ?? 1;
+  const paidUnits = args.paidUnits ?? 0;
+  const statePath = getStateFilePath(args.stateDir);
+
+  if (statePath) {
+    loadFromDisk(statePath);
+  }
+
+  const used = currentUsage(args.agentId, now, windowMs, args.stateDir);
+  const pending = getPendingReserved(args.agentId, now, windowMs);
+
+  const totalRequests = used.requests + pending.reservedRequests + requests;
+  if (totalRequests > budget.maxRequests) {
+    return {
+      ok: false,
+      kind: "budget",
+      detail: `agent '${args.agentId}' has used its ${budget.maxRequests} request budget`,
+    };
+  }
+
+  const maxPaid = budget.maxPaidUnits ?? defaultAgentBudget().maxPaidUnits ?? 100_000;
+  const totalPaid = used.paidUnits + pending.reservedPaidUnits + paidUnits;
+  if (totalPaid > maxPaid) {
+    return {
+      ok: false,
+      kind: "budget",
+      detail: `agent '${args.agentId}' has used its ${maxPaid} paid-fetch unit budget`,
+    };
+  }
+
+  const reservation: BudgetReservation = {
+    id: randomUUID(),
+    agentId: args.agentId,
+    requests,
+    paidUnits,
+    createdAt: now,
+    status: "reserved",
+    url: args.url,
+    stateDir: args.stateDir,
+  };
+
+  reservations.set(reservation.id, reservation);
+
+  if (statePath) {
+    saveToDisk(statePath);
+  }
+
+  return { ok: true, reservation };
+}
+
+export function commitReservation(
+  id: string,
+  opts?: { bytes?: number; paidUnits?: number; stateDir?: string; now?: number },
+): void {
+  const statePath = getStateFilePath(opts?.stateDir);
+  if (statePath) {
+    loadFromDisk(statePath);
+  }
+  const res = reservations.get(id);
+  if (!res || res.status !== "reserved") return;
+  res.status = "committed";
+
+  const now = opts?.now ?? Date.now();
+  const existing = usage.get(res.agentId);
+  let used: BudgetUsage;
+  if (!existing || now - existing.windowStartedAt >= BUDGET_WINDOW_MS) {
+    used = { requests: 0, bytes: 0, paidUnits: 0, windowStartedAt: now };
+    usage.set(res.agentId, used);
+  } else {
+    used = existing;
+  }
+
+  used.requests += res.requests;
+  used.bytes += opts?.bytes ?? 0;
+  used.paidUnits += opts?.paidUnits !== undefined ? opts.paidUnits : res.paidUnits;
+
+  if (statePath) {
+    saveToDisk(statePath);
+  }
+}
+
+export function releaseReservation(id: string, stateDir?: string): void {
+  const statePath = getStateFilePath(stateDir);
+  if (statePath) {
+    loadFromDisk(statePath);
+  }
+  const res = reservations.get(id);
+  if (!res || res.status !== "reserved") return;
+  res.status = "released";
+
+  if (statePath) {
+    saveToDisk(statePath);
+  }
+}
+
+/**
+ * Reconcile interrupted fetch attempts (e.g. from a worker restart) without
+ * resetting the agent's authorized budget or committed usage.
+ */
+export function reconcileInterruptedAttempts(opts?: {
+  stateDir?: string;
+  olderThanMs?: number;
+  now?: number;
+}): ReconcileResult {
+  const statePath = getStateFilePath(opts?.stateDir);
+  if (statePath) {
+    loadFromDisk(statePath);
+  }
+  const now = opts?.now ?? Date.now();
+  const olderThanMs = opts?.olderThanMs ?? 0;
+  let reconciledCount = 0;
+  let releasedRequests = 0;
+  let releasedPaidUnits = 0;
+  const interruptedReservations: BudgetReservation[] = [];
+
+  for (const res of reservations.values()) {
+    if (res.status === "reserved" && now - res.createdAt >= olderThanMs) {
+      res.status = "interrupted";
+      reconciledCount += 1;
+      releasedRequests += res.requests;
+      releasedPaidUnits += res.paidUnits;
+      interruptedReservations.push(res);
+    }
+  }
+
+  if (statePath && reconciledCount > 0) {
+    saveToDisk(statePath);
+  }
+
   return {
-    requests: Math.max(0, budget.maxRequests - used.requests),
-    bytes: Math.max(0, budget.maxBytes - used.bytes),
-    windowResetsAt: used.windowStartedAt + BUDGET_WINDOW_MS,
+    reconciledCount,
+    releasedRequests,
+    releasedPaidUnits,
+    interruptedReservations,
   };
 }
 
-/** Test seam — the budget window is process-local by design. */
-export function resetBudgets(): void {
+/** Remaining allowance, for the agent-facing status endpoint. */
+export function budgetRemaining(
+  agentId: string,
+  budget = defaultAgentBudget(),
+  now = Date.now(),
+  stateDir?: string,
+) {
+  const statePath = getStateFilePath(stateDir);
+  if (statePath) {
+    loadFromDisk(statePath);
+  }
+  const windowMs = budget.windowMs ?? BUDGET_WINDOW_MS;
+  const used = currentUsage(agentId, now, windowMs, stateDir);
+  const pending = getPendingReserved(agentId, now, windowMs);
+  const maxPaid = budget.maxPaidUnits ?? defaultAgentBudget().maxPaidUnits ?? 100_000;
+
+  return {
+    requests: Math.max(0, budget.maxRequests - (used.requests + pending.reservedRequests)),
+    bytes: Math.max(0, budget.maxBytes - used.bytes),
+    paidUnits: Math.max(0, maxPaid - (used.paidUnits + pending.reservedPaidUnits)),
+    windowResetsAt: used.windowStartedAt + windowMs,
+  };
+}
+
+/** Test seam — resets in-memory budgets, and removes persisted state file if stateDir provided. */
+export function resetBudgets(stateDir?: string): void {
   usage.clear();
+  reservations.clear();
+  if (stateDir) {
+    try {
+      const p = getStateFilePath(stateDir);
+      if (p && existsSync(p)) {
+        rmSync(p, { force: true });
+      }
+    } catch {}
+  }
 }
 
 // ── Response cache ────────────────────────────────────────────────────────────
 
 interface CacheEntry {
   value: FetchSuccess;
+  policyRevision: string;
   expiresAt: number;
 }
 
@@ -152,26 +465,76 @@ export function resetResearchCache(): void {
   cache.clear();
 }
 
-export function invalidateResearchCache(url: string): boolean {
-  return cache.delete(url);
+/**
+ * Canonical source identity for cache indexing and deduplication.
+ * Preserves scheme, lowercase host, pathname, and search query while stripping
+ * hash fragments and standard default ports so identical network requests share entries
+ * while distinct normalized source identities remain strictly separated.
+ */
+export function normalizeSourceIdentity(raw: string): string {
+  const trimmed = raw.trim();
+  try {
+    const u = new URL(trimmed);
+    return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${u.pathname}${u.search}`;
+  } catch {
+    return trimmed.toLowerCase();
+  }
 }
 
-function cacheGet(url: string, now: number): FetchSuccess | null {
-  const entry = cache.get(url);
+/**
+ * Invalidate a cached research result by URL / source identity.
+ * Handles both raw and normalized identities.
+ */
+export function invalidateResearchCache(url: string): boolean {
+  const normKey = normalizeSourceIdentity(url);
+  const deletedNorm = cache.delete(normKey);
+  const deletedRaw = cache.delete(url);
+  return deletedNorm || deletedRaw;
+}
+
+/**
+ * Invalidate cached research decisions incompatible with the given policy revision.
+ * When called without arguments, purges all entries not matching the active policy revision.
+ * Returns the count of invalidated entries.
+ */
+export function invalidateIncompatibleResearchCache(
+  policyRevision: string = getContentValidationPolicyRevision(),
+): number {
+  let count = 0;
+  for (const [key, entry] of cache.entries()) {
+    if (entry.policyRevision !== policyRevision) {
+      cache.delete(key);
+      count++;
+    }
+  }
+  return count;
+}
+
+function cacheGet(url: string, now: number, policyRevision: string): FetchSuccess | null {
+  const normKey = normalizeSourceIdentity(url);
+  const entry = cache.get(normKey) ?? cache.get(url);
   if (!entry) return null;
   if (entry.expiresAt <= now) {
+    cache.delete(normKey);
+    cache.delete(url);
+    return null;
+  }
+  if (entry.policyRevision !== policyRevision) {
+    // Invalidate incompatible cached decisions when validation changes
+    cache.delete(normKey);
     cache.delete(url);
     return null;
   }
   return entry.value;
 }
 
-function cacheSet(url: string, value: FetchSuccess, now: number): void {
+function cacheSet(url: string, value: FetchSuccess, policyRevision: string, now: number): void {
   if (cache.size >= MAX_CACHE_ENTRIES) {
     const oldest = cache.keys().next().value;
     if (oldest) cache.delete(oldest);
   }
-  cache.set(url, { value, expiresAt: now + CACHE_TTL_MS });
+  const normKey = normalizeSourceIdentity(url);
+  cache.set(normKey, { value, policyRevision, expiresAt: now + CACHE_TTL_MS });
 }
 
 // ── Validation of one hop ─────────────────────────────────────────────────────
@@ -222,6 +585,7 @@ export interface GatewayFetchArgs {
   agentId: string;
   policy?: DomainPolicy;
   budget?: AgentBudget;
+  paidUnits?: number;
   headers?: Record<string, string>;
   signal?: AbortSignal;
   maxRedirects?: number;
@@ -231,6 +595,9 @@ export interface GatewayFetchArgs {
   resolve?: (host: string) => Promise<string[]>;
   fetchImpl?: typeof globalThis.fetch;
   now?: number;
+  /** Content-validation policy revision to bind to this fetch result. */
+  policyRevision?: string;
+  stateDir?: string;
 }
 
 function contentTypeAllowed(contentType: string): boolean {
@@ -239,12 +606,7 @@ function contentTypeAllowed(contentType: string): boolean {
 }
 
 function normalizeUrlForLoopCheck(raw: string): string {
-  try {
-    const u = new URL(raw);
-    return `${u.protocol}//${u.host.toLowerCase()}${u.pathname}${u.search}`;
-  } catch {
-    return raw.trim().toLowerCase();
-  }
+  return normalizeSourceIdentity(raw);
 }
 
 /**
@@ -288,6 +650,8 @@ async function readBounded(response: Response, limit: number): Promise<{ text: s
  */
 export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult> {
   const now = args.now ?? Date.now();
+  const policyRevision =
+    args.policyRevision?.trim() || getContentValidationPolicyRevision();
   const fail = <T extends FetchFailure>(failure: T): { ok: false } & T => {
     recordSourceFailure(failure.kind);
     return { ok: false, ...failure };
@@ -340,19 +704,41 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
     return fail({ kind: "paused", detail: `research is paused for agent '${args.agentId}'` });
   }
 
-  const cached = cacheGet(args.url, now);
-  if (cached) return { ok: true, ...cached, fromCache: true };
+  const cached = cacheGet(args.url, now, policyRevision);
+  if (cached) {
+    // Replay, not a new acquisition: keep the original capturedAt and policy
+    // revision, and report the replay time separately as servedAt.
+    return {
+      ok: true,
+      ...cached,
+      redirectChain: [...cached.redirectChain],
+      servedAt: now,
+      acquisition: "cache",
+      fromCache: true,
+    };
+  }
 
-  // Budget is checked BEFORE the request, and charged whether or not the response
-  // is useful — a refused-after-connect request still cost the source a hit.
-  const used = currentUsage(args.agentId, now);
-  if (used.requests >= budget.maxRequests) {
+  // Reserve bounded request and paid-fetch units before dispatch
+  const reserved = reserveBudget({
+    agentId: args.agentId,
+    requests: 1,
+    paidUnits: args.paidUnits ?? 0,
+    budget,
+    now,
+    url: args.url,
+    stateDir: args.stateDir,
+  });
+  if (!reserved.ok) {
     return fail({
       kind: "budget",
-      detail: `agent '${args.agentId}' has used its ${budget.maxRequests} request budget`,
+      detail: reserved.detail,
     });
   }
+  const reservationId = reserved.reservation.id;
+
+  const used = currentUsage(args.agentId, now, budget.windowMs ?? BUDGET_WINDOW_MS, args.stateDir);
   if (used.bytes >= budget.maxBytes) {
+    releaseReservation(reservationId, args.stateDir);
     return fail({
       kind: "budget",
       detail: `agent '${args.agentId}' has used its ${budget.maxBytes} byte budget`,
@@ -384,11 +770,13 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
 
   for (;;) {
     if (args.signal?.aborted) {
+      releaseReservation(reservationId, args.stateDir);
       return fail({ kind: "cancelled", detail: "request was cancelled" });
     }
 
     const hop = await validateHop(current, policy, args.resolve);
     if (!hop.allowed) {
+      releaseReservation(reservationId, args.stateDir);
       if (hop.reason === "protocol_downgrade") {
         return fail({ kind: "protocol_downgrade", detail: hop.detail });
       }
@@ -397,8 +785,6 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       }
       return fail({ kind: "blocked", reason: hop.reason, detail: hop.detail });
     }
-
-    used.requests += 1;
 
     let response: Response;
     try {
@@ -416,8 +802,15 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       });
     } catch (err) {
       if (args.signal?.aborted || (err instanceof Error && err.name === "AbortError" && args.signal?.aborted)) {
+        releaseReservation(reservationId, args.stateDir);
         return fail({ kind: "cancelled", detail: "request was cancelled" });
       }
+      commitReservation(reservationId, {
+        bytes: 0,
+        paidUnits: 0,
+        stateDir: args.stateDir,
+        now,
+      });
       return fail({
         kind: "transport",
         detail: err instanceof Error ? err.message : "fetch failed",
@@ -427,6 +820,7 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
       if (!location || location.trim() === "") {
+        commitReservation(reservationId, { bytes: 0, paidUnits: 0, stateDir: args.stateDir, now });
         return fail({ kind: "invalid_redirect", detail: `redirect response (${response.status}) without a location header` });
       }
 
@@ -434,12 +828,14 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       try {
         nextUrl = new URL(location.trim(), current).toString();
       } catch {
+        commitReservation(reservationId, { bytes: 0, paidUnits: 0, stateDir: args.stateDir, now });
         return fail({ kind: "invalid_redirect", detail: `unparseable redirect target '${location}'` });
       }
 
       // Check redirect hop policy (protocol downgrade, cross-domain rules)
       const redirectHopVerdict = checkRedirectHopPolicy(current, nextUrl, policy);
       if (!redirectHopVerdict.allowed) {
+        releaseReservation(reservationId, args.stateDir);
         if (redirectHopVerdict.reason === "protocol_downgrade") {
           return fail({ kind: "protocol_downgrade", detail: redirectHopVerdict.detail ?? "insecure protocol downgrade" });
         }
@@ -452,11 +848,13 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       // Check for redirect cycles / duplicate targets
       const normNext = normalizeUrlForLoopCheck(nextUrl);
       if (visitedUrls.has(normNext)) {
+        commitReservation(reservationId, { bytes: 0, paidUnits: 0, stateDir: args.stateDir, now });
         return fail({ kind: "redirect_loop", detail: `redirect cycle or duplicate target detected for '${nextUrl}'` });
       }
 
       redirects += 1;
       if (redirects > effectiveMaxRedirects) {
+        commitReservation(reservationId, { bytes: 0, paidUnits: 0, stateDir: args.stateDir, now });
         return fail({ kind: "too_many_redirects", detail: `more than ${effectiveMaxRedirects} redirects` });
       }
 
@@ -468,21 +866,31 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
     }
 
     if (!response.ok) {
+      commitReservation(reservationId, { bytes: 0, paidUnits: 0, stateDir: args.stateDir, now });
       return fail({ kind: "http_error", status: response.status, detail: `upstream ${response.status}` });
     }
 
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentTypeAllowed(contentType)) {
+      commitReservation(reservationId, { bytes: 0, paidUnits: 0, stateDir: args.stateDir, now });
       return fail({ kind: "content_type", detail: `unsupported content-type '${contentType}'` });
     }
 
     const { text, bytes, truncated } = await readBounded(response, MAX_RESPONSE_BYTES);
-    used.bytes += bytes;
     if (truncated) {
+      commitReservation(reservationId, { bytes, paidUnits: 0, stateDir: args.stateDir, now });
       // A truncated source is a silent correctness hazard for settlement, so it
       // is a refusal rather than a partial success.
       return fail({ kind: "too_large", detail: `response exceeds ${MAX_RESPONSE_BYTES} bytes` });
     }
+
+    // Success: commit reservation with actual bytes and paidUnits
+    commitReservation(reservationId, {
+      bytes,
+      paidUnits: args.paidUnits ?? 0,
+      stateDir: args.stateDir,
+      now,
+    });
 
     const success: FetchSuccess = {
       url: args.url,
@@ -492,13 +900,28 @@ export async function gatewayFetch(args: GatewayFetchArgs): Promise<FetchResult>
       body: text,
       contentHash: sha256Hex(text),
       capturedAt: now,
+      servedAt: now,
+      acquisition: "fetched",
       bytes,
       fromCache: false,
       redirects,
       redirectChain,
+      policyRevision,
     };
-    cacheSet(args.url, success, now);
+    cacheSet(args.url, { ...success, redirectChain: [...redirectChain] }, policyRevision, now);
     return { ok: true, ...success };
   }
 }
+
+// ── Offline redirect diagnostics export ───────────────────────────────────────
+
+export {
+  diagnoseRedirectPolicy,
+  redactUrlIdentity,
+  type HopPolicyVerdict,
+  type RedirectDiagnosticsOpts,
+  type RedirectHopDiagnostic,
+  type RedirectPolicyDiagnostics,
+} from "./content-validation";
+
 

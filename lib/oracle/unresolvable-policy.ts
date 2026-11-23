@@ -59,6 +59,38 @@ export type TierVerdict = (verdict: VerdictPayload) => VerdictPayload;
 export const INVALID_CONFIDENCE_TAG = "[LOW CONFIDENCE — refunded: invalid confidence]";
 
 /**
+ * Bounded oracle retry budget per unresolved claim (#<issue>).
+ *
+ * Evidence acquisition retries are separated from transaction reconciliation:
+ * a claim whose evidence cannot be fetched is retried a bounded number of
+ * times within a worker cycle, and the budget resets only when the claim
+ * resolves. Reconciliation (submitting a settlement and confirming its tx) is
+ * never retried through this budget — a submitted verdict is final and must not
+ * be re-evaluated because a tx confirmation was slow.
+ *
+ * The budget is keyed by claim id so one failing claim cannot monopolize a
+ * worker cycle: once its budget is exhausted the worker moves on and the claim
+ * is retried on the next poll.
+ */
+export const DEFAULT_ORACLE_RETRY_BUDGET = 3;
+
+export interface OracleRetryBudgetOptions {
+  /** Maximum evidence-acquisition attempts per claim per worker cycle. */
+  maxAttempts?: number;
+}
+
+export interface OracleRetryBudget {
+  /** True while the claim still has evidence-acquisition attempts left. */
+  canRetry(claimId: string): boolean;
+  /** Record one failed evidence-acquisition attempt; returns attempts used. */
+  recordFailure(claimId: string): number;
+  /** Clear the budget for a claim once it resolves (or is abandoned). */
+  reset(claimId: string): void;
+  /** Attempts used so far for a claim. */
+  attempts(claimId: string): number;
+}
+
+/**
  * Injection seams for offline end-to-end settlement tests (#<issue>). All are
  * optional and default to the production implementations, so callers that do
  * not pass them keep the exact current behaviour.
@@ -70,6 +102,35 @@ const MAX_EXPLANATION_CHARS = 500;
 /** True for a finite confidence in the 0–100 range the verdict schema allows. */
 export function isValidConfidence(confidence: number): boolean {
   return Number.isFinite(confidence) && confidence >= 0 && confidence <= 100;
+}
+
+/**
+ * Create a bounded per-claim evidence-acquisition retry budget. Pure in-memory
+ * state; callers own the lifetime (typically one worker cycle). Never used for
+ * transaction reconciliation.
+ */
+export function createOracleRetryBudget(options: OracleRetryBudgetOptions = {}): OracleRetryBudget {
+  const maxAttempts = options.maxAttempts ?? DEFAULT_ORACLE_RETRY_BUDGET;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error(`Oracle retry budget maxAttempts must be a positive integer, got ${maxAttempts}.`);
+  }
+  const used = new Map<string, number>();
+  return {
+    canRetry(claimId: string): boolean {
+      return (used.get(claimId) ?? 0) < maxAttempts;
+    },
+    recordFailure(claimId: string): number {
+      const next = (used.get(claimId) ?? 0) + 1;
+      used.set(claimId, next);
+      return next;
+    },
+    reset(claimId: string): void {
+      used.delete(claimId);
+    },
+    attempts(claimId: string): number {
+      return used.get(claimId) ?? 0;
+    },
+  };
 }
 
 /** Evidence fetcher seam: resolves the evidence payload for a claim. */
@@ -122,6 +183,15 @@ export function applySettlementPolicy(
 
   // The tier only rewrites the explanation when it marks a verdict contested.
   return { outcome: tiered.explanation === verdict.explanation ? "firm" : "contested", verdict: tiered };
+}
+
+/**
+ * True when a settlement decision is a refund caused by an unresolved claim
+ * (model-unresolvable or low-confidence). Invalid-confidence refunds are a
+ * malformed-verdict outcome, not an unresolved claim, so they are excluded.
+ */
+export function isUnresolvedRefund(decision: SettlementDecision): boolean {
+  return decision.outcome === "refund" && decision.reason !== "invalid-confidence";
 }
 
 /** Contract writer seam: submits a settlement and returns the tx hash. */
