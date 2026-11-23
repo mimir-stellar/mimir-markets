@@ -346,6 +346,15 @@ export default function CreatePage() {
   const ticketSettlementPreview =
     chainSettlementRule.trim() || recommendedSettlementTemplate;
   /**
+   * Deadline shown on the ticket. It is a local draft estimate: the contract
+   * stamps the authoritative ledger timestamp when the claim is created.
+   */
+  const ticketDeadlineUnix = useMemo(() => {
+    if (!customDeadline) return null;
+    const ms = new Date(customDeadline).getTime();
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+  }, [customDeadline]);
+  /**
    * What the user must revisit before re-running a market.
    *
    * Read from the LIVE form fields, not from the parent: the point is to clear the
@@ -2468,6 +2477,7 @@ export default function CreatePage() {
                   }
                   settlementPreview={ticketSettlementPreview}
                   stakeAmount={stake}
+                  deadlineUnix={ticketDeadlineUnix}
                   walletAddress={ticketWalletAddress ?? undefined}
                 />
                 <ClaimStrengthCard

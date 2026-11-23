@@ -28,6 +28,8 @@
  *    are now behind it.
  *  - `pause()` / `resume()` let an incident kill-switch stop new allocations
  *    without discarding in-flight reservations.
+ *  - Reservations coordinate with the bounded trader decision journal (see
+ *    `agents/traders/policy.ts`) to track sequence allocations across decisions.
  *
  * The manager is deliberately dependency-free and takes a {@link SequenceProvider}
  * so it can be unit-tested without Horizon or a live ledger.

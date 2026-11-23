@@ -58,4 +58,30 @@ and prints the evidence hash, verdict, tier, confidence and the transaction it
 would send. It never loads a signer and never builds a transaction for submission:
 passing `--submit` is refused. It needs only a public testnet RPC URL and an LLM key.
 
+### Credential-free outage and recovery scenarios
+
+Run the deterministic scenarios before changing settlement handling or during an
+incident review:
+
+```
+npm run oracle:scenarios
+npm run oracle:scenarios -- --json
+```
+
+The harness composes the worker's existing helpers (`isSportsEventFinal`,
+`applySettlementPolicy`/`tierVerdict`, and
+`classifySettlementError`/`settlementRetryDecision`) and asserts these outcomes:
+
+| Scenario | Outage | Conservative outcome |
+| --- | --- | --- |
+| `source-outage` | every source unreachable | defer, settle after a source recovers |
+| `contradictory-sources` | reachable sources disagree | refund `UNRESOLVABLE`, never a side |
+| `delayed-finality` | sports event still live | defer inside the grace window; refund after it |
+| `uncertain-submission` | `resolve_claim` times out | reconcile the chain, retry within budget, or defer |
+
+It reads no environment variables, opens no RPC or source connection, loads no
+signer and makes no LLM call. Focused coverage lives in
+`tests/node/oracle-outage-recovery.test.ts` and runs with
+`npm run test:node -- oracle-outage-recovery`.
+
 Compromise never permits editing historical owner-fee attribution. A revoked agent remains terminal; re-admission is a new registration.
