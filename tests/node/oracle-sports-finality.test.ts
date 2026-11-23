@@ -1,19 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isSportsEventFinal, SPORTS_SETTLE_GRACE_SECS } from "../../agents/oracle/sports-finality";
+import {
+  SPORTS_FINALITY_BASE_VERSION,
+  SPORTS_FINALITY_POLICY_ID,
+  SPORTS_SETTLE_GRACE_HOURS_DEFAULT,
+  SPORTS_SETTLE_GRACE_SECS,
+  clearRecordedSportsFinalityDecisions,
+  evaluateSportsFinality,
+  formatSportsFinalityPolicyVersion,
+  getRecordedSportsFinalityDecisions,
+  getSportsSettleGraceHours,
+  isSportsEventFinal,
+  parseSportsFinalityPolicyVersion,
+  type SportsClaim,
+} from "../../agents/oracle/sports-finality";
 
 const DEADLINE = 1_000_000; // epoch seconds, well within the grace window by default
 const withinGrace = DEADLINE + 1_000; // ~17 min after deadline, inside 12h grace
 const pastGrace = DEADLINE + SPORTS_SETTLE_GRACE_SECS + 1; // one second past grace
 const graceBoundary = DEADLINE + SPORTS_SETTLE_GRACE_SECS; // exactly at the boundary
+const EVIDENCE_TIMESTAMP = 1_700_000_000_000; // epoch ms
 
-function claim(deadline = DEADLINE) {
-  return { deadline, category: "sports" };
+function claim(deadline = DEADLINE, id = 42): SportsClaim {
+  return { id, deadline };
 }
 
 test("sports grace window default is twelve hours", () => {
   assert.equal(SPORTS_SETTLE_GRACE_SECS, 12 * 3600);
+  assert.equal(SPORTS_SETTLE_GRACE_HOURS_DEFAULT, 12);
+  assert.equal(getSportsSettleGraceHours(), 12);
 });
 
 // ── Final evidence → settle ───────────────────────────────────────────

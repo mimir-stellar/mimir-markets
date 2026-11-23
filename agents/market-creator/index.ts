@@ -1,5 +1,9 @@
 /**
- * Dedupe helpers for the market-creator worker.
+ * Market-creator worker entry point.
+ *
+ * Checkpoint binding: index checkpoints must match the configured network and
+ * contract identities before they are trusted. A mismatched checkpoint is
+ * rejected and the last trusted projection is preserved.
  *
  * Extracted from index.ts so they can be unit-tested offline. Behaviour is
  * unchanged: the worker imports these and the tests pin the normalization and
@@ -108,9 +112,7 @@ import { reconcileSettlements } from "../../lib/server/settlement-index";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const CONTRACT_ID         = requireMarketContractId();
-const CREATOR_STAKE_USDC = Number(
-  process.env.CREATOR_STAKE_USDC ?? "2"
-);
+const CREATOR_STAKE_USDC = Number(process.env.CREATOR_STAKE_USDC ?? "2");
 const MAX_CLAIMS_PER_RUN  = Number(process.env.MAX_CLAIMS_PER_RUN ?? "5");
 const MAX_ACTIVE_CLAIMS   = Number(process.env.MAX_ACTIVE_CLAIMS ?? "30");
 const RUN_INTERVAL_HOURS  = Number(process.env.RUN_INTERVAL_HOURS ?? "6");
@@ -231,12 +233,10 @@ const PREFLIGHT_DELAY_MS = Number(process.env.MARKET_CREATOR_PREFLIGHT_DELAY_MS 
 requireEnv(["CREATOR_SECRET"]);
 requireAnyLLMKey();
 
-// ── Clients ───────────────────────────────────────────────────────────────────
-const CREATOR        = getCreatorWallet();
-const CREATOR_ADDR   = CREATOR.address;
 const CREATOR_PAYER  = payingWalletFor(CREATOR);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
 
 // ── Source fetchers ───────────────────────────────────────────────────────────
 
@@ -272,6 +272,10 @@ async function applyCouncilPreflight(candidates: ClaimCandidate[]): Promise<Clai
       );
       return null;
     });
+    if (!result) continue;
+    kept.push({ candidate, score: result.score });
+  }
+  return kept.map((entry) => entry.candidate);
 
     if (!result || result.opinions.length === 0 || result.averageScore === null) {
       console.warn(
@@ -913,7 +917,15 @@ async function run(): Promise<void> {
       categoryEnabled: isCategoryEnabled(candidate.category),
     });
     if (!categoryGate.allowed) {
-      console.log(`[market-creator] Per-category cap blocks this candidate — ${categoryGate.blockedBy}`);
+      const decisionCode =
+        categoryGate.reason === "cap_exceeded"
+          ? "category_budget_exhausted"
+          : categoryGate.reason === "category_disabled"
+            ? "category_disabled"
+            : "category_cap_invalid";
+      console.log(
+        `[market-creator] Per-category cap blocks this candidate [${decisionCode}] — ${categoryGate.blockedBy}`,
+      );
       continue;
     }
 
@@ -1008,4 +1020,3 @@ main().catch((err) => {
   console.error("[market-creator] Fatal:", err);
   process.exit(1);
 });
-

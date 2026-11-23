@@ -159,6 +159,10 @@ pub fn transfer_ownership(env: &Env, new_owner: Address) -> Result<(), Error> {
 
 /// Queue a fee policy change. It cannot be executed until the timelock elapses,
 /// so participants have notice — and it can never exceed the constant cap.
+///
+/// The queued entry records the active policy revision at queue time. Execution
+/// rejects the entry if the active revision has since moved, so an approved
+/// change computed against a superseded policy cannot be applied.
 pub fn queue_fee_policy(
     env: &Env,
     platform_fee_bps: u32,
@@ -173,8 +177,8 @@ pub fn queue_fee_policy(
         .timestamp()
         .checked_add(FEE_TIMELOCK_SECONDS)
         .ok_or(Error::Overflow)?;
-
-    let next_revision = storage::fee_policy(env)?.revision.checked_add(1).ok_or(Error::Overflow)?;
+    let expected_revision = storage::fee_policy_revision(env)?;
+    let next_revision = expected_revision.checked_add(1).ok_or(Error::Overflow)?;
 
     storage::set_pending_fee_policy(
         env,
@@ -186,6 +190,7 @@ pub fn queue_fee_policy(
             revision: next_revision,
         },
     );
+    storage::set_pending_fee_policy_base_revision(env, expected_revision);
     events::FeePolicyQueued {
         platform_fee_bps,
         agent_owner_fee_bps,
@@ -209,11 +214,22 @@ pub fn cancel_fee_policy(env: &Env) -> Result<(), Error> {
 /// Execute a queued policy. Permissionless once the timelock has elapsed: the
 /// change was already public, and requiring the owner again would let a lost key
 /// strand the queue forever.
+///
+/// If the active policy revision no longer matches the revision the entry was
+/// queued against, the entry is stale: it is rejected with
+/// `Error::StaleFeePolicyRevision` and the active policy and balances are left
+/// untouched. The owner must cancel and re-queue against the current policy.
 pub fn execute_fee_policy(env: &Env) -> Result<(), Error> {
     let queued = storage::pending_fee_policy(env).ok_or(Error::NothingQueued)?;
     if env.ledger().timestamp() < queued.executable_at {
         return Err(Error::Timelocked);
     }
+    // Older pending entries predate the separate revision key. Their next
+    // revision was assigned from the active revision at queue time, so derive
+    // that base revision when the key is absent.
+    let expected_revision = storage::pending_fee_policy_base_revision(env)
+        .unwrap_or_else(|| queued.revision.saturating_sub(1));
+    fees::check_policy_revision(expected_revision, storage::fee_policy_revision(env)?)?;
     // Re-checked at execution: the cap is enforced on the way in AND on the way
     // out, so a queue written under any past code path still cannot exceed it.
     validate_policy(

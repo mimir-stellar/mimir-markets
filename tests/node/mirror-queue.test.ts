@@ -41,6 +41,7 @@ function makeDeps(opts: {
     listAgents: async () => opts.agents ?? [],
     listOpenClaims: async () => opts.claims ?? [],
     listChallengers: async (claimId) => opts.challengers?.[claimId] ?? [],
+    listFollowerPositions: opts.followerPositions ? async () => opts.followerPositions! : undefined,
   };
 }
 

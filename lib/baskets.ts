@@ -18,88 +18,41 @@ import { isValidBps } from "./money";
  * This means a captured basket-creation signature cannot be replayed to
  * insert duplicate baskets.
  */
-export class BasketValidationError extends Error {
-  constructor(
-    message: string,
-    public readonly agentId?: string,
-    public readonly weights?: number[],
-  ) {
-    super(message);
-    this.name = "BasketValidationError";
+/**
+ * Deterministic composition revision (#892).
+ *
+ * A stable hash over the canonicalized member set (agentId ascending,
+ * tie-broken by weightBps). Two baskets with the same members in different
+ * input orders yield the same revision; any change to membership or weights
+ * yields a different revision. Uses DJB2 over the canonical string — small,
+ * dependency-free, and stable across hosts. Not a cryptographic hash: this
+ * is an equality check on an in-process value, not a security primitive.
+ */
+export function compositionRevision(
+  members: readonly { agentId: string; weightBps: number }[],
+): string {
+  const canonical = canonicalizeMembers(members);
+  let hash = 5381;
+  for (const member of canonical) {
+    const chunk = `${member.agentId}:${member.weightBps};`;
+    for (let i = 0; i < chunk.length; i++) {
+      hash = ((hash * 33) ^ chunk.charCodeAt(i)) >>> 0;
+    }
   }
-}
-
-export interface BasketMember {
-  agentId: string;
-  weightBps: number;
+  return `c${hash.toString(16).padStart(8, "0")}`;
 }
 
 /**
- * Reject duplicate members carrying conflicting weights (#894).
- *
- * A basket composition is valid iff every agentId appears at most once, OR
- * appears multiple times with the *identical* weight (which collapses to a
- * single entry — the deterministic canonical form).
- *
- * Deterministic and side-effect free: the error names the offending agentId
- * and the conflicting weights, but no timestamps, orderings, or host data.
+ * True when a suggestion was built from a different composition than the
+ * one currently in force. Callers use this to reject a stale reviewed action
+ * before applying it, so new weights never silently override old consent.
  */
-export function validateBasketComposition(members: readonly BasketMember[]): void {
-  const byAgent = new Map<string, number[]>();
-  for (const member of members) {
-    if (typeof member.agentId !== "string" || member.agentId.length === 0) {
-      throw new BasketValidationError("basket member has empty agentId");
-    }
-    if (!Number.isInteger(member.weightBps) || member.weightBps <= 0) {
-      throw new BasketValidationError(
-        "basket member weightBps must be a positive integer",
-        member.agentId,
-        [member.weightBps],
-      );
-    }
-    const weights = byAgent.get(member.agentId) ?? [];
-    weights.push(member.weightBps);
-    byAgent.set(member.agentId, weights);
-  }
-  for (const [agentId, weights] of byAgent) {
-    if (weights.length > 1 && new Set(weights).size > 1) {
-      throw new BasketValidationError(
-        `duplicate basket member ${agentId} carries conflicting weights: ${weights.join(", ")}`,
-        agentId,
-        weights.slice(),
-      );
-    }
-  }
-}
-
-/**
- * Return the canonical member ordering, collapsing identical-weight duplicates.
- *
- * Sort key: agentId ascending; tie-break by weightBps ascending. Two baskets
- * with the same members produce byte-identical canonical arrays regardless of
- * input order. Call ONLY after validateBasketComposition() has passed.
- */
-export function canonicalizeMembers(members: readonly BasketMember[]): BasketMember[] {
-  const byAgent = new Map<string, number>();
-  for (const member of members) {
-    const existing = byAgent.get(member.agentId);
-    if (existing === undefined) {
-      byAgent.set(member.agentId, member.weightBps);
-    } else if (existing !== member.weightBps) {
-      // Defensive: validateBasketComposition should have rejected this.
-      throw new BasketValidationError(
-        `canonicalizeMembers received conflicting weights for ${member.agentId}`,
-        member.agentId,
-        [existing, member.weightBps],
-      );
-    }
-  }
-  return [...byAgent.entries()]
-    .map(([agentId, weightBps]) => ({ agentId, weightBps }))
-    .sort((a, b) => {
-      if (a.agentId !== b.agentId) return a.agentId < b.agentId ? -1 : 1;
-      return a.weightBps - b.weightBps;
-    });
+export function isSuggestionStale(
+  suggestion: { compositionRevision?: string },
+  currentMembers: readonly { agentId: string; weightBps: number }[],
+): boolean {
+  if (!suggestion.compositionRevision) return false;
+  return suggestion.compositionRevision !== compositionRevision(currentMembers);
 }
 
 export function basketMessage(args: {
@@ -126,7 +79,8 @@ export function basketMessage(args: {
  * signed. Matches TRANSFER_EXPIRY_MS so the clock-skew budget is the same
  * across all signed mutations.
  */
-export const BASKET_EXPIRY_MS = 5 * 60_000; // 5 minutes
+export const BASKET_CREATION_EXPIRY_MS = 5 * 60_000; // 5 minutes
+export const BASKET_EXPIRY_MS = BASKET_CREATION_EXPIRY_MS;
 
 /**
  * How long a transfer authorisation is valid from the moment it is signed.
@@ -142,7 +96,7 @@ export const TRANSFER_EXPIRY_MS = 5 * 60_000; // 5 minutes
  * What the CURRENT owner signs to authorise a transfer.
  *
  * Both addresses are interpolated verbatim — Stellar strkeys are case-sensitive
- * base32 and must never be lowercased. The message now also includes:
+ * base32 and must never be lowercased. The message also includes:
  *
  *  - `nonce`    — a client-generated UUID, stored on the server after first use
  *                  so the same signed message is rejected on any replay attempt.
@@ -253,7 +207,12 @@ export function parsePerMarketUsdc(raw: string): PerMarketParseResult {
  *
  * This list must stay in sync with the basket directory.
  */
-export const CURATED_BASKET_IDS: readonly string[] = [];
+export const CURATED_BASKET_IDS: readonly string[] = [
+  "council-core",
+  "philosopher-spread",
+  "byoa-traders",
+  "house-and-street",
+];
 
 /**
  * A single point on a basket's NAV series.
@@ -271,6 +230,13 @@ export interface NavPoint {
 export interface NavMember {
   agentId: string;
   weightBps: number;
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
+}
+
+export interface BasketAgentWeight {
+  agentId: string;
+  weightBps: number;
   category: string;
   mode: string;
   paused?: boolean;
@@ -283,7 +249,7 @@ export interface BasketReturnPoint { timestamp: number; returnsBps: Record<strin
 export interface BasketPolicy { maxSingleAgentBps: number; maxCategoryBps: number; staleSignalAction: "skip" | "pause"; failedCopyAction: "keep_idle" | "pause" }
 export interface BasketSnapshot { timestamp: number; navAtomic: bigint; drawdownBps: number }
 
-export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n ;
+export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n;
 
 export const DEFAULT_BASKET_POLICY: BasketPolicy = {
   maxSingleAgentBps: 4_000,
@@ -314,6 +280,15 @@ export interface BasketExposurePreview {
 }
 
 /**
+ * A member's contribution to the basket NAV.
+ */
+export interface NavMember {
+  agentId: string;
+  weightBps: number;
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
+}
+/**
  * Build a NAV series from basket member performance.
  *
  * The series is indexed to 100 at the first point. Each subsequent point is the
@@ -338,7 +313,7 @@ export function buildNavSeries(
   if (totalWeight <= 0) return [];
 
   const periods = Math.min(...validMembers.map((m) => m.returns.length));
-  if (periods < 1 || !completeSeries(validMembers, periods)) return [];
+  if (periods < 1) return [];
 
   const points: NavPoint[] = [];
   let nav = 100;

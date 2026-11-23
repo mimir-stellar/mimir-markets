@@ -29,6 +29,39 @@ pub fn pull(env: &Env, usdc: &Address, from: &Address, amount: i128) -> Result<(
     Ok(())
 }
 
+/// Why a squad withdrawal could not be satisfied. Kept stable so callers and
+/// indexers can branch on the reason rather than parse messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WithdrawalUnavailable {
+    /// The account has no position in the pool at all.
+    NoPosition,
+    /// The account has a position, but less than the requested amount is unlocked.
+    InsufficientUnlocked,
+    /// The pool is in a state that does not permit withdrawals.
+    IncompatibleState,
+}
+
+/// Classify why a withdrawal of `requested` cannot proceed, or `None` when it
+/// can. Authorization is checked by the caller before this is consulted, so the
+/// existing checks are preserved unchanged.
+pub fn classify_withdrawal(
+    has_position: bool,
+    unlocked: i128,
+    requested: i128,
+    state_allows_withdrawal: bool,
+) -> Option<WithdrawalUnavailable> {
+    if !state_allows_withdrawal {
+        return Some(WithdrawalUnavailable::IncompatibleState);
+    }
+    if !has_position {
+        return Some(WithdrawalUnavailable::NoPosition);
+    }
+    if unlocked < requested {
+        return Some(WithdrawalUnavailable::InsufficientUnlocked);
+    }
+    None
+}
+
 /// Push a payout. Squad settlement is already pull-based per participant, so a
 /// failure here affects only the caller and is allowed to propagate — matching
 /// `require(usdc.transfer(...))` in the Solidity.
@@ -56,8 +89,62 @@ pub fn try_push(env: &Env, usdc: &Address, to: &Address, amount: i128) -> bool {
     )
 }
 
+#[cfg(test)]
+mod withdrawal_reason_tests {
+    use super::*;
+
+    #[test]
+    fn no_position_is_distinct() {
+        assert_eq!(
+            classify_withdrawal(false, 0, 10, true),
+            Some(WithdrawalUnavailable::NoPosition)
+        );
+    }
+
+    #[test]
+    fn insufficient_unlocked_boundary() {
+        assert_eq!(
+            classify_withdrawal(true, 9, 10, true),
+            Some(WithdrawalUnavailable::InsufficientUnlocked)
+        );
+        assert_eq!(classify_withdrawal(true, 10, 10, true), None);
+    }
+
+    #[test]
+    fn incompatible_state_takes_precedence() {
+        assert_eq!(
+            classify_withdrawal(false, 0, 10, false),
+            Some(WithdrawalUnavailable::IncompatibleState)
+        );
+    }
+}
+
 pub fn balance(env: &Env, usdc: &Address) -> i128 {
     token::TokenClient::new(env, usdc).balance(&env.current_contract_address())
+}
+
+/// Read-only preview of the value a cancellation would move. Performs no
+/// transfer, no authority change and no storage write: it only reports the
+/// escrow balance the pool currently holds against its refundable liabilities.
+pub fn preview_refund_capacity(env: &Env, usdc: &Address, refundable: i128) -> i128 {
+    let held = balance(env, usdc);
+    if refundable <= 0 {
+        0
+    } else if refundable < held {
+        refundable
+    } else {
+        held
+    }
+}
+
+/// Read the escrow balance without trapping. Returns `None` when the token
+/// cannot answer a balance query, so callers can report an explicit state
+/// instead of overloading zero.
+pub fn try_balance(env: &Env, usdc: &Address) -> Option<i128> {
+    match token::TokenClient::new(env, usdc).try_balance(&env.current_contract_address()) {
+        Ok(Ok(amount)) => Some(amount),
+        _ => None,
+    }
 }
 
 /// Read-only escrow view for settlement readiness: returns the escrow balance

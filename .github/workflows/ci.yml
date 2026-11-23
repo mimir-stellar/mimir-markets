@@ -34,11 +34,14 @@ jobs:
         # fallback) — that is the fail-closed signal, surfaced by the next step.
         continue-on-error: true
         env:
-          BEFORE: ${{ github.event.before }}
+          # Pull requests must diff against the target branch. `event.before`
+          # is a push-only field and can point at the previous PR head on a
+          # synchronize event, which includes unrelated base-branch changes.
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: |
           args=""
-          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
-            args="--base $BEFORE"
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
+            args="--base $BASE"
           fi
           node scripts/ci/changed-paths.mjs $args
       - name: surface an undecidable change set

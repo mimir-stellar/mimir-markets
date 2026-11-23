@@ -50,6 +50,10 @@ The gate fails closed. `ok` is true only when there are zero error findings:
 Findings name the tables, indexes, or migrations involved and print the exact
 remediation command. They never include row data, addresses, or secrets.
 
+## Offline cross-workspace compatibility report
+
+`npm run report:compat` (and `npm run report:compat -- --json` for machine-readable output) compares the app, bindings, contracts, and schema versions recorded in tracked artifacts and flags incompatible combinations. It reads only committed files and never invokes live services, so it needs no credentials and performs no network calls. A combination is reported as incompatible when the schema snapshot's `schemaVersion` differs from the schema version declared by the app, or when a workspace's declared version does not match the version pinned in the shared compatibility manifest. Findings name the workspaces involved and the remediation step.
+
 ## Release, rollback, artifact, and environment
 
 - **Release.** CI runs `npm run check:schema-snapshot` before typecheck. A failing

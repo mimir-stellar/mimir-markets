@@ -328,6 +328,15 @@ This guide collects causes, code references, and fixes for errors contributors, 
   - `contracts-soroban/mimir-market/src/types.rs:373, 385` (`Error::DeadlineInPast`, `Error::NotYetExpired`)
   - `lib/settlement-retry.ts:219-222, 279, 353-358` (`settlementSnapshotIsReady`)
 
+**Browser-side deadline estimates.** A deadline is a ledger timestamp, so the UI never treats `Date.now()` as the ledger. `lib/market-expiry.ts` evaluates the deadline against the latest observation (the read index snapshot or the on-chain read, with the server clock reconstructed from its freshness metadata) and returns a conservative `challengeable` flag plus an `estimateStale` reason:
+
+- `index_stale` — the read index is behind (see the freshness pill).
+- `observation_too_old` — no successful poll for more than 30 seconds (backgrounded tab, SSE outage).
+- `clock_skew` — the browser clock disagrees with the server clock that stamped the read by more than 5 seconds.
+- `no_ledger_observation` — the deadline is still a local draft (create ticket) or only a pending local snapshot.
+
+When `estimateStale` is set the market page labels the deadline "estimate may be stale", shows a refresh prompt instead of the stake form, and the create ticket marks the chosen deadline as a local estimate. `challengeable` is only true for a fresh observation with more than `CHALLENGE_LOCK_SECONDS` (60s) remaining; Soroban remains authoritative either way.
+
 ---
 
 ### 18. Metadata Exceeds Byte Budget (#41 / #42)

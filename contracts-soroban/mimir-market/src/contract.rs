@@ -308,6 +308,18 @@ impl MimirMarket {
         Ok(results)
     }
 
+    /// Versioned snapshot of the contract's resource limits, so clients can size
+    /// batch and pagination requests without probing live failures.
+    ///
+    /// Response layout: `(version, max_batch_size)`. `version` is bumped whenever
+    /// the layout changes; existing fields keep their meaning across versions.
+    pub fn get_contract_limits(env: Env) -> Result<(u32, u32), Error> {
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        Ok((1u32, MAX_BATCH_SIZE))
+    }
+
     pub fn get_claim_market_config(env: Env, claim_id: u64) -> Result<MarketConfig, Error> {
         Ok(storage::get_claim(&env, claim_id)?.market)
     }
