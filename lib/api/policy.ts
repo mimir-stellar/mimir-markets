@@ -13,7 +13,7 @@
  *
  * The rules that make this worth having:
  *
- *  - `**A tier declares its requirements; a route only names its tier.** A route
+ *  - **A tier declares its requirements; a route only names its tier.** A route
  *    cannot accidentally be laxer than its tier, because it does not get to
  *    choose.
  *  - **Money- or authority-changing calls demand an idempotency key** at any tier

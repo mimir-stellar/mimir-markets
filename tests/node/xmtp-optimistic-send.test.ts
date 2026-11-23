@@ -32,7 +32,7 @@ describe("normalizeXmtpMessageId", () => {
   ];
 
   it.each(cases)("normalizes %s -> %s", (input, expected) => {
-    expect(normalizeXmtpMessageId(input as any)).toBe(expected);
+    expect(normalizeXmtpMessageId(input as any)).toEqual(expected);
   });
 });
 
@@ -83,7 +83,7 @@ describe("decodedMessageMatchesPending", () => {
   ];
 
   it.each(cases)("$name", ({ decoded, expected }) => {
-    expect(decodedMessageMatchesPending(decoded as any, pending as any)).toBe(expected);
+    expect(decodedMessageMatchesPending(decoded as any, pending as any)).toEqual(expected);
   });
 });
 

@@ -28,6 +28,8 @@
  *    are now behind it.
  *  - `pause()` / `resume()` let an incident kill-switch stop new allocations
  *    without discarding in-flight reservations.
+ *  - Reservations coordinate with the bounded trader decision journal (see
+ *    `agents/traders/policy.ts`) to track sequence allocations across decisions.
  *
  * The manager is deliberately dependency-free and takes a {@link SequenceProvider}
  * so it can be unit-tested without Horizon or a live ledger.
@@ -62,6 +64,64 @@ interface AddressState {
   holes: Set<bigint>;
   /** Serialises allocation for this address. */
   tail: Promise<void>;
+}
+
+/**
+ * Reconcile durable trader intents against observed chain positions after a
+ * restart. Intents whose outcome is uncertain are preserved and never re-issued
+ * automatically; only intents confirmed absent on chain may be retried.
+ */
+export type IntentOutcome = "pending" | "confirmed" | "absent" | "uncertain";
+
+export interface DurableIntent {
+  readonly id: string;
+  readonly address: string;
+  readonly sequence: bigint;
+  readonly amountUsdc: bigint;
+  outcome: IntentOutcome;
+}
+
+export interface ObservedPosition {
+  readonly intentId: string;
+  readonly sequence: bigint;
+}
+
+export interface ReconciliationResult {
+  readonly confirmed: DurableIntent[];
+  readonly retryable: DurableIntent[];
+  readonly uncertain: DurableIntent[];
+}
+
+/**
+ * Compare durable intents with observed chain positions. An intent is confirmed
+ * when a matching position exists; an intent with no observed position and a
+ * sequence already consumed on-ledger is treated as absent (retryable); anything
+ * else stays uncertain so it is never double-submitted.
+ */
+export function reconcileIntents(
+  intents: readonly DurableIntent[],
+  observed: readonly ObservedPosition[],
+  ledgerSequence: bigint,
+): ReconciliationResult {
+  const observedIds = new Set(observed.map((position) => position.intentId));
+  const confirmed: DurableIntent[] = [];
+  const retryable: DurableIntent[] = [];
+  const uncertain: DurableIntent[] = [];
+  for (const intent of intents) {
+    if (observedIds.has(intent.id)) {
+      intent.outcome = "confirmed";
+      confirmed.push(intent);
+    } else if (intent.sequence <= ledgerSequence) {
+      // The sequence was consumed on-chain but no matching position was observed:
+      // the stake may have landed under another path, so keep it uncertain.
+      intent.outcome = "uncertain";
+      uncertain.push(intent);
+    } else {
+      intent.outcome = "absent";
+      retryable.push(intent);
+    }
+  }
+  return { confirmed, retryable, uncertain };
 }
 
 function normalizeAddress(address: string): string {

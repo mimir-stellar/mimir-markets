@@ -4,6 +4,49 @@ export type ChallengeOpportunitySource = {
   url: string;
 };
 
+/**
+ * Challenge intent review: the exact review shown before a stake is signed.
+ * A review is bound to the account, stake amount (integer USDC base units),
+ * claim statement revision and network it was produced for. Any change to
+ * those inputs invalidates the review, so a stale review can never authorize
+ * a different stake.
+ */
+export type ChallengeIntentReview = {
+  account: string;
+  stakeUsdc: bigint;
+  claimStatement: string;
+  claimRevision: number;
+  network: string;
+};
+
+export type ChallengeIntentReviewInput = {
+  account: string;
+  stakeUsdc: bigint;
+  claimStatement: string;
+  claimRevision: number;
+  network: string;
+};
+
+export function createChallengeIntentReview(
+  input: ChallengeIntentReviewInput,
+): ChallengeIntentReview {
+  return { ...input };
+}
+
+export function isChallengeIntentReviewCurrent(
+  review: ChallengeIntentReview | null,
+  current: ChallengeIntentReviewInput,
+): boolean {
+  if (!review) return false;
+  return (
+    review.account === current.account &&
+    review.stakeUsdc === current.stakeUsdc &&
+    review.claimStatement === current.claimStatement &&
+    review.claimRevision === current.claimRevision &&
+    review.network === current.network
+  );
+}
+
 export const CHALLENGE_OPPORTUNITY_SOURCES: ChallengeOpportunitySource[] = [
   {
     id: "football-fixtures",

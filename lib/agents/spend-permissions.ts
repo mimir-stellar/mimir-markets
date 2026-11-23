@@ -89,6 +89,46 @@ export type PermissionRejection =
   | "allowance_exhausted";
 
 /**
+ * Stable reason codes for responses. A revoked grant is permanently dead and must
+ * never suggest a retry; an expired grant can only be replaced by a new signature.
+ */
+export const PERMISSION_REASON_CODES: Record<PermissionRejection, string> = {
+  wrong_token: "permission_wrong_token",
+  wrong_spender: "permission_wrong_spender",
+  not_started: "permission_not_started",
+  expired: "permission_expired",
+  revoked: "permission_revoked",
+  zero_allowance: "permission_zero_allowance",
+  bad_period: "permission_bad_period",
+  allowance_exhausted: "permission_allowance_exhausted",
+};
+
+/** Whether a client may usefully retry the same grant later. Revocation is terminal. */
+export function isRetryableRejection(reason: PermissionRejection): boolean {
+  return reason !== "revoked";
+}
+
+/**
+ * Response-ready description of a rejection, with stable code and effective times.
+ * `effectiveAt` is when the state began (revocation time, start, or expiry).
+ */
+export function describeRejection(
+  permission: SpendPermissionRecord,
+  reason: PermissionRejection,
+): { reason: PermissionRejection; code: string; retryable: boolean; effectiveAt?: number } {
+  let effectiveAt: number | undefined;
+  if (reason === "revoked") effectiveAt = permission.revokedAt;
+  else if (reason === "expired") effectiveAt = permission.endAt;
+  else if (reason === "not_started") effectiveAt = permission.startAt;
+  return {
+    reason,
+    code: PERMISSION_REASON_CODES[reason],
+    retryable: isRetryableRejection(reason),
+    effectiveAt,
+  };
+}
+
+/**
  * Mimir's spender address. Unset means funded actions cannot be delegated at all.
  *
  * Accepts a `G…` account or a `C…` contract: the spender in a SAC allowance is an
@@ -158,6 +198,8 @@ export function checkPermission(
   nowSeconds: number,
   spender: string | null,
 ): { ok: true } | { ok: false; reason: PermissionRejection } {
+  // Revocation is checked first and wins over expiry: a permission that was revoked
+  // before its end must report `revoked` (terminal) rather than `expired`.
   if (permission.revokedAt) return { ok: false, reason: "revoked" };
   const token = requiredToken();
   // An unconfigured USDC contract id must not degrade into "any token passes":
@@ -348,33 +390,4 @@ export function parseSpendPermissionGrant(args: {
   if (allowanceAtomic === null || allowanceAtomic <= 0n) return { ok: false, error: "allowance must be a positive atomic amount" };
   const periodSeconds = asSeconds(grant.period);
   if (!periodSeconds) return { ok: false, error: "period must be positive seconds" };
-  const startAt = asSeconds(grant.start);
-  const endAt = asSeconds(grant.end);
-  if (startAt === null || endAt === null) return { ok: false, error: "start and end must be unix seconds" };
-  if (endAt <= startAt) return { ok: false, error: "end must follow start" };
-  if (endAt * 1000 <= now) return { ok: false, error: "permission has already expired" };
-
-  // Base64 as SEP-43 returns it. The bytes are verified against `account` by
-  // `verifyAgentSignature`; this only rejects an obviously non-signature.
-  const signature = typeof grant.signature === "string" && /^[A-Za-z0-9+/]{16,}={0,2}$/.test(grant.signature.trim())
-    ? grant.signature.trim() : null;
-  if (!signature) return { ok: false, error: "owner signature is required" };
-
-  const salt = asBigInt(grant.salt)?.toString() ?? "0";
-  const extraData = typeof grant.extraData === "string" ? grant.extraData : "";
-  const expirationLedger = asSeconds(grant.expirationLedger) ?? undefined;
-
-  return {
-    ok: true,
-    record: {
-      permissionHash: permissionKey({ account, spender: grantSpender, token, allowanceAtomic, periodSeconds, startAt, endAt, salt }),
-      agentId, account, spender: grantSpender, token, allowanceAtomic, periodSeconds,
-      startAt, endAt, salt, extraData, signature,
-      ...(expirationLedger !== undefined ? { expirationLedger } : {}),
-      // Stored verbatim: a re-verification has to hash the object the owner
-      // actually signed, not one we rebuilt from parsed parts.
-      permissionJson: JSON.stringify(grant.permission ?? grant),
-      createdAt: now,
-    },
-  };
 }

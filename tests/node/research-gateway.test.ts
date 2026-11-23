@@ -1,18 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
   MAX_REDIRECTS,
   MAX_RESPONSE_BYTES,
   budgetRemaining,
+  buildResearchIncidentBundle,
+  commitReservation,
   gatewayFetch,
   invalidateIncompatibleResearchCache,
   invalidateResearchCache,
   normalizeSourceIdentity,
+  reconcileInterruptedAttempts,
+  releaseReservation,
+  reserveBudget,
   resetBudgets,
   resetResearchCache,
   validateHop,
 } from "../../lib/research/gateway";
+import { validateResearchContent } from "../../lib/research/content-validation";
+import { sha256Hex } from "../../lib/content-hash";
 
 const PUBLIC_POLICY = { allow: [], deny: [] };
 const publicDns = async () => ["93.184.216.34"];
@@ -976,3 +987,352 @@ test("resetBudgets clears every agent's window", async () => {
   assert.equal(remaining.requests, 0);
 });
 
+test("reserveBudget reserves bounded request and paid-fetch units before dispatch", async () => {
+  fresh();
+  const now = 1_000_000;
+  const budget = { maxRequests: 5, maxBytes: 1_000_000, maxPaidUnits: 15_000, windowMs: 60_000 };
+
+  // First reservation: 1 request, 5000 paid units
+  const res1 = reserveBudget({
+    agentId: "agent-a",
+    requests: 1,
+    paidUnits: 5000,
+    budget,
+    now,
+  });
+  assert.equal(res1.ok, true);
+  if (res1.ok) {
+    assert.equal(res1.reservation.agentId, "agent-a");
+    assert.equal(res1.reservation.status, "reserved");
+    assert.equal(res1.reservation.requests, 1);
+    assert.equal(res1.reservation.paidUnits, 5000);
+  }
+
+  // Budget remaining accounts for the pending reservation
+  const rem1 = budgetRemaining("agent-a", budget, now);
+  assert.equal(rem1.requests, 4);
+  assert.equal(rem1.paidUnits, 10000);
+
+  // Second reservation: exceeds remaining paid units (needs 12000, only 10000 left)
+  const resExceed = reserveBudget({
+    agentId: "agent-a",
+    requests: 1,
+    paidUnits: 12000,
+    budget,
+    now,
+  });
+  assert.equal(resExceed.ok, false);
+  if (!resExceed.ok) {
+    assert.equal(resExceed.kind, "budget");
+    assert.match(resExceed.detail, /paid-fetch unit budget/);
+  }
+
+  // Release first reservation: budget is restored
+  if (res1.ok) {
+    releaseReservation(res1.reservation.id);
+  }
+  const rem2 = budgetRemaining("agent-a", budget, now);
+  assert.equal(rem2.requests, 5);
+  assert.equal(rem2.paidUnits, 15000);
+});
+
+test("gatewayFetch enforces paid-fetch budget limits", async () => {
+  fresh();
+  const budget = { maxRequests: 10, maxBytes: 1_000_000, maxPaidUnits: 10_000 };
+  let fetchCount = 0;
+  const mockFetch = async () => {
+    fetchCount++;
+    return htmlResponse("paid content");
+  };
+
+  // First fetch with 6000 paidUnits: succeeds
+  const res1 = await gatewayFetch({
+    url: "https://example.com/paid-1",
+    agentId: "paid-agent",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: mockFetch as typeof fetch,
+    budget,
+    paidUnits: 6000,
+  });
+  assert.equal(res1.ok, true);
+  assert.equal(fetchCount, 1);
+
+  // Second fetch with 5000 paidUnits: exceeds 10,000 ceiling (6000 + 5000 = 11000 > 10000)
+  const res2 = await gatewayFetch({
+    url: "https://example.com/paid-2",
+    agentId: "paid-agent",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: mockFetch as typeof fetch,
+    budget,
+    paidUnits: 5000,
+  });
+  assert.equal(res2.ok, false);
+  if (!res2.ok) {
+    assert.equal(res2.kind, "budget");
+    assert.match(res2.detail, /paid-fetch unit budget/);
+  }
+  // Upstream network was not hit for rejected fetch
+  assert.equal(fetchCount, 1);
+});
+
+test("a request blocked before network releases reservation and costs no budget", async () => {
+  fresh();
+  const budget = { maxRequests: 2, maxBytes: 1_000_000, maxPaidUnits: 10_000 };
+  const res = await gatewayFetch({
+    url: "http://127.0.0.1/private-data",
+    agentId: "agent-blocked",
+    policy: PUBLIC_POLICY,
+    resolve: privateDns,
+    budget,
+    paidUnits: 5000,
+  });
+  assert.equal(res.ok, false);
+  // Entire allowance remains intact
+  const remaining = budgetRemaining("agent-blocked", budget);
+  assert.equal(remaining.requests, 2);
+  assert.equal(remaining.paidUnits, 10000);
+});
+
+test("persists research acquisition budgets across simulated worker restarts", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "mimir-research-budget-"));
+  try {
+    fresh();
+    const budget = { maxRequests: 5, maxBytes: 1_000_000, maxPaidUnits: 20_000 };
+    const now = 2_000_000;
+
+    // Dispatch a successful fetch with 8000 paid units in tempDir
+    const fetchRes = await gatewayFetch({
+      url: "https://example.com/worker-restart",
+      agentId: "worker-agent",
+      policy: PUBLIC_POLICY,
+      resolve: publicDns,
+      fetchImpl: (async () => htmlResponse("persisted")) as typeof fetch,
+      budget,
+      paidUnits: 8000,
+      stateDir: tempDir,
+      now,
+    });
+    assert.equal(fetchRes.ok, true);
+
+    const remBefore = budgetRemaining("worker-agent", budget, now, tempDir);
+    assert.equal(remBefore.requests, 4);
+    assert.equal(remBefore.paidUnits, 12000);
+
+    // Simulate worker process restart by clearing in-memory state
+    resetBudgets();
+
+    // After in-memory restart, disk state is restored seamlessly
+    const remAfter = budgetRemaining("worker-agent", budget, now, tempDir);
+    assert.equal(remAfter.requests, 4);
+    assert.equal(remAfter.paidUnits, 12000);
+  } finally {
+    resetBudgets(tempDir);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("reconciles interrupted attempts without resetting an agent's authorized budget", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "mimir-research-interrupted-"));
+  try {
+    fresh();
+    const budget = { maxRequests: 5, maxBytes: 1_000_000, maxPaidUnits: 20_000 };
+    const now = 3_000_000;
+
+    // 1. First request committed normally (uses 1 request, 5000 paid units)
+    const committed = await gatewayFetch({
+      url: "https://example.com/committed",
+      agentId: "crash-agent",
+      policy: PUBLIC_POLICY,
+      resolve: publicDns,
+      fetchImpl: (async () => htmlResponse("done")) as typeof fetch,
+      budget,
+      paidUnits: 5000,
+      stateDir: tempDir,
+      now,
+    });
+    assert.equal(committed.ok, true);
+
+    // 2. Second request reserved, but interrupted before network completion (e.g. process crash)
+    const pendingRes = reserveBudget({
+      agentId: "crash-agent",
+      requests: 1,
+      paidUnits: 10000,
+      budget,
+      now: now + 10,
+      stateDir: tempDir,
+      url: "https://example.com/interrupted-fetch",
+    });
+    assert.equal(pendingRes.ok, true);
+
+    // While reserved, headroom is held: 3 requests left, 5000 paidUnits left
+    const remWhileReserved = budgetRemaining("crash-agent", budget, now + 15, tempDir);
+    assert.equal(remWhileReserved.requests, 3);
+    assert.equal(remWhileReserved.paidUnits, 5000);
+
+    // 3. Worker process crashes / restarts
+    resetBudgets();
+
+    // 4. On worker boot, reconcileInterruptedAttempts runs
+    const reconcile = reconcileInterruptedAttempts({
+      stateDir: tempDir,
+      now: now + 50,
+    });
+    assert.equal(reconcile.reconciledCount, 1);
+    assert.equal(reconcile.releasedRequests, 1);
+    assert.equal(reconcile.releasedPaidUnits, 10000);
+    assert.equal(reconcile.interruptedReservations[0].status, "interrupted");
+
+    // 5. Verify the agent's authorized budget was NOT reset:
+    // The committed 1 request and 5000 paidUnits remain accounted for (4 requests, 15000 paidUnits left),
+    // and the dangling reservation headroom has been restored.
+    const remAfterReconcile = budgetRemaining("crash-agent", budget, now + 60, tempDir);
+    assert.equal(remAfterReconcile.requests, 4);
+    assert.equal(remAfterReconcile.paidUnits, 15000);
+  } finally {
+    resetBudgets(tempDir);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("content validation marks interrupted attempts as unusable for settlement", () => {
+  const body = "<html>partial</html>";
+  const dummySuccess = {
+    url: "https://example.com/interrupted",
+    finalUrl: "https://example.com/interrupted",
+    status: 200,
+    contentType: "text/html",
+    body,
+    contentHash: sha256Hex(body),
+    capturedAt: Date.now(),
+    bytes: 20,
+    fromCache: false,
+    redirects: 0,
+    redirectChain: ["https://example.com/interrupted"],
+  };
+
+  const validation = validateResearchContent(dummySuccess, {
+    interrupted: true,
+  });
+
+  assert.equal(validation.usable, false);
+  assert.equal(validation.state, "interrupted");
+  assert.match(validation.reason, /interrupted/);
+});
+
+// ── Cache provenance (#864) ───────────────────────────────────────────────────
+
+test("a fresh fetch reports itself as fetched, with capture time and policy revision", async () => {
+  fresh();
+  const t0 = 7_000_000;
+  const result = await gatewayFetch({
+    url: "https://example.com/provenance-fresh",
+    agentId: "provenance-fresh",
+    policy: PUBLIC_POLICY,
+    now: t0,
+    resolve: publicDns,
+    fetchImpl: async () => htmlResponse("fresh body"),
+    policyRevision: "v7",
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.acquisition, "fetched");
+  assert.equal(result.fromCache, false);
+  assert.equal(result.capturedAt, t0);
+  assert.equal(result.servedAt, t0);
+  assert.equal(result.policyRevision, "v7");
+});
+
+test("a cache hit keeps the original capture time and revision instead of the replay time", async () => {
+  fresh();
+  const t0 = 8_000_000;
+  const args = {
+    url: "https://example.com/provenance-cached",
+    agentId: "provenance-cached",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: async () => htmlResponse("cached body"),
+    policyRevision: "v7",
+  };
+  const first = await gatewayFetch({ ...args, now: t0 });
+  const replay = await gatewayFetch({ ...args, now: t0 + 30_000 });
+  assert.equal(first.ok && replay.ok, true);
+  if (!first.ok || !replay.ok) return;
+  assert.equal(replay.acquisition, "cache");
+  assert.equal(replay.fromCache, true);
+  assert.equal(replay.capturedAt, t0, "replay time must not be presented as acquisition time");
+  assert.equal(replay.servedAt, t0 + 30_000);
+  assert.equal(replay.policyRevision, "v7");
+  assert.equal(replay.policyRevision, first.policyRevision);
+  assert.equal(replay.contentHash, first.contentHash);
+});
+
+test("a cache replay is judged stale by its original capture time, not the replay time", async () => {
+  fresh();
+  const replayAt = Date.now();
+  const t0 = replayAt - 120_000; // captured two minutes ago, inside the cache TTL
+  const args = {
+    url: "https://example.com/provenance-stale",
+    agentId: "provenance-stale",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: async () => htmlResponse("<p>BTC closed at 64,000</p>"),
+  };
+  await gatewayFetch({ ...args, now: t0 });
+  const replay = await gatewayFetch({ ...args, now: replayAt });
+  assert.equal(replay.ok, true);
+  if (!replay.ok) return;
+  assert.equal(replay.acquisition, "cache");
+  // 120 s after capture with a 60 s limit: stale, even though it was served just now.
+  assert.equal(replay.capturedAt, t0);
+  const verdict = validateResearchContent(replay, { maxAgeSeconds: 60 });
+  assert.equal(verdict.state, "stale");
+  assert.equal(verdict.policyRevision, replay.policyRevision);
+});
+
+test("serving a cache hit does not rewrite the cached entry", async () => {
+  fresh();
+  const t0 = 9_000_000;
+  const args = {
+    url: "https://example.com/provenance-repeat",
+    agentId: "provenance-repeat",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: async () => htmlResponse("body"),
+  };
+  await gatewayFetch({ ...args, now: t0 });
+  const hit1 = await gatewayFetch({ ...args, now: t0 + 1_000 });
+  if (hit1.ok) hit1.redirectChain.push("https://tampered.example/");
+  const hit2 = await gatewayFetch({ ...args, now: t0 + 2_000 });
+  assert.equal(hit2.ok, true);
+  if (!hit2.ok) return;
+  assert.equal(hit2.capturedAt, t0);
+  assert.equal(hit2.servedAt, t0 + 2_000);
+  assert.deepEqual(hit2.redirectChain, ["https://example.com/provenance-repeat"]);
+});
+
+test("once the cache entry expires the next request is a new fetch with a new capture time", async () => {
+  fresh();
+  const t0 = 10_000_000;
+  let calls = 0;
+  const args = {
+    url: "https://example.com/provenance-expired",
+    agentId: "provenance-expired",
+    policy: PUBLIC_POLICY,
+    resolve: publicDns,
+    fetchImpl: async () => {
+      calls += 1;
+      return htmlResponse(`body ${calls}`);
+    },
+  };
+  await gatewayFetch({ ...args, now: t0 });
+  const later = t0 + 24 * 60 * 60 * 1000;
+  const refetch = await gatewayFetch({ ...args, now: later });
+  assert.equal(calls, 2);
+  assert.equal(refetch.ok, true);
+  if (!refetch.ok) return;
+  assert.equal(refetch.acquisition, "fetched");
+  assert.equal(refetch.capturedAt, later);
+  assert.equal(refetch.servedAt, later);
+});

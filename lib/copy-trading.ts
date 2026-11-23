@@ -109,7 +109,7 @@ export type CopySkipReason =
   | "category_blocked" | "mode_blocked"
   | "confidence_below_floor" | "payout_below_floor" | "position_cap"
   | "daily_cap" | "weekly_cap" | "open_exposure_cap" | "spend_permission_mismatch"
-  | "loss_limit" | "simulation_failed";
+  | "loss_limit" | "simulation_failed" | "policy_hash_mismatch";
 
 export interface CopyExecutionContext {
   now: number;
@@ -141,16 +141,19 @@ export interface CopyExecutionContext {
  */
 export function copyGrantMessage(args: {
   permissionId: string; ownerWallet: string; policyHash: string; nonce: string; expiresAt: number;
+  reviewDigest?: string;
 }): string {
-  return [
+  const lines = [
     "Mimir copy permission",
     "action: grant",
     `permission: ${args.permissionId}`,
     `owner: ${args.ownerWallet}`,
     `policyHash: ${args.policyHash}`,
+    ...(args.reviewDigest ? [`reviewDigest: ${args.reviewDigest}`] : []),
     `nonce: ${args.nonce}`,
     `expiresAt: ${new Date(args.expiresAt).toISOString()}`,
-  ].join("\n");
+  ];
+  return lines.join("\n");
 }
 
 /** What the owner signs to revoke a copy permission. See {@link copyGrantMessage}. */
@@ -169,6 +172,168 @@ export function copyRevokeMessage(args: {
 
 export function copyPolicyHash(input: Omit<CopyPermission, "signedPolicyHash">): string {
   return sha256Hex(JSON.stringify(input, (_, value) => typeof value === "bigint" ? value.toString() : value));
+}
+
+/**
+ * Pre-signature review digest for a copy permission.
+ *
+ * Binds the agents, categories, modes, thresholds, expiry, and every spending
+ * limit (per-position, daily, weekly, open-exposure, realized-loss, and the
+ * delegated spend permission) into a deterministic SHA-256 hex digest. Any
+ * mutation to any bound field before owner signing produces a different digest
+ * and invalidates the review.
+ */
+export interface CopyPermissionReviewDigest {
+  /** Deterministic SHA-256 hex digest over all bound permission fields. */
+  reviewDigest: string;
+  /** Policy hash matching `copyPolicyHash(permission)` for grant signing. */
+  policyHash: string;
+  permissionId: string;
+  ownerWallet: string;
+  agents: {
+    executionAgentId: string;
+    signalAgentId: string;
+  };
+  categories: string[];
+  modes: string[];
+  thresholds: {
+    minConfidenceBps: number;
+    minPayoutBps: number;
+  };
+  expiresAt: number;
+  expiresAtIso: string;
+  spendingLimits: {
+    maxPerPositionUsdc: number;
+    dailyCapUsdc: number;
+    weeklyCapUsdc: number;
+    totalOpenExposureUsdc: number;
+    maxRealizedLossAtomic: string;
+    spendPermission: {
+      token: string;
+      spender: string;
+      allowanceAtomic: string;
+      periodSeconds: number;
+    };
+  };
+  /** Concise human-readable summary of what the owner is about to sign. */
+  summary: string;
+}
+
+/**
+ * Compute the canonical SHA-256 hex review digest for an unsigned copy
+ * permission. Every field that governs execution or spend is explicitly bound
+ * in a fixed field order so key-order differences in JSON cannot alter the
+ * digest, while any value change in any bound field invalidates it.
+ */
+export function copyPermissionReviewDigest(input: Omit<CopyPermission, "signedPolicyHash">): string {
+  const canonical = {
+    version: 1,
+    permissionId: input.permissionId,
+    ownerWallet: input.ownerWallet,
+    executionAgentId: input.executionAgentId,
+    signalAgentId: input.signalAgentId,
+    allowedCategories: input.allowedCategories,
+    allowedModes: input.allowedModes,
+    minConfidenceBps: input.minConfidenceBps,
+    minPayoutBps: input.minPayoutBps,
+    expiresAt: input.expiresAt,
+    depth: input.depth,
+    status: input.status,
+    maxPerPositionUsdc: input.maxPerPositionUsdc,
+    dailyCapUsdc: input.dailyCapUsdc,
+    weeklyCapUsdc: input.weeklyCapUsdc,
+    totalOpenExposureUsdc: input.totalOpenExposureUsdc,
+    maxRealizedLossAtomic: input.maxRealizedLossAtomic,
+    spendPermission: {
+      token: input.spendPermission.token,
+      spender: input.spendPermission.spender,
+      allowanceAtomic: input.spendPermission.allowanceAtomic.toString(),
+      periodSeconds: input.spendPermission.periodSeconds,
+    },
+  };
+  return sha256Hex(JSON.stringify(canonical));
+}
+
+/**
+ * Validate an unsigned copy permission and build its pre-signature review
+ * digest payload for owner inspection before signing.
+ */
+export function buildCopyPermissionReviewDigest(
+  input: Omit<CopyPermission, "signedPolicyHash">,
+  now = Date.now(),
+): { ok: true; digest: CopyPermissionReviewDigest } | { ok: false; error: string } {
+  const validationError = validateCopyPermission(input, now);
+  if (validationError) {
+    return { ok: false, error: validationError };
+  }
+  const reviewDigest = copyPermissionReviewDigest(input);
+  const policyHash = copyPolicyHash(input);
+  const expiresAtIso = new Date(input.expiresAt).toISOString();
+  const categoriesLabel = input.allowedCategories.length > 0 ? input.allowedCategories.join(", ") : "all";
+  const modesLabel = input.allowedModes.length > 0 ? input.allowedModes.join(", ") : "all";
+  const summary =
+    `Copy ${input.signalAgentId} via ${input.executionAgentId} ` +
+    `(categories: ${categoriesLabel}; modes: ${modesLabel}; ` +
+    `caps: ${input.maxPerPositionUsdc}/${input.dailyCapUsdc}/${input.weeklyCapUsdc}/${input.totalOpenExposureUsdc} USDC; ` +
+    `maxLossAtomic: ${input.maxRealizedLossAtomic}; ` +
+    `allowanceAtomic: ${input.spendPermission.allowanceAtomic.toString()}/${input.spendPermission.periodSeconds}s; ` +
+    `expires: ${expiresAtIso})`;
+
+  return {
+    ok: true,
+    digest: {
+      reviewDigest,
+      policyHash,
+      permissionId: input.permissionId,
+      ownerWallet: input.ownerWallet,
+      agents: {
+        executionAgentId: input.executionAgentId,
+        signalAgentId: input.signalAgentId,
+      },
+      categories: [...input.allowedCategories],
+      modes: [...input.allowedModes],
+      thresholds: {
+        minConfidenceBps: input.minConfidenceBps,
+        minPayoutBps: input.minPayoutBps,
+      },
+      expiresAt: input.expiresAt,
+      expiresAtIso,
+      spendingLimits: {
+        maxPerPositionUsdc: input.maxPerPositionUsdc,
+        dailyCapUsdc: input.dailyCapUsdc,
+        weeklyCapUsdc: input.weeklyCapUsdc,
+        totalOpenExposureUsdc: input.totalOpenExposureUsdc,
+        maxRealizedLossAtomic: input.maxRealizedLossAtomic,
+        spendPermission: {
+          token: input.spendPermission.token,
+          spender: input.spendPermission.spender,
+          allowanceAtomic: input.spendPermission.allowanceAtomic.toString(),
+          periodSeconds: input.spendPermission.periodSeconds,
+        },
+      },
+      summary,
+    },
+  };
+}
+
+/**
+ * Verify that an unsigned copy permission still matches a previously issued
+ * pre-signature review digest. Any field mutation between review and signing
+ * invalidates the review.
+ */
+export function verifyCopyPermissionReviewDigest(
+  input: Omit<CopyPermission, "signedPolicyHash">,
+  expectedDigest: string,
+): { ok: true } | { ok: false; reason: "invalid_review_digest" | "review_digest_mismatch" } {
+  const normalized = typeof expectedDigest === "string" ? expectedDigest.trim().toLowerCase() : "";
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    return { ok: false, reason: "invalid_review_digest" };
+  }
+  const actual = copyPermissionReviewDigest(input);
+  if (actual !== normalized) {
+    return { ok: false, reason: "review_digest_mismatch" };
+  }
+  return { ok: true };
 }
 
 function parseAtomicString(value: string): bigint {
@@ -210,6 +375,8 @@ export function evaluateCopy(permission: CopyPermission, signal: CopySignal, con
   if (context.globalPaused || isPaused("copy_execution", context.env)) return { allowed: false, reason: "global_paused" };
   if (permission.status === "revoked") return { allowed: false, reason: "permission_revoked" };
   if (permission.status === "paused") return { allowed: false, reason: "permission_paused" };
+  if (permission.status === "revoked") return { allowed: false, reason: "permission_revoked" };
+  if (context.now >= permission.expiresAt) return { allowed: false, reason: "permission_expired" };
   if (!Number.isSafeInteger(context.now) || !context.usage ||
       typeof context.usage.usedTodayUsdc !== "number" ||
       typeof context.usage.usedThisWeekUsdc !== "number" ||
@@ -540,6 +707,8 @@ export function explainCopySkipReason(reason: CopySkipReason): string {
       return "The copy permission is currently paused.";
     case "permission_expired":
       return "The copy permission has expired.";
+    case "permission_revoked_terminal":
+      return "The copy permission was revoked and will not become active again; do not retry.";
     case "self_copy":
       return "You cannot copy your own signals.";
     case "copy_depth":
@@ -576,6 +745,8 @@ export function explainCopySkipReason(reason: CopySkipReason): string {
       return "The stake would exceed the maximum realized loss limit.";
     case "simulation_failed":
       return "The pre-flight simulation failed.";
+    case "policy_hash_mismatch":
+      return "The policy no longer matches the signed policy.";
     default:
       return "Unknown skip reason.";
   }

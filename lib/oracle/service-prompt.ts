@@ -17,7 +17,7 @@ import { MAX_CONFIDENCE_NON_API } from "@/lib/oracle/confidence-tiers";
 export interface OracleServiceInput {
   question: string;
   sideA: string;
-  sidbB: string;
+  sideB: string;
   settlementRule?: string;
   evidenceUrl?: string;
   evidenceText: string;

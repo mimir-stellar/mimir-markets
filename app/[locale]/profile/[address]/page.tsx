@@ -8,6 +8,7 @@ import { AgentAvatar } from "@/components/agents/AgentAvatar";
 import { Bps, SignedUsdc, StatBlock, TimeWindowTabs, TrackTag } from "@/components/agents/AgentStats";
 import { PerformanceChart } from "@/components/charts/PerformanceChart";
 import { AddressChip } from "@/components/ui/AddressChip";
+import { CsvDownloadButton } from "@/components/CsvDownloadButton";
 import { cumulativePnlPoints, isTimeWindow, windowSinceMs, type TimeWindow } from "@/lib/agents/performance";
 import { freshnessFromMeta } from "@/lib/vs-freshness";
 import { buildProfile } from "@/lib/server/profile";
@@ -171,7 +172,10 @@ export default async function ProfilePage({
         )}
 
         <section className="mt-8">
-          <h3 className="mb-3 font-display text-lg font-bold text-pv-text">Positions</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="mb-3 font-display text-lg font-bold text-pv-text">Positions</h3>
+            <CsvDownloadButton results={results} filename={`performance-${address}.csv`} />
+          </div>
           {pageResults.length === 0 ? (
             <p className="border border-pv-ink/[0.1] bg-pv-surface/40 px-4 py-6 text-sm text-pv-muted">
               This wallet has not taken a position yet.
