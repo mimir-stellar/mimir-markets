@@ -14,7 +14,16 @@
  *
  * The resolution URL IS the API call, so the oracle reads the same document the
  * market was written from. A page that might be rewritten later is not evidence.
+ *
+ * Source identity and capture version are bound to every event so that the dedupe
+ * layer can tell apart two snapshots of the same question that were captured from
+ * different sources or at different times, while still collapsing genuine repeats.
  */
+
+export const WEATHER_SOURCE_ID = "open-meteo";
+export const WEATHER_CAPTURE_VERSION = "v1";
+export const LAUNCH_SOURCE_ID = "launch-library-2";
+export const LAUNCH_CAPTURE_VERSION = "v1";
 
 export interface WeatherEvent {
   city: string;
@@ -23,6 +32,10 @@ export interface WeatherEvent {
   /** Forecast high for the target day, Celsius. */
   forecastHighC: number;
   targetDate: string;
+  sourceId: string;
+  captureVersion: string;
+  /** Epoch ms at which the snapshot was captured. */
+  capturedAtMs: number;
 }
 
 export interface LaunchEvent {
@@ -32,6 +45,9 @@ export interface LaunchEvent {
   windowStart: string;
   windowStartMs: number;
   resolutionUrl: string;
+  sourceId: string;
+  captureVersion: string;
+  capturedAtMs: number;
 }
 
 const CITIES = [
@@ -60,7 +76,7 @@ async function getJson<T>(url: string): Promise<T | null> {
 }
 
 /**
- * Tomorrow''s forecast high per city.
+ * Tomorrow's forecast high per city.
  *
  * `forecast_days=2` and reading index 1 gives tomorrow in the city's own timezone,
  * which is the day a reader means by "tomorrow" — UTC would put Sydney a day out.
@@ -69,6 +85,7 @@ export async function fetchWeatherEvents(): Promise<{ text: string; events: Weat
   const events: WeatherEvent[] = [];
 
   for (const spot of CITIES) {
+    const capturedAtMs = Date.now();
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${spot.lat}&longitude=${spot.lon}`
       + `&daily=temperature_2m_max&timezone=auto&forecast_days=2`;
     const data = await getJson<{ daily?: { time?: string[]; temperature_2m_max?: number[] } }>(url);
@@ -78,6 +95,7 @@ export async function fetchWeatherEvents(): Promise<{ text: string; events: Weat
     events.push({
       city: spot.city, country: spot.country, resolutionUrl: url,
       forecastHighC: Math.round(high * 10) / 10, targetDate: date,
+      sourceId: WEATHER_SOURCE_ID, captureVersion: WEATHER_CAPTURE_VERSION, capturedAtMs,
     });
   }
 
@@ -102,11 +120,12 @@ export async function fetchWeatherEvents(): Promise<{ text: string; events: Weat
  */
 export async function fetchLaunchEvents(): Promise<{ text: string; events: LaunchEvent[] }> {
   const url = "https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=8&mode=list";
+  const capturedAtMs = Date.now();
   const data = await getJson<{
     results?: Array<{ id?: string; name?: string; net?: string; launch_service_provider?: { name?: string } }>;
   }>(url);
 
-  const now = Date.now();
+  const now = capturedAtMs;
   const week = now + 7 * 86_400_000;
   const events: LaunchEvent[] = [];
   const seenIds = new Set<string>();
@@ -130,6 +149,9 @@ export async function fetchLaunchEvents(): Promise<{ text: string; events: Launc
       // One launch, so the oracle reads a single record rather than a list it has
       // to search through.
       resolutionUrl: `https://ll.thespacedevs.com/2.2.0/launch/${id}/`,
+      sourceId: LAUNCH_SOURCE_ID,
+      captureVersion: LAUNCH_CAPTURE_VERSION,
+      capturedAtMs,
     });
   }
 

@@ -5,6 +5,8 @@ This document describes how an expired prediction market claim transitions from 
 For transaction incident handling and operator rollback, see [`AGENT_INCIDENT_RUNBOOK.md`](AGENT_INCIDENT_RUNBOOK.md).
 For evidence hash commitment layout and verification, see [`EVIDENCE_COMMITMENT.md`](EVIDENCE_COMMITMENT.md).
 
+This document also describes the oracle decision evidence manifest: a bounded, secret-free record of the source references, capture times, and content digests used to reach each verdict (see [Decision Evidence Manifest](#decision-evidence-manifest)).
+
 ---
 
 ## Table of Contents
@@ -22,6 +24,7 @@ For evidence hash commitment layout and verification, see [`EVIDENCE_COMMITMENT.
   - [8. Settlement Policy & Research Citations](#8-settlement-policy--research-citations)
   - [9. On-Chain Submission & Bounded Retry](#9-on-chain-submission--bounded-retry)
   - [10. Post-Settlement Council Bonuses](#10-post-settlement-council-bonuses)
+- [Decision Evidence Manifest](#decision-evidence-manifest)
 - [Failure Handling Matrix](#failure-handling-matrix)
 - [Environment Configuration Knobs](#environment-configuration-knobs)
 
@@ -41,6 +44,7 @@ The settlement pipeline spans the following modules:
 | **Confidence Tiers** | `lib/oracle/confidence-tiers.ts` | Pure confidence tier thresholds (HIGH ≥ 80, MEDIUM 60–79 with `[CONTESTED]`, LOW < 60 refund) and non-API confidence capping at 75. |
 | **Unresolvable Policy** | `lib/oracle/unresolvable-policy.ts` | Explicit outcome determination (`firm`, `contested`, `draw`, `refund` with typed reasons). |
 | **Settlement Retry** | `lib/settlement-retry.ts` | Pure error classification (`malformed`, `stale`, `duplicate`, `cancelled`, `paused`, `dependency-failure`) and exponential backoff retry. |
+| **Oracle Retry Budget** | `agents/oracle/retry-budget.ts` | Per-claim bounded retry budget for evidence acquisition, isolated from transaction reconciliation retries. |
 | **Soroban Contract** | `contracts-soroban/mimir-market` | On-chain state transition to `resolved`, winner recording, and escrowing challenger payouts for pull-based redemption. |
 
 ---
@@ -60,6 +64,7 @@ sequenceDiagram
     participant H as Evidence Commitment (SHA-256)
     participant T as Confidence Tiers & Policy
     participant R as Settlement Submitter (Retry)
+    participant B as Retry Budget (per claim)
 
     Note over W: Cycle every ORACLE_POLL_INTERVAL_MS
     W->>C: getClaimCount()
@@ -69,6 +74,9 @@ sequenceDiagram
 
     loop For each expired claim (sorted by deadline)
         W->>R: settle(claim)
+        R->>B: budget = getOrCreateBudget(claimId)
+        R->>B: if budget.exhausted() -> skip claim this cycle
+        Note over B: Bounded evidence retries per claim (ORACLE_EVIDENCE_MAX_ATTEMPTS)
         R->>R: Check pauseState("oracle_settlement")
         R->>R: settlementSnapshotIsReady(claim)
 
@@ -81,6 +89,10 @@ sequenceDiagram
         end
         E-->>R: EvidenceResult (text, fetcher, failure)
         alt Evidence fetch failure
+            R->>B: budget.recordEvidenceFailure()
+            alt budget.exhausted()
+                Note over R: Mark claim as budget-exhausted; defer without monopolizing cycle
+            end
             Note over R: Defer claim to next poll (never refund on outage)
         end
 
@@ -151,12 +163,13 @@ sequenceDiagram
 ## Detailed Pipeline Stages
 
 ### 1. Poll & Claim Classification
-The worker loop in `agents/oracle/index.ts:830` polls every `ORACLE_POLL_INTERVAL_MS` (default `60000` ms).
+The worker loop in `agents/oracle/index.ts:830` polls every `ORACLE_POLL_INTERVAL_MS` (default `60000` ms), with jitter configured by `ORACLE_POLL_JITTER_MS` (default ±10%).
 - **Claim Batching:** Fetches total claim count via `getClaimCount()` and batches RPC reads in chunks of 50 via `readClaimsBatch(ids)`.
 - **Classification:** `classifyClaimsForOracle` filters claims into `expiredActive` (`state === "active"` and `deadline <= now`) and `challengeable` (`state === "open"`).
 - **Pre-Settlement Pause Check:** If `isPaused("oracle_settlement")` (`MIMIR_PAUSE_ORACLE_SETTLEMENT=1` or `MIMIR_PAUSE_ALL=1`), the loop clears the `expiredActive` queue immediately. No LLM queries, evidence purchases, or transactions occur.
 - **Deadline Sorting:** `expiredActive` claims are sorted in ascending order of deadline (`a.deadline - b.deadline`) so older expired claims settle first.
 - **Inter-Settlement Delay:** After resolving a claim, the loop waits `ORACLE_SETTLEMENT_DELAY_MS` (default `900000` ms / 15 minutes) before proceeding to the next claim to avoid transaction congestion.
+- **Per-Claim Retry Budget:** Before processing each claim, the loop consults the per-claim retry budget (`agents/oracle/retry-budget.ts`). A claim whose evidence-acquisition budget is exhausted is skipped for the remainder of the cycle so a single failing claim cannot monopolize the worker. The budget is reset when the claim is observed resolved, cancelled, or when the worker restarts.
 
 ### 2. Pre-Settlement Lifecycle Guards
 Before any computation or network requests, `settle(claim)` runs lightweight sanity checks:
@@ -174,15 +187,23 @@ Before any computation or network requests, `settle(claim)` runs lightweight san
   - HTTP 402 Payment Required: If a source requires payment and `paidFetch` is provided, `fetchViaHttp402` pays with a budgeted USDC transfer (`fetcher: "bot-paid"`).
   - Cloudflare / Scraped Fallback: If blocked by bot protection or if content is under 200 characters, falls back to Jina Reader (`https://r.jina.ai/URL`) (`fetcher: "jina"`).
 - **Outage Protection:** If evidence retrieval fails, `evidence.failure` is set. The oracle defers the claim to the next poll. **A fetch failure is never converted into an on-chain refund.**
+- **Bounded Evidence Retry Budget:** Evidence acquisition retries are tracked per claim in `agents/oracle/retry-budget.ts` and are strictly separated from transaction reconciliation retries (see [Stage 9](#9-on-chain-submission--bounded-retry)). Each failed evidence acquisition consumes one unit of the claim's budget, bounded by `ORACLE_EVIDENCE_MAX_ATTEMPTS` (default `3`). Once the budget is exhausted, the claim is skipped for the remainder of the worker cycle and re-eligible on the next poll; the budget is not shared across claims, so one failing claim cannot starve others.
 
 ### 4. Sports Finality & Grace Window
 Sports markets close betting at match kickoff, meaning the claim deadline is in the past while the match is still in progress:
 - **Grace Window Calculation:**
   $$\text{Grace Period} = \max(1, \text{SPORTS\_SETTLE\_GRACE\_HOURS} \times 3600)$$
   Defaults to 12 hours (`SPORTS_SETTLE_GRACE_HOURS`).
-- **Finality Check:** While $\text{now} \le \text{deadline} + \text{grace}$, the oracle queries the LLM via `isSportsEventFinal(claim, evidence.text)`:
-  - If the match is not definitively finished (`final: false`), settlement is deferred to a future poll.
-  - If $\text{now} > \text{deadline} + \text{grace}$, the grace window has expired. The oracle proceeds with settlement to prevent permanently locked funds during extended data outages.
+- **Policy Version & Identity:**
+  - Policy identity: `SPORTS_FINALITY_POLICY_ID` (`"sports-finality"`).
+  - Version binding: Each decision binds the policy version to the reviewed evidence timestamp (`evidence.fetchedAt`), formatted as `sports-finality:v1@<timestamp>` (or `sports-finality:v1:g<hours>h@<timestamp>` when customized).
+  - Policy identity remains visible and stable across configuration changes.
+- **Finality Check & Decision Recording:**
+  - The oracle evaluates finality heuristics via `evaluateSportsFinality(claim, evidence.text, now, { evidenceTimestamp })` (or `isSportsEventFinal`):
+    - Records the applied sports finality policy version with each decision.
+    - Emits a typed `SportsFinalityDecision` recording `policyVersion`, `policyId`, `evidenceTimestamp`, `final`, `reason`, and `graceSecs`.
+    - If the match is not definitively finished (`final: false`), settlement is deferred to a future poll.
+    - If $\text{now} > \text{deadline} + \text{grace}$, the grace window has expired (`reason: "grace_window_expired"`). The oracle proceeds with settlement to prevent permanently locked funds during extended data outages.
 
 ### 5. Verdict Generation (Solo vs. Council)
 Depending on `COUNCIL_SETTLEMENT`:
@@ -236,6 +257,7 @@ In `lib/oracle/confidence-tiers.ts`:
 - **Error Classification & Backoff:** `classifySettlementError` categorizes errors:
   - `malformed`, `stale`, `duplicate`, `cancelled`, `paused`: Non-retryable; stops immediately.
   - `dependency-failure`: Retries up to `ORACLE_SETTLEMENT_TX_MAX_ATTEMPTS` (default `3`) using exponential backoff starting at `ORACLE_SETTLEMENT_TX_RETRY_BASE_MS` (default `1000` ms) up to `ORACLE_SETTLEMENT_TX_RETRY_MAX_MS` (default `15000` ms). If exhausted, defers to next poll.
+- **Separation from Evidence Retries:** Transaction reconciliation retries are governed solely by `ORACLE_SETTLEMENT_TX_MAX_ATTEMPTS` and the backoff knobs above. They do not consume, and are not consumed by, the per-claim evidence retry budget (`ORACLE_EVIDENCE_MAX_ATTEMPTS`). A claim may exhaust its evidence budget across polls while still receiving full transaction retry attempts once evidence is successfully acquired.
 
 ### 10. Post-Settlement Council Bonuses
 If self-resolving council was used and `COUNCIL_BONUS_USDC` > 0:
@@ -243,6 +265,38 @@ If self-resolving council was used and `COUNCIL_BONUS_USDC` > 0:
 - Reserves bonus transfers in `lib/council-bonus-ledger.ts`.
 - Calls `payCouncilBonuses` to transfer USDC from the oracle wallet to jurors who achieved positive cross-entropy scores.
 - Failure of bonus transfers does not affect the already-final settlement.
+
+---
+
+## Decision Evidence Manifest
+
+The oracle worker emits a decision evidence manifest alongside each settlement decision so operators and auditors can review what evidence informed a verdict without exposing secrets.
+
+**Contents (bounded):**
+- `sources`: at most a small fixed number of entries, each with the normalized source URL (query string and fragment stripped, credentials removed), the fetcher kind (`coingecko-api`, `direct`, `bot-paid`, `jina`, or `none`), the capture time (ISO-8601 UTC), and the SHA-256 content digest of the captured evidence body.
+- `commitment`: the `evidence_hash` already produced by the canonical evidence commitment (see [`EVIDENCE_COMMITMENT.md`](EVIDENCE_COMMITMENT.md)).
+- `council`: the canonical council record summary when council settlement was used, or `"none"`.
+
+**Exclusions (never recorded):**
+- LLM provider credentials (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `GROQ_API_KEYS`, `OPENROUTER_API_KEY`, `ORACLE_GEMINI_API_KEY`) and any `ORACLE_SECRET` material.
+- Sensitive raw response bodies, including provider response payloads, HTTP headers, cookies, and x402 payment receipts. Only the digest of the evidence body is retained.
+- Full evidence text beyond the digest; the manifest is a reference, not a copy.
+
+**Bounds and compatibility:**
+- Each source digest is computed over the same bytes covered by the evidence commitment and is subject to the existing 64 KiB body limit.
+- The manifest is additive. Existing settlement, commitment, and on-chain payload behavior is unchanged; the manifest is informational and is not written to the contract.
+- Manifest generation failures are logged and do not block settlement.
+
+**Verification:** Tests use synthetic fixtures, fake transports, and temporary state directories. Coverage includes the boundary of the source count bound, redaction of credential-bearing URLs and provider keys, and the failure path where a fetch failure yields a manifest with no sources and no settlement.
+
+| Manifest field | Source | Redacted |
+|---|---|---|
+| `sources[].url` | `resolution_url` after normalization | Query, fragment, userinfo |
+| `sources[].fetcher` | `EvidenceResult.fetcher` | — |
+| `sources[].captured_at` | Evidence capture timestamp | — |
+| `sources[].digest` | SHA-256 of evidence body | Body not stored |
+| `commitment` | `evidence_hash` | — |
+| `council` | Canonical council record summary | Persona prompts |
 
 ---
 
@@ -254,6 +308,7 @@ If self-resolving council was used and `COUNCIL_BONUS_USDC` > 0:
 | Evidence URL unreachable / 5xx / timeout | `dependency-failure` | Defer claim to next poll cycle | None |
 | Cloudflare bot interstitial | — | Fall back to Jina Reader markdown extraction | None |
 | Sports event in progress (< grace window) | — | Defer claim to subsequent poll cycle | None |
+| Evidence retry budget exhausted for claim | `budget-exhausted` | Skip claim for remainder of worker cycle; re-eligible next poll | None |
 | LLM structured output invalid / unparseable | `malformed` | Retry once with `VERDICT_RETRY_SUFFIX`; if still invalid, throw and defer | None |
 | Evidence contains lone surrogate / > 64 KiB | `invalid_encoding` / `evidence_too_large` | Commitment throws; settlement aborts, retried next poll | None |
 | Model confidence < 60% | `low-confidence` | Rewrite verdict to `UNRESOLVABLE` with `[LOW CONFIDENCE — refunded]` | Full refund to all stakers |
@@ -301,3 +356,4 @@ Every environment variable read directly or indirectly by `agents/oracle/index.t
 | `ORACLE_SETTLEMENT_TX_MAX_ATTEMPTS` | `3` | Maximum transaction submission attempts for dependency/RPC failures (clamped between 1 and 5). |
 | `ORACLE_SETTLEMENT_TX_RETRY_BASE_MS` | `1000` | Initial base backoff delay in milliseconds for settlement retry attempts. |
 | `ORACLE_SETTLEMENT_TX_RETRY_MAX_MS` | `15000` | Maximum backoff delay in milliseconds for settlement retry attempts. |
+| `ORACLE_EVIDENCE_MAX_ATTEMPTS` | `3` | Maximum evidence acquisition attempts per unresolved claim before the per-claim retry budget is exhausted for the cycle (clamped between 1 and 10). Independent of transaction retry knobs. |

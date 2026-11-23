@@ -19,6 +19,71 @@ const CACHE = {
   freshnessWindowMs: 300_000,
 };
 
+function sampleResults(): AgentTradeResult[] {
+  return [
+    {
+      claimId: 101,
+      role: "creator",
+      stake: 2,
+      opposingStake: 3.1234567,
+      potentialPayout: 0,
+      state: "resolved",
+      winnerSide: "creator",
+      settledAt: 1_800_000_000_000,
+      category: "macro",
+      question: "Claim 101",
+      outcome: "won",
+      stakeAtomic: 20_000_000n,
+      pnlAtomic: 31_234_567n,
+    },
+    {
+      claimId: 102,
+      role: "challenger",
+      stake: 1.5,
+      opposingStake: 0,
+      potentialPayout: 4,
+      state: "resolved",
+      winnerSide: "creator",
+      settledAt: 1_800_000_060_000,
+      category: "macro",
+      question: "Claim 102",
+      outcome: "lost",
+      stakeAtomic: 15_000_000n,
+      pnlAtomic: -15_000_000n,
+    },
+    {
+      claimId: 103,
+      role: "creator",
+      stake: 5,
+      opposingStake: 0,
+      potentialPayout: 0,
+      state: "cancelled",
+      winnerSide: "",
+      settledAt: 1_800_000_120_000,
+      category: "macro",
+      question: "Claim 103",
+      outcome: "refunded",
+      stakeAtomic: 50_000_000n,
+      pnlAtomic: 0n,
+    },
+    {
+      claimId: 104,
+      role: "challenger",
+      stake: 4.25,
+      opposingStake: 0,
+      potentialPayout: 9,
+      state: "open",
+      winnerSide: "",
+      settledAt: 1_800_000_180_000,
+      category: "macro",
+      question: "Claim 104",
+      outcome: "open",
+      stakeAtomic: 42_500_000n,
+      pnlAtomic: 0n,
+    },
+  ];
+}
+
 test("accepts a finite settled-performance payload", () => {
   assert.equal(
     isPortfolioPerformanceResponse({

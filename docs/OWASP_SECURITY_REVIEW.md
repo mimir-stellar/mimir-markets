@@ -20,7 +20,9 @@ message, and a `C…` contract account — whose `__check_auth` would need a net
 trip — is **refused by default** rather than guessed at, so nobody who can merely POST
 can claim to be a contract account. Research performs URL, port, credentials, DNS/IP and
 every-redirect validation, bounds MIME/bytes/time, and has global/per-agent kill
-switches. React output is escaped and the repository has no dynamic code execution, shell
+switches. Offline research diagnostics expose bounded per-hop scheme, domain, and SSRF
+verdicts with redacted URL identities over captured redirect chains without issuing network requests.
+React output is escaped and the repository has no dynamic code execution, shell
 execution from request data, credentialed wildcard CORS, or unsafe HTML rendering.
 
 The review added CSP, HSTS, frame denial, MIME-sniffing protection, referrer and

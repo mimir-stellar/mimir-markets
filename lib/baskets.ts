@@ -18,15 +18,57 @@ import { isValidBps } from "./money";
  * This means a captured basket-creation signature cannot be replayed to
  * insert duplicate baskets.
  */
+/**
+ * Deterministic composition revision (#892).
+ *
+ * A stable hash over the canonicalized member set (agentId ascending,
+ * tie-broken by weightBps). Two baskets with the same members in different
+ * input orders yield the same revision; any change to membership or weights
+ * yields a different revision. Uses DJB2 over the canonical string — small,
+ * dependency-free, and stable across hosts. Not a cryptographic hash: this
+ * is an equality check on an in-process value, not a security primitive.
+ */
+export function compositionRevision(
+  members: readonly { agentId: string; weightBps: number }[],
+): string {
+  const canonical = canonicalizeMembers(members);
+  let hash = 5381;
+  for (const member of canonical) {
+    const chunk = `${member.agentId}:${member.weightBps};`;
+    for (let i = 0; i < chunk.length; i++) {
+      hash = ((hash * 33) ^ chunk.charCodeAt(i)) >>> 0;
+    }
+  }
+  return `c${hash.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * True when a suggestion was built from a different composition than the
+ * one currently in force. Callers use this to reject a stale reviewed action
+ * before applying it, so new weights never silently override old consent.
+ */
+export function isSuggestionStale(
+  suggestion: { compositionRevision?: string },
+  currentMembers: readonly { agentId: string; weightBps: number }[],
+): boolean {
+  if (!suggestion.compositionRevision) return false;
+  return suggestion.compositionRevision !== compositionRevision(currentMembers);
+}
+
 export function basketMessage(args: {
   name: string; creator: string; members: Array<{ agentId: string; weightBps: number }>;
   nonce: string; expiresAt: number;
 }): string {
+  // Validate before serialization (#894): a signed message must not carry a
+  // contradictory composition. Canonicalize so signature bytes are stable
+  // regardless of the caller's array order.
+  validateBasketComposition(args.members);
+  const canonicalMembers = canonicalizeMembers(args.members);
   return [
     "Mimir basket",
     `name: ${args.name}`,
     `creator: ${args.creator}`,
-    `members: ${args.members.map((m) => `${m.agentId}:${m.weightBps}`).join(",")}`,
+    `members: ${canonicalMembers.map((m) => `${m.agentId}:${m.weightBps}`).join(",")}`,
     `nonce: ${args.nonce}`,
     `expiresAt: ${new Date(args.expiresAt).toISOString()}`,
   ].join("\n");
@@ -37,7 +79,8 @@ export function basketMessage(args: {
  * signed. Matches TRANSFER_EXPIRY_MS so the clock-skew budget is the same
  * across all signed mutations.
  */
-export const BASKET_EXPIRY_MS = 5 * 60_000; // 5 minutes
+export const BASKET_CREATION_EXPIRY_MS = 5 * 60_000; // 5 minutes
+export const BASKET_EXPIRY_MS = BASKET_CREATION_EXPIRY_MS;
 
 /**
  * How long a transfer authorisation is valid from the moment it is signed.
@@ -53,7 +96,7 @@ export const TRANSFER_EXPIRY_MS = 5 * 60_000; // 5 minutes
  * What the CURRENT owner signs to authorise a transfer.
  *
  * Both addresses are interpolated verbatim — Stellar strkeys are case-sensitive
- * base32 and must never be lowercased. The message now also includes:
+ * base32 and must never be lowercased. The message also includes:
  *
  *  - `nonce`    — a client-generated UUID, stored on the server after first use
  *                  so the same signed message is rejected on any replay attempt.
@@ -160,11 +203,16 @@ export function parsePerMarketUsdc(raw: string): PerMarketParseResult {
  *
  * Kept here (the pure computation module, no server-only dependency) so that
  * tests and non-server code can verify the curated-basket guard without pulling
- * in lib/server/basket-directory which carries `import "server-only"".
+ * in lib/server/basket-directory which carries `import "server-only"`.
  *
- * This list must stay in sync with BASKT
+ * This list must stay in sync with the basket directory.
  */
-export const CURATED_BASKET_IDS: readonly string[] = [];
+export const CURATED_BASKET_IDS: readonly string[] = [
+  "council-core",
+  "philosopher-spread",
+  "byoa-traders",
+  "house-and-street",
+];
 
 /**
  * A single point on a basket's NAV series.
@@ -182,16 +230,26 @@ export interface NavPoint {
 export interface NavMember {
   agentId: string;
   weightBps: number;
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
+}
+
+export interface BasketAgentWeight {
+  agentId: string;
+  weightBps: number;
   category: string;
   mode: string;
   paused?: boolean;
   stale?: boolean;
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
 }
+
 export interface BasketReturnPoint { timestamp: number; returnsBps: Record<string, number> }
 export interface BasketPolicy { maxSingleAgentBps: number; maxCategoryBps: number; staleSignalAction: "skip" | "pause"; failedCopyAction: "keep_idle" | "pause" }
 export interface BasketSnapshot { timestamp: number; navAtomic: bigint; drawdownBps: number }
 
-export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n ;
+export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n;
 
 export const DEFAULT_BASKET_POLICY: BasketPolicy = {
   maxSingleAgentBps: 4_000,
@@ -221,10 +279,15 @@ export interface BasketExposurePreview {
   policy: BasketPolicy;
 }
 
+/**
+ * A member's contribution to the basket NAV.
+ */
+export interface NavMember {
+  agentId: string;
+  weightBps: number;
   /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
   returns: number[];
 }
-
 /**
  * Build a NAV series from basket member performance.
  *
@@ -250,7 +313,7 @@ export function buildNavSeries(
   if (totalWeight <= 0) return [];
 
   const periods = Math.min(...validMembers.map((m) => m.returns.length));
-  if (periods < 1 || !completeSeries(validMembers, periods)) return [];
+  if (periods < 1) return [];
 
   const points: NavPoint[] = [];
   let nav = 100;
@@ -326,8 +389,7 @@ export function dailyReturnPoints(results: readonly BasketAgentResult[]): Basket
   for (const [day, agents] of [...byDay.entries()].sort((a, b) => a[0] - b[0])) {
     const returnsBps: Record<string, number> = {};
     for (const [agentId, { pnl, stake }] of agents) {
-      if (stake <= 0n) continue;
-      returnsBps[agentId] = Number((pnl * 10_000n ) / stake);
+      returnsBps[agentId] = Number((pnl * 10_000n) / stake);
     }
     points.push({ timestamp: day, returnsBps });
   }
@@ -338,4 +400,90 @@ function completeSeries(members: readonly NavMember[], periods: number): boolean
   return members.every((m) =>
     m.returns.slice(0, periods).every((r) => Number.isFinite(r)),
   );
+}
+
+/** Stellar Testnet USDC SAC decimals (7, not 6). */
+export const MIRROR_USDC_DECIMALS = 7;
+
+/** 1 USDC in atomic units (10^7). */
+export const MIRROR_USDC_UNIT = 10_000_000n;
+
+/**
+ * Convert a non-negative USDC amount into exact 7-decimal atomic units.
+ *
+ * - `bigint` inputs are treated as already-atomic units.
+ * - `string` inputs are parsed as decimal USDC with up to 7 fractional digits.
+ * - `number` inputs are normalized to 7 fixed decimal places before integer parsing
+ *   to avoid IEEE-754 representation artifacts (e.g. `0.1 + 0.2`).
+ */
+export function toUsdcAtomic(amount: bigint | string | number): bigint {
+  if (typeof amount === "bigint") {
+    if (amount < 0n) throw new Error("USDC amount must be non-negative");
+    return amount;
+  }
+  if (typeof amount === "number") {
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new Error("USDC amount must be a finite non-negative number");
+    }
+    const [whole, fraction = ""] = amount.toFixed(MIRROR_USDC_DECIMALS).split(".");
+    return BigInt(whole) * MIRROR_USDC_UNIT + BigInt(fraction.padEnd(MIRROR_USDC_DECIMALS, "0"));
+  }
+  const trimmed = amount.trim();
+  if (!/^\d+(?:\.\d{1,7})?$/.test(trimmed)) {
+    throw new Error("Invalid USDC amount");
+  }
+  const [whole, fraction = ""] = trimmed.split(".");
+  return BigInt(whole) * MIRROR_USDC_UNIT + BigInt(fraction.padEnd(MIRROR_USDC_DECIMALS, "0"));
+}
+
+/**
+ * Compute the exact atomic mirror stake for a subscriber's per-market budget
+ * scaled by a basket member's basis-point weight.
+ *
+ * Uses integer division (`(budgetAtomic * weightBps) / 10_000n`) so the result
+ * never suffers floating-point drift or rounds up past the subscriber's cap.
+ * Returns `0n` for invalid or non-positive inputs.
+ */
+export function computeMirrorAmountAtomic(
+  perMarketUsdc: bigint | string | number,
+  weightBps: number,
+): bigint {
+  if (!isValidBps(weightBps) || weightBps === 0) return 0n;
+  let budgetAtomic: bigint;
+  try {
+    budgetAtomic = toUsdcAtomic(perMarketUsdc);
+  } catch {
+    return 0n;
+  }
+  if (budgetAtomic <= 0n) return 0n;
+  return (budgetAtomic * BigInt(weightBps)) / 10_000n;
+}
+
+/**
+ * Format an exact 7-decimal atomic USDC string (or bigint) for display in a
+ * UI consumer without passing through IEEE-754 floats.
+ *
+ * When `fixedDecimals` is provided, renders exactly that many fractional digits
+ * (truncated toward zero, e.g. `"6666000"` with `2` -> `"0.66"`). When omitted,
+ * renders the exact decimal value with trailing fractional zeros stripped
+ * (e.g. `"6666000"` -> `"0.6666"`).
+ */
+export function formatMirrorAtomicUsdc(
+  atomic: string | bigint,
+  fixedDecimals?: number,
+): string {
+  const value = typeof atomic === "bigint" ? atomic : BigInt(atomic);
+  const sign = value < 0n ? "-" : "";
+  const abs = value < 0n ? -value : value;
+  const whole = abs / MIRROR_USDC_UNIT;
+  const rawFraction = (abs % MIRROR_USDC_UNIT).toString().padStart(MIRROR_USDC_DECIMALS, "0");
+
+  if (fixedDecimals !== undefined) {
+    const digits = Math.max(0, Math.min(MIRROR_USDC_DECIMALS, Math.trunc(fixedDecimals)));
+    if (digits === 0) return `${sign}${whole}`;
+    return `${sign}${whole}.${rawFraction.slice(0, digits)}`;
+  }
+
+  const trimmed = rawFraction.replace(/0+$/, "");
+  return trimmed ? `${sign}${whole}.${trimmed}` : `${sign}${whole}`;
 }

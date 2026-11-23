@@ -319,6 +319,11 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
         enum: [...FRESHNESS_STATUSES],
         description: "`live` within freshnessWindowMs, `cached` within 5x window, `stale` beyond.",
       },
+      staleReason: {
+        type: ["string", "null"],
+        enum: ["provider_lag", "projection_failure", "unknown_coverage", null],
+        description: "Why an index snapshot is stale. Null for live, cached, and direct-contract reads.",
+      },
       lastUpdatedAt: {
         type: ["string", "null"],
         description: "ISO-8601 timestamp of the last sync, or null if the index has not synced.",
@@ -332,6 +337,28 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
         type: "integer",
         minimum: 1,
         description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads).",
+      },
+      projection: {
+        type: "object",
+        description: "Projection completeness metadata for the snapshot (`lib/vs-freshness.ts`).",
+        required: ["trustedLedger", "knownGaps", "projectionGeneration"],
+        additionalProperties: false,
+        properties: {
+          trustedLedger: {
+            type: ["integer", "null"],
+            description: "Highest verified ledger sequence folded into the projection, or null when unavailable.",
+          },
+          knownGaps: {
+            type: "integer",
+            minimum: 0,
+            description: "Count of known gaps or missing event spans in the projection.",
+          },
+          projectionGeneration: {
+            type: "integer",
+            minimum: 1,
+            description: "Active schema/projection generation version.",
+          },
+        },
       },
     },
   };
@@ -664,6 +691,11 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
       points: { type: "array", items: PnlPointSchema },
       settled: { type: "integer", minimum: 0, description: "Total number of settled markets for this address." },
       cache: VSCacheFreshness,
+      state: {
+        type: "string",
+        enum: ["available", "unavailable", "insufficient-history"],
+        description: "Explicit performance state without inventing zero returns: available when settled history exists, insufficient-history when no settled samples exist, unavailable when data could not be validated.",
+      },
     },
   };
 
@@ -1121,6 +1153,7 @@ export function buildPublicEndpointExamples(): PublicEndpointExample[] {
     points: cumulativePnlPoints(results),
     settled: performance.settled,
     cache: exampleFreshness("index", 300_000),
+    state: "available",
   };
   const performanceOk: PublicEndpointExample = {
     path: "/api/performance/{address}",
