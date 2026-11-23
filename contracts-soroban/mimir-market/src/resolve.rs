@@ -24,8 +24,27 @@ use crate::escrow;
 use crate::events;
 use crate::fees;
 use crate::storage;
-use crate::types::{Challenger, Claim, ClaimState, Error, PayoutQuote, Verdict, WinnerSide};
+use crate::types::{
+    Challenger, Claim, ClaimState, Error, PayoutQuote, ResolutionExpirationPolicy, Verdict,
+    WinnerSide, CHALLENGE_LOCK_SECONDS, MAX_CONFIDENCE, ORACLE_TIMELOCK_SECONDS,
+    RESOLUTION_EXPIRY_SECONDS, VERDICT_VERSION_V1,
+};
 use crate::util;
+
+/// Return the currently approved oracle resolution and claim expiration policy
+/// descriptor enforced by `claims` and `resolve`.
+pub fn resolution_expiration_policy() -> ResolutionExpirationPolicy {
+    ResolutionExpirationPolicy {
+        oracle_only_resolution: true,
+        challenge_lock_seconds: CHALLENGE_LOCK_SECONDS,
+        oracle_timelock_seconds: ORACLE_TIMELOCK_SECONDS,
+        resolution_expiry_seconds: RESOLUTION_EXPIRY_SECONDS,
+        open_claim_expiry_cancels: true,
+        active_claim_auto_expires: false,
+        verdict_version: VERDICT_VERSION_V1,
+        max_confidence: MAX_CONFIDENCE,
+    }
+}
 
 pub fn resolve_claim(
     env: &Env,
@@ -43,6 +62,67 @@ pub fn resolve_claim(
         confidence,
         evidence_hash,
     )
+}
+
+/// The structural lifecycle check for a resolution, shared by
+/// `resolve_claim_versioned` and `preflight_claim` (#779).
+///
+/// Pure: reads no storage, writes nothing, takes only the claim and the current
+/// timestamp. The resolve path calls this *after* the idempotency-replay check
+/// so an exact replay of an already-resolved claim still succeeds; preflight
+/// calls it unconditionally because it is answering the caller's question about
+/// the *current* state, not deciding whether a replay is safe.
+///
+/// Returns the exact `Error` the resolve path used to return inline, so
+/// extracting this helper leaves `resolve_claim_versioned` behaviour
+/// byte-identical.
+pub(crate) fn check_resolvable(claim: &Claim, now: u64) -> Result<(), PreflightReason> {
+    if claim.state != ClaimState::Active {
+        return Err(PreflightReason::NotActive);
+    }
+    if now < claim.deadline {
+        return Err(PreflightReason::NotYetExpired);
+    }
+    Ok(())
+}
+
+/// Read-only preflight for a claim resolution (#779).
+///
+/// Answers "would the structural lifecycle checks pass right now?" without
+/// mutating any state and without requiring authorization. See
+/// [`ClaimPreflight`] for what the returned booleans mean and what this
+/// deliberately does NOT claim about a subsequent signed execution.
+pub fn preflight_claim(env: &Env, claim_id: u64) -> Result<ClaimPreflight, Error> {
+    let claim = storage::get_claim(env, claim_id)?;
+    let now = env.ledger().timestamp();
+
+    let mut missing: Vec<PreflightReason> = Vec::new(env);
+    let lifecycle_ok = match check_resolvable(&claim, now) {
+        Ok(()) => true,
+        Err(reason) => {
+            missing.push_back(reason);
+            false
+        }
+    };
+
+    // The oracle is required for any successful `resolve_claim` submission, so
+    // this is a property of the contract's auth model, not of the specific
+    // claim. Reported separately so a caller cannot confuse "structurally
+    // eligible" with "will succeed".
+    let requires_oracle_auth = true;
+
+    // No caller payload exists in a pure preflight, so there are no
+    // public-constraint rejections to report. A later overload that accepts
+    // a candidate `summary` can tighten this without changing the shape.
+    let constraints_ok = true;
+
+    Ok(ClaimPreflight {
+        eligible: lifecycle_ok && constraints_ok,
+        lifecycle_ok,
+        constraints_ok,
+        requires_oracle_auth,
+        missing_reasons: missing,
+    })
 }
 
 /// Versioned entry point. The verdict's encoding version is validated before
@@ -73,11 +153,14 @@ pub fn resolve_claim_versioned(
             return Ok(());
         }
     }
-    if claim.state != ClaimState::Active {
-        return Err(Error::ClaimNotActive);
-    }
-    if env.ledger().timestamp() < claim.deadline {
-        return Err(Error::NotYetExpired);
+    // Shared with preflight_claim so the two cannot drift (#779). The mapping
+    // back to `Error` reproduces the exact variants this function returned
+    // before the helper was extracted.
+    match check_resolvable(&claim, env.ledger().timestamp()) {
+        Ok(()) => {}
+        Err(PreflightReason::NotActive) => return Err(Error::ClaimNotActive),
+        Err(PreflightReason::NotYetExpired) => return Err(Error::NotYetExpired),
+        Err(PreflightReason::ClaimNotFound) => return Err(Error::ClaimNotFound),
     }
     
     // Emit deadline reached event for active claims entering settlement window
@@ -91,7 +174,7 @@ pub fn resolve_claim_versioned(
     }
     .publish(env);
 
-    if confidence > 100 {
+    if confidence > MAX_CONFIDENCE {
         return Err(Error::InvalidConfidence);
     }
     // Bound the summary before any state is written. A claim created under the

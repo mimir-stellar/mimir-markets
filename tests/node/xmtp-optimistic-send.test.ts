@@ -14,8 +14,10 @@ type Row = {
   [key: string]: unknown;
 };
 
+type NormalizeInput = string | null | undefined;
+
 describe("normalizeXmtpMessageId", () => {
-  const cases: Array<[string | null | undefined, returnType<typeof normalizeXmtpMessageId>]> = [
+  const cases: Array<[NormalizeInput, string | null]> = [
     ["abc123", "abc123"],
     ["  abc123  ", "abc123"],
     ["ABC123", "abc123"],
@@ -25,10 +27,9 @@ describe("normalizeXmtpMessageId", () => {
     [undefined, null],
   ];
 
-  it.each("normalizes %s -> %s", (input, expected) => {
-    expect(normalizeXmtpMessageId(input as any)).to.toBequal(expected);
+  it.each(cases)("normalizes %s -> %s", (input, expected) => {
+    expect(normalizeXmtpMessageId(input as any)).toEqual(expected);
   });
-
 });
 
 describe("decodedMessageMatchesPending", () => {
@@ -77,10 +78,9 @@ describe("decodedMessageMatchesPending", () => {
     },
   ];
 
-  it.each("$name", ({ decoded, expected }) => {
-    expect(decodedMessageMatchesPending(decoded as any, pending as any)).to.toBequal(expected);
+  it.each(cases)("$name", ({ decoded, expected }) => {
+    expect(decodedMessageMatchesPending(decoded as any, pending as any)).toEqual(expected);
   });
-
 });
 
 describe("mergeThreadDisplayRows", () => {

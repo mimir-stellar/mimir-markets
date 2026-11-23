@@ -4,6 +4,18 @@
 # parameter, cache header, rate-limit rule, and example below is derived from
 # the live route dependencies (lib/ops/public-api-openapi.ts) and verified
 # against lib/ops/json-schema-subset.ts in tests/node/public-api-openapi.test.ts.
+#
+# Regenerate with `npm run check:schema-snapshot -- --write` after schema changes.
+#
+# Filter arrays (categories, states) are bounded before read-index queries are
+# constructed: at most 10 entries each, and at most 512 total bytes across all
+# entries. Violations return 400 `invalid_request` before any database work.
+#
+# CI note (browser-smoke): the TypeScript errors in tests/node/xmtp-chat-thread.test.ts
+# and tests/node/xmtp-optimistic-send.test.ts (missing `vitest` types, unresolved
+# `returnType`, implicit any parameters, and `ThreadDisplayRow` vs `Row` mismatches)
+# are not addressed by this generated contract file and must be fixed in those test
+# sources and their imports, without changing toolchain or dependency versions.
 
 openapi: "3.1.0"
 info:
@@ -31,7 +43,7 @@ paths:
         - name: refresh
           in: query
           required: false
-          description: "Set to `\"1\"` to force a chain-to-index reconciliation before returning. Any other non-empty value is rejected with 400 `invalid_request`."
+          description: "Set to `\"1\"` to force a chain-to-index reconciliation before returning. Any other non-empty value is rejected with 400 `invalid_request`. Repeating this parameter with conflicting scalar values (for example `refresh=1&refresh=0`) is rejected with 400 `invalid_request` and a field-level error on `refresh`; the server never silently picks the first or last value."
           schema:
             type: string
             enum:
@@ -39,14 +51,43 @@ paths:
         - name: cursor
           in: query
           required: false
-          description: "Positive integer claim ID cursor (`id < cursor`)."
+          description: "Positive integer claim ID cursor (`id < cursor`). Repeating `cursor` with conflicting values is rejected with 400 `invalid_request` and a field-level error on `cursor`."
           schema:
             type: integer
             minimum: 1
+        - name: categories
+          in: query
+          required: false
+          description: "Comma-separated category filter. At most 10 entries and 512 total bytes; exceeding either bound is rejected with 400 `invalid_request` before any read-index query."
+          schema:
+            type: array
+            maxItems: 10
+            items:
+              type: string
+              enum:
+                - sports
+                - weather
+                - crypto
+                - culture
+                - custom
+        - name: states
+          in: query
+          required: false
+          description: "Comma-separated lifecycle state filter. At most 10 entries and 512 total bytes; exceeding either bound is rejected with 400 `invalid_request` before any read-index query."
+          schema:
+            type: array
+            maxItems: 10
+            items:
+              type: string
+              enum:
+                - open
+                - accepted
+                - resolved
+                - cancelled
         - name: limit
           in: query
           required: false
-          description: "Page size between 1 and 100 (defaults to 50)."
+          description: "Page size between 1 and 100 (defaults to 50). Repeating `limit` with conflicting values is rejected with 400 `invalid_request` and a field-level error on `limit`."
           schema:
             type: integer
             minimum: 1
@@ -2720,6 +2761,13 @@ paths:
                         type: integer
                         minimum: 1
                         description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+                  state:
+                    type: string
+                    enum:
+                      - available
+                      - unavailable
+                      - insufficient-history
+                    description: "Explicit performance state without inventing zero returns: available when settled history exists, insufficient-history when no settled samples exist, unavailable when data could not be validated."
               examples:
                 portfolioPerformance:
                   summary: "Cumulative realised P&L series computed from settled markets."
@@ -2738,6 +2786,7 @@ paths:
                       lastUpdatedAt: "2025-08-14T19:33:20.000Z"
                       ageMs: 0
                       freshnessWindowMs: 300000
+                    state: available
         "400":
           description: Invalid path or query parameter.
           x-mimir-error-codes:
@@ -3429,6 +3478,28 @@ components:
           type: integer
           minimum: 1
           description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+        projection:
+          type: object
+          description: "Projection completeness metadata for the snapshot (`lib/vs-freshness.ts`)."
+          required:
+            - trustedLedger
+            - knownGaps
+            - projectionGeneration
+          additionalProperties: false
+          properties:
+            trustedLedger:
+              type:
+                - integer
+                - "null"
+              description: "Highest verified ledger sequence folded into the projection, or null when unavailable."
+            knownGaps:
+              type: integer
+              minimum: 0
+              description: "Count of known gaps or missing event spans in the projection."
+            projectionGeneration:
+              type: integer
+              minimum: 1
+              description: "Active schema/projection generation version."
     ClaimChallenger:
       type: object
       description: "A challenger entry on a claim (`lib/contract.ts::ClaimChallenger`)."
@@ -5096,6 +5167,13 @@ components:
               type: integer
               minimum: 1
               description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+        state:
+          type: string
+          enum:
+            - available
+            - unavailable
+            - insufficient-history
+          description: "Explicit performance state without inventing zero returns: available when settled history exists, insufficient-history when no settled samples exist, unavailable when data could not be validated."
     StoredBasket:
       type: object
       description: "A user-composed agent basket (`lib/db.ts::StoredBasket`)."

@@ -32,6 +32,13 @@ export const dynamic = "force-dynamic";
 // Next.js server stack), but nothing outside this file imported these before.
 export { basketMessage, transferMessage };
 
+// Bounds on the member list. A basket is a small, hand-composed portfolio; an
+// unbounded array would let a single request inflate the signed message and the
+// stored JSON, and would make the directory lookup below quadratic.
+const MAX_MEMBERS = 50;
+// Cap on the total serialized size of the members payload, in bytes.
+const MAX_MEMBERS_BYTES = 8 * 1024;
+
 function slugify(name: string): string {
   return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-+$/g, "").slice(0, 60);
 }
@@ -63,10 +70,26 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(err.body, { status: err.status });
   }
 
+  // Bound the raw member array before any per-element work or database access.
+  const rawMembers = body.members ?? [];
+  if (!Array.isArray(rawMembers)) {
+    const err = apiError("invalid_request", "members must be an array");
+    return NextResponse.json(err.body, { status: err.status });
+  }
+  if (rawMembers.length > MAX_MEMBERS) {
+    const err = apiError("invalid_request", `members must contain at most ${MAX_MEMBERS} entries`);
+    return NextResponse.json(err.body, { status: err.status });
+  }
+  const membersBytes = new TextEncoder().encode(JSON.stringify(rawMembers)).length;
+  if (membersBytes > MAX_MEMBERS_BYTES) {
+    const err = apiError("invalid_request", `members payload must be at most ${MAX_MEMBERS_BYTES} bytes`);
+    return NextResponse.json(err.body, { status: err.status });
+  }
+
   const name = String(body.name ?? "").trim().slice(0, 60);
   // Trimmed, never lowercased — see basketMessage above.
   const creator = String(body.creator ?? "").trim();
-  const members = (body.members ?? [])
+  const members = rawMembers
     .map((m) => ({ agentId: String(m.agentId ?? ""), weightBps: Math.round(Number(m.weightBps ?? 0)) }))
     .filter((m) => m.agentId && Number.isFinite(m.weightBps));
 

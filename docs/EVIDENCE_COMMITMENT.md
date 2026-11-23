@@ -94,6 +94,24 @@ oracle does not settle them and `gatherCouncilVerdict` returns `null` first.
 bytes alone, for readers who only want to check the public body before rebuilding
 the full framed commitment.
 
+## Redacted research incident bundle
+
+A research incident bundle is a redacted, deterministic summary of a research gateway run that operators can share when investigating a failure. It is built from the gateway's request policy, source digests and bounded failure categories.
+
+Included:
+
+- request policy (per-agent budgets and allowed fetch routes),
+- source digests (SHA-256 of the captured snapshot bodies, never the bodies themselves),
+- bounded failure categories (a fixed enum, not raw error messages).
+
+Excluded by construction:
+
+- purchased private content (paid or gated source bodies),
+- provider credentials and API keys,
+- prompts, raw model reasoning, wallet and payout addresses.
+
+The bundle is exported as canonical JSON with fixed key order so two exports of the same run produce identical bytes. Coverage asserts the redaction boundary, including the failure case where a credential appears inside a source URL.
+
 ## Read-index storage
 
 `lib/ops/projection.ts` stores `evidenceHash` from `ClaimResolved` events into the
@@ -118,6 +136,31 @@ before comparison: any `0x` prefix is stripped and both sides are lowercased. Th
 matches the normalization applied by `verifyEvidenceCommitment` and ensures the
 comparison is correct regardless of which encoding path produced each value.
 
+## Proposal approval binding (market draft digest)
+
+Proposal approval is bound to an immutable canonical market draft digest so that
+execution cannot proceed against a draft whose approved fields have changed.
+
+The digest commits to the following approved draft fields:
+
+- `wording` (the market question text)
+- `source` (the resolution source commitment)
+- `stake` (integer USDC, no fractional units)
+- `deadline` (the market close timestamp)
+
+The digest is computed with the same canonical framing rules as the evidence
+commitment above (fixed key order, length-framed fields, SHA-256 bare lowercase
+hex). The review route records this digest at approval time.
+
+Execution (`POST` market creation after approval) recomputes the digest from the
+current draft and rejects the request if it does not equal the approved digest.
+Any change to `wording`, `source`, `stake` or `deadline` after approval therefore
+fails closed. Approval signatures continue to be verified through the signed
+request window in `lib/signed-window.ts`.
+
+Existing approved proposals recorded before this change have no digest and are
+rejected for execution until re-approved; no silent backfill is performed.
+
 ## Migration and rollback
 
 - Digests have a new meaning: the previous value was a hash over a plain string
@@ -129,3 +172,11 @@ comparison is correct regardless of which encoding path produced each value.
 - Rollback is a code revert, not an env toggle: there is deliberately no switch to
   restore the ambiguous concatenation. The settled-on-chain digest is the record,
   and it is not rewritten by a redeploy.
+
+## Research citation provenance view
+
+[`ResearchSourceCitations.tsx`](../components/research/ResearchSourceCitations.tsx) exposes an expandable, bounded (`max-h-60 overflow-y-auto`) detail card via [`CitationProvenanceView.tsx`](../components/research/CitationProvenanceView.tsx) backed by [`lib/research/citations.ts`](../lib/research/citations.ts):
+
+- `ResearchCitationView` carries `capturedAt`, `capturedAtIso` (ISO 8601), `digestStatus` (`"verified" | "malformed" | "missing"`), and `sourceAvailability` (`"available" | "stale" | "unavailable" | "unverified"`), alongside `contentHash` (`64`-char SHA-256 hex digest with clipboard copy state) and `status` (`CitationRowStatus`).
+- **Source availability is strictly decoupled from claim truth value**: `"available"` and `"verified"` only indicate that a snapshot was fetched and its cryptographic digest is well-formed, never asserting that a market claim is true or how it resolves on-chain.
+- Both rendered rows and callers (`citationsFromContextPack`, `citationsFromResolutionSource`) retain backward-compatible fields (`capturedAt` remains optional on resolution cards).
