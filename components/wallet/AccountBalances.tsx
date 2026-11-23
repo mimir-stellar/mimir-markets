@@ -44,7 +44,7 @@ type Action = "withdraw" | "fees" | null;
 
 export default function AccountBalances({ className = "" }: { className?: string }) {
   const t = useTranslations("wallet");
-  const { address, isConnected, signer } = useWallet();
+  const { address, isConnected, signer, sessionRevision } = useWallet();
   const trustline = useUsdcTrustline();
 
   const [usdc, setUsdc] = useState<number | null>(null);
@@ -87,7 +87,7 @@ export default function AccountBalances({ className = "" }: { className?: string
       console.warn("[AccountBalances] read failed", err);
       setLoadFailed(true);
     }
-  }, [address]);
+  }, [address, sessionRevision]);
 
   useEffect(() => {
     void load();

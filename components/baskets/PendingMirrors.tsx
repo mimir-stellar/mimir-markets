@@ -29,6 +29,7 @@ import { useTranslations } from "next-intl";
 
 import { useWallet } from "@/lib/wallet";
 import { challengeClaim } from "@/lib/contract";
+import { formatMirrorAtomicUsdc } from "@/lib/baskets";
 import { evaluateUsdcTrustlineGate } from "@/lib/usdcTrustlineGate";
 import Link from "next/link";
 import {
@@ -43,8 +44,8 @@ interface Mirror {
   question: string;
   agentId: string;
   agentName: string;
-  memberStakeUsdc: number;
-  mirrorUsdc: number;
+  memberStakeAtomic: string;
+  mirrorAmountAtomic: string;
   side?: string;
   marketId?: string;
   weightBps: number;
@@ -64,6 +65,7 @@ export function PendingMirrors() {
     hasSigner: Boolean(signer),
   });
   const [mirrors, setMirrors] = useState<Mirror[]>([]);
+  const [incompleteSummary, setIncompleteSummary] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -76,8 +78,14 @@ export function PendingMirrors() {
       const response = await fetch(`/api/baskets/mirrors?subscriber=${address}`);
       const payload = await response.json();
       setMirrors(Array.isArray(payload.mirrors) ? payload.mirrors : []);
+      setIncompleteSummary(
+        payload.complete === false && typeof payload.failureSummary?.summary === "string"
+          ? payload.failureSummary.summary
+          : null,
+      );
     } catch {
       setMirrors([]);
+      setIncompleteSummary("Could not load the mirror queue right now.");
     } finally {
       setLoading(false);
     }
@@ -101,7 +109,11 @@ export function PendingMirrors() {
     try {
       // One call, one signature. The auth entry inside it is what moves the USDC,
       // so there is no approve step to get wrong and no allowance left behind.
-      const result = await challengeClaim(signer, item.claimId, item.mirrorUsdc);
+      const result = await challengeClaim(
+        signer,
+        item.claimId,
+        Number(formatMirrorAtomicUsdc(item.mirrorAmountAtomic)),
+      );
       setDone((current) => ({ ...current, [item.claimId]: result.txHash || "sent" }));
       // Refresh rather than splice: the queue is derived from chain state, and the
       // authoritative answer to "is it still pending" is the server's.
@@ -119,7 +131,7 @@ export function PendingMirrors() {
   }
 
   if (!isConnected) return null;
-  if (!loading && mirrors.length === 0) return null;
+  if (!loading && mirrors.length === 0 && !incompleteSummary) return null;
 
   const blocked = !trustlineGate.allowed;
 
@@ -134,6 +146,15 @@ export function PendingMirrors() {
           funds are held on your behalf.
         </p>
       </div>
+
+      {incompleteSummary && (
+        <p
+          role="status"
+          className="mb-3 border border-pv-amber/40 bg-pv-amber/10 px-3 py-2 text-[12px] text-pv-amber"
+        >
+          {incompleteSummary}
+        </p>
+      )}
 
       <UsdcTrustlineGate
         trustline={trustline}
@@ -157,7 +178,7 @@ export function PendingMirrors() {
               </span>
               <span className="block font-mono text-[10px] text-pv-muted">
                 {item.basketName} · {item.agentName} staked{" "}
-                {item.memberStakeUsdc.toFixed(2)} · your weight{" "}
+                {formatMirrorAtomicUsdc(item.memberStakeAtomic, 2)} · your weight{" "}
                 {(item.weightBps / 100).toFixed(0)}%
               </span>
             </span>
@@ -167,10 +188,10 @@ export function PendingMirrors() {
               <Link
                 href={`/vs/${item.claimId}?side=${encodeURIComponent(
                   item.side ?? "yes",
-                )}&amount=${encodeURIComponent(item.mirrorUsdc.toFixed(2))}`}
+                )}&amount=${encodeURIComponent(formatMirrorAtomicUsdc(item.mirrorAmountAtomic, 2))}`}
                 className="btn-compact-primary shrink-0 px-3 py-1.5 text-[12px]"
               >
-                Mirror {item.mirrorUsdc.toFixed(2)} USDC
+                Mirror {formatMirrorAtomicUsdc(item.mirrorAmountAtomic, 2)} USDC
               </Link>
             )}
           </li>

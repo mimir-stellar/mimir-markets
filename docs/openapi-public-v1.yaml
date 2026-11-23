@@ -4,6 +4,10 @@
 # parameter, cache header, rate-limit rule, and example below is derived from
 # the live route dependencies (lib/ops/public-api-openapi.ts) and verified
 # against lib/ops/json-schema-subset.ts in tests/node/public-api-openapi.test.ts.
+#
+# Observation freshness: indexed market reads expose a shared `observation`
+# block (trusted ledger, observation time, known gaps) with identical meaning
+# across feed, detail, and performance endpoints.
 
 openapi: "3.1.0"
 info:
@@ -27,11 +31,13 @@ paths:
       x-mimir-cache-control: "s-maxage=15, stale-while-revalidate=60"
       x-mimir-access-tier: public_read
       x-mimir-rate-limit-route: "/api/vs"
+      x-mimir-conditional-request: "If-None-Match"
+      x-mimir-etag-binding: "settlement-identity+visibility"
       parameters:
         - name: refresh
           in: query
           required: false
-          description: "Set to `\"1\"` to force a chain-to-index reconciliation before returning. Any other non-empty value is rejected with 400 `invalid_request`."
+          description: "Set to `\"1\"` to force a chain-to-index reconciliation before returning. Any other non-empty value is rejected with 400 `invalid_request`. Repeating this parameter with conflicting scalar values (for example `refresh=1&refresh=0`) is rejected with 400 `invalid_request` and a field-level error on `refresh`; the server never silently picks the first or last value."
           schema:
             type: string
             enum:
@@ -39,33 +45,81 @@ paths:
         - name: cursor
           in: query
           required: false
-          description: "Positive integer claim ID cursor (`id < cursor`)."
+          description: "Positive integer claim ID cursor (`id < cursor`). Repeating `cursor` with conflicting values is rejected with 400 `invalid_request` and a field-level error on `cursor`."
           schema:
             type: integer
             minimum: 1
+        - name: categories
+          in: query
+          required: false
+          description: "Comma-separated category filter. At most 10 entries and 512 total bytes; exceeding either bound is rejected with 400 `invalid_request` before any read-index query."
+          schema:
+            type: array
+            maxItems: 10
+            items:
+              type: string
+              enum:
+                - sports
+                - weather
+                - crypto
+                - culture
+                - custom
+        - name: states
+          in: query
+          required: false
+          description: "Comma-separated lifecycle state filter. At most 10 entries and 512 total bytes; exceeding either bound is rejected with 400 `invalid_request` before any read-index query."
+          schema:
+            type: array
+            maxItems: 10
+            items:
+              type: string
+              enum:
+                - open
+                - accepted
+                - resolved
+                - cancelled
         - name: limit
           in: query
           required: false
-          description: "Page size between 1 and 100 (defaults to 50)."
+          description: "Page size between 1 and 100 (defaults to 50). Repeating `limit` with conflicting values is rejected with 400 `invalid_request` and a field-level error on `limit`."
           schema:
             type: integer
             minimum: 1
             maximum: 100
             default: 50
       responses:
+        "304":
+          description: "Not Modified. The supplied `If-None-Match` matches the current settlement-bound ETag; no body is returned."
+          headers:
+            ETag:
+              description: Strong validator bound to canonical settlement identity and visibility.
+              schema:
+                type: string
         "200":
           description: List public VS claims from the read index with cursor pagination.
+          headers:
+            ETag:
+              description: Strong validator bound to canonical settlement identity and visibility.
+              schema:
+                type: string
+            Vary:
+              description: "Includes the invite credential header for private-scoped responses so they never share a public cache key."
+              schema:
+                type: string
           content:
             "application/json":
               schema:
                 type: object
-                description: "Response payload for `GET /api/vs`."
+                description: "Response payload for `GET /api/vs`. Settled-market views are immutable once settled; their ETag is derived from the canonical settlement identity and visibility, and private invite-scoped responses are served with `Cache-Control: private`."
                 required:
                   - items
                   - count
                   - cache
+                  - observation
                 additionalProperties: false
                 properties:
+                  observation:
+                    $ref: "#/components/schemas/ObservationFreshness"
                   items:
                     type: array
                     items:
@@ -2720,6 +2774,42 @@ paths:
                         type: integer
                         minimum: 1
                         description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+                  coverage:
+                    type: object
+                    description: "Observation coverage metadata (`lib/portfolio-performance.ts::PerformanceObservationCoverage`)."
+                    required:
+                      - lastTrustedLedger
+                      - missingIntervals
+                    additionalProperties: false
+                    properties:
+                      lastTrustedLedger:
+                        type:
+                          - integer
+                          - "null"
+                        minimum: 0
+                        description: "Highest ledger sequence trusted by the read index, or null when unavailable."
+                      missingIntervals:
+                        type: array
+                        description: "Unobserved intervals that must remain visually distinct from verified zero performance."
+                        items:
+                          type: object
+                          description: "An unobserved interval in a performance series (`lib/portfolio-performance.ts::PerformanceMissingInterval`)."
+                          required:
+                            - startTimestamp
+                            - endTimestamp
+                          additionalProperties: false
+                          properties:
+                            startTimestamp:
+                              type: integer
+                              minimum: 1
+                              description: "Start of the missing interval in epoch milliseconds."
+                            endTimestamp:
+                              type: integer
+                              minimum: 1
+                              description: "End of the missing interval in epoch milliseconds."
+                            reason:
+                              type: string
+                              description: "Optional human-readable reason for the observation gap."
               examples:
                 portfolioPerformance:
                   summary: "Cumulative realised P&L series computed from settled markets."
@@ -2738,6 +2828,7 @@ paths:
                       lastUpdatedAt: "2025-08-14T19:33:20.000Z"
                       ageMs: 0
                       freshnessWindowMs: 300000
+                    state: available
         "400":
           description: Invalid path or query parameter.
           x-mimir-error-codes:
@@ -3429,6 +3520,28 @@ components:
           type: integer
           minimum: 1
           description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+        projection:
+          type: object
+          description: "Projection completeness metadata for the snapshot (`lib/vs-freshness.ts`)."
+          required:
+            - trustedLedger
+            - knownGaps
+            - projectionGeneration
+          additionalProperties: false
+          properties:
+            trustedLedger:
+              type:
+                - integer
+                - "null"
+              description: "Highest verified ledger sequence folded into the projection, or null when unavailable."
+            knownGaps:
+              type: integer
+              minimum: 0
+              description: "Count of known gaps or missing event spans in the projection."
+            projectionGeneration:
+              type: integer
+              minimum: 1
+              description: "Active schema/projection generation version."
     ClaimChallenger:
       type: object
       description: "A challenger entry on a claim (`lib/contract.ts::ClaimChallenger`)."
@@ -5096,6 +5209,42 @@ components:
               type: integer
               minimum: 1
               description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
+        coverage:
+          type: object
+          description: "Observation coverage metadata (`lib/portfolio-performance.ts::PerformanceObservationCoverage`)."
+          required:
+            - lastTrustedLedger
+            - missingIntervals
+          additionalProperties: false
+          properties:
+            lastTrustedLedger:
+              type:
+                - integer
+                - "null"
+              minimum: 0
+              description: "Highest ledger sequence trusted by the read index, or null when unavailable."
+            missingIntervals:
+              type: array
+              description: "Unobserved intervals that must remain visually distinct from verified zero performance."
+              items:
+                type: object
+                description: "An unobserved interval in a performance series (`lib/portfolio-performance.ts::PerformanceMissingInterval`)."
+                required:
+                  - startTimestamp
+                  - endTimestamp
+                additionalProperties: false
+                properties:
+                  startTimestamp:
+                    type: integer
+                    minimum: 1
+                    description: "Start of the missing interval in epoch milliseconds."
+                  endTimestamp:
+                    type: integer
+                    minimum: 1
+                    description: "End of the missing interval in epoch milliseconds."
+                  reason:
+                    type: string
+                    description: "Optional human-readable reason for the observation gap."
     StoredBasket:
       type: object
       description: "A user-composed agent basket (`lib/db.ts::StoredBasket`)."

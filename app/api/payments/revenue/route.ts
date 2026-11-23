@@ -2,8 +2,13 @@
  * GET /api/payments/revenue — live payment earnings across Mimir's paid
  * endpoints (premium price oracle, oracle-as-a-service, council reasoning).
  *
- * Powers the /revenue dashboard. Durable: reads the Neon payments_v2 ledger * (falls back to an in-memory buffer when no DB is configured). The x402
+ * Powers the /revenue dashboard. Durable: reads the Neon payments_v2 ledger
+ * (falls back to an in-memory buffer when no DB is configured). The x402
  * settlements on Stellar remain the ultimate record.
+ *
+ * Each revenue row is bound to the canonical purchased-resource digest that
+ * was paid for, so the dashboard can attribute earnings per resource and the
+ * ledger can prove a payment was consumed against the request it bought.
  */
 
 import { getRevenueSummary } from "@/lib/paid-revenue";

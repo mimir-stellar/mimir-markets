@@ -62,3 +62,23 @@ export function decodeHash32Hex(value: string, field = "hash"): Buffer {
   }
   return Buffer.from(normalized, "hex");
 }
+
+/**
+ * Canonical digest of a market draft's approval-relevant fields.
+ * Keys are sorted and values are JSON-encoded so the same draft always
+ * hashes identically regardless of object key insertion order.
+ */
+export function canonicalDraftDigestHex(draft: {
+  wording: string;
+  sourceCommitment: string;
+  stake: string;
+  deadline: string;
+}): string {
+  const canonical = JSON.stringify({
+    deadline: draft.deadline,
+    sourceCommitment: draft.sourceCommitment,
+    stake: draft.stake,
+    wording: draft.wording,
+  });
+  return sha256Hex(canonical);
+}

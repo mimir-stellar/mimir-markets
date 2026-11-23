@@ -8,6 +8,10 @@ export interface CopyExecutionView {
   txHash?: string;
   skipReason?: string;
   createdAt: number;
+  signalId?: string;
+  policyId?: string;
+  reservationId?: string;
+  chainOutcomeRef?: string;
   // Explicitly typed to ensure sensitive analytics/wallet fields are handled
   // and to support clear contract-backed feedback.
   isPermissionGranted?: boolean;
@@ -74,6 +78,26 @@ export function CopyExecutionHistory({
                   {item.status === "skipped" && !item.skipReason && (
                     <div className="text-xs text-pv-ink/50">
                       Skipped due to permission or balance constraints
+                    </div>
+                  )}
+                  {item.signalId && (
+                    <div className="text-xs text-pv-ink/50">
+                      Signal {item.signalId}
+                    </div>
+                  )}
+                  {item.policyId && (
+                    <div className="text-xs text-pv-ink/50">
+                      Policy {item.policyId}
+                    </div>
+                  )}
+                  {item.reservationId && (
+                    <div className="text-xs text-pv-ink/50">
+                      Reservation {item.reservationId}
+                    </div>
+                  )}
+                  {item.chainOutcomeRef && (
+                    <div className="text-xs text-pv-ink/50">
+                      Chain outcome {item.chainOutcomeRef}
                     </div>
                   )}
                 </div>
