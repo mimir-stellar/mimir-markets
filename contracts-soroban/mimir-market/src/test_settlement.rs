@@ -1,6 +1,10 @@
 #![cfg(test)]
 //! Settlement: conservation, principal protection, and the four verdict branches.
 //!
+//! Resolution intent digest: settlement records bind verdict, evidence digest,
+//! claim revision and oracle identity; substituted evidence is rejected without
+//! changing escrow state.
+//!
 //! Settlement is split in two, mirroring mimir-squad: `resolve_claim` is O(1) and
 //! pays the creator's leg inline, then each challenger pulls via
 //! `claim_challenger_payout`. Conservation is asserted over the whole lifecycle.
