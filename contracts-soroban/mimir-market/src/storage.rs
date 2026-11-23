@@ -34,6 +34,10 @@ pub enum DataKey {
     Usdc,
     Policy,
     Pending,
+    /// Active fee-policy revision when the current pending policy was queued.
+    /// Kept separate from `PendingFeePolicy` so adding this guard does not
+    /// change the serialized shape of an already queued policy.
+    PendingPolicyBaseRevision,
     /// Queued oracle rotation (separate from fee-policy Pending).
     PendingOracle,
     ClaimCount,
@@ -133,6 +137,10 @@ pub fn set_fee_policy(env: &Env, policy: &FeePolicy) {
     env.storage().instance().set(&DataKey::Policy, policy);
 }
 
+pub fn fee_policy_revision(env: &Env) -> Result<u64, Error> {
+    Ok(fee_policy(env)?.revision)
+}
+
 pub fn pending_fee_policy(env: &Env) -> Option<PendingFeePolicy> {
     env.storage().instance().get(&DataKey::Pending)
 }
@@ -141,8 +149,23 @@ pub fn set_pending_fee_policy(env: &Env, pending: &PendingFeePolicy) {
     env.storage().instance().set(&DataKey::Pending, pending);
 }
 
+pub fn pending_fee_policy_base_revision(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&DataKey::PendingPolicyBaseRevision)
+}
+
+pub fn set_pending_fee_policy_base_revision(env: &Env, revision: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingPolicyBaseRevision, &revision);
+}
+
 pub fn clear_pending_fee_policy(env: &Env) {
     env.storage().instance().remove(&DataKey::Pending);
+    env.storage()
+        .instance()
+        .remove(&DataKey::PendingPolicyBaseRevision);
 }
 
 pub fn pending_oracle(env: &Env) -> Option<PendingOracle> {
@@ -403,6 +426,16 @@ pub fn get_creator_claims(
     }
 
     (out, total)
+}
+
+pub fn creator_claims_page(
+    env: &Env,
+    creator: &Address,
+    offset: u32,
+    limit: u32,
+) -> (Vec<u64>, u32) {
+    let (ids, total) = get_creator_claims(env, creator, offset, limit);
+    (ids, total as u32)
 }
 
 // ── Versioned verdicts ───────────────────────────────────────────────────────

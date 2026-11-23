@@ -6,12 +6,13 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 use crate::admin;
 use crate::claims;
 use crate::escrow;
+use crate::fees;
 use crate::resolve;
 use crate::storage;
 use crate::types::{
-    Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeePolicy,
-    MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict,
-    WinnerSide, MAX_BATCH_SIZE,
+    Challenger, ChallengerPage, Claim, ClaimFeeView, ClaimStatement, CreateParams, Error, FeePolicy,
+    MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict, WinnerSide,
+    MAX_BATCH_SIZE,
 };
 
 #[contract]
@@ -176,8 +177,45 @@ impl MimirMarket {
 
     // ── Views ────────────────────────────────────────────────────────────────
 
+    /// Read-only preflight for a claim resolution (#779).
+    ///
+    /// Returns structural eligibility (lifecycle + constraints) separately
+    /// from the "a signed submission will still need the oracle's auth"
+    /// signal. **Never mutates state**: no `require_auth`, no storage write,
+    /// no TTL bump, no event. Callers that want to know whether a later
+    /// `resolve_claim` *will succeed* must still treat a successful
+    /// preflight as necessary, not sufficient — `preflight_claim` says
+    /// nothing about the verdict the oracle would submit.
+    pub fn preflight_claim(env: Env, claim_id: u64) -> Result<ClaimPreflight, Error> {
+        resolve::preflight_claim(&env, claim_id)
+    }
+
     pub fn get_claim(env: Env, claim_id: u64) -> Result<Claim, Error> {
         storage::get_claim(&env, claim_id)
+    }
+
+    /// Canonical statement for independent client verification.
+    ///
+    /// Returns the public question, the immutable `context_hash` as
+    /// `source_commitment`, the deadline, and a v1 SHA-256 digest over exactly
+    /// those inputs. See `util::claim_statement_digest` for the byte encoding.
+    /// The statement is stable for the life of the claim, including after
+    /// challenge, resolution, or cancellation. Unknown ids fail with
+    /// `Error::ClaimNotFound`.
+    pub fn get_claim_statement(env: Env, claim_id: u64) -> Result<ClaimStatement, Error> {
+        claims::get_claim_statement(&env, claim_id)
+    }
+
+    /// Alias of `get_claim_statement`, named for callers that export a
+    /// statement to an indexer or worker.
+    pub fn export_claim_statement(env: Env, claim_id: u64) -> Result<ClaimStatement, Error> {
+        claims::get_claim_statement(&env, claim_id)
+    }
+
+    /// Digest-only view for callers that need just the canonical v1 digest
+    /// without marshalling the full statement.
+    pub fn get_claim_statement_digest(env: Env, claim_id: u64) -> Result<BytesN<32>, Error> {
+        Ok(claims::get_claim_statement(&env, claim_id)?.digest)
     }
 
     /// Paginated list of claim ids created by `creator`, in creation order.
@@ -199,7 +237,67 @@ impl MimirMarket {
         if !storage::is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
-        Ok(storage::creator_claims_page(&env, &creator, offset, limit))
+        let (ids, total) = storage::get_creator_claims(&env, &creator, offset, limit);
+        Ok((ids, u32::try_from(total).unwrap_or(u32::MAX)))
+    }
+
+    /// Preview payout aggregate and completeness for a creator's claim history.
+    ///
+    /// Reads up to `limit` claim ids starting at `offset` (0-based) from the
+    /// creator index, loading each claim and aggregating gross, fee, net and liability.
+    ///
+    /// # Invariants
+    ///
+    /// - **Explicit missing observations:** If the page is truncated (`limit < total`
+    ///   or `offset > 0`) or any claim cannot be loaded, `missing_observations`
+    ///   records the missing count explicitly and `is_complete` is `false`.
+    /// - **Never present incomplete aggregate as verified total liability:**
+    ///   `verified_total_liability` is `Some(amount)` ONLY when `is_complete` is `true`.
+    ///   When truncated or missing observations exist, `verified_total_liability` is `None`.
+    pub fn preview_creator_payouts(
+        env: Env,
+        creator: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<PayoutPreview, Error> {
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let total_count = storage::creator_claim_count(&env, &creator);
+        let (ids, _) = storage::get_creator_claims(&env, &creator, offset, limit);
+        let is_truncated = (offset as u64) > 0
+            || (limit > 0 && (offset as u64 + ids.len() as u64) < total_count);
+
+        let mut claims: Vec<Option<Claim>> = Vec::new(&env);
+        for id in ids.iter() {
+            claims.push_back(storage::get_claim_opt(&env, id));
+        }
+
+        fees::aggregate_payout_preview(&env, &claims, total_count as u32, is_truncated)
+    }
+
+    /// Preview payout aggregate and completeness for an explicit batch of claim ids.
+    ///
+    /// Guards against over-sized batches with `Error::BatchTooLarge`.
+    /// Missing claims are marked as missing observations, setting `is_complete = false`
+    /// and leaving `verified_total_liability = None`.
+    pub fn preview_claims_batch(
+        env: Env,
+        ids: Vec<u64>,
+    ) -> Result<PayoutPreview, Error> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+
+        let mut claims: Vec<Option<Claim>> = Vec::new(&env);
+        for id in ids.iter() {
+            claims.push_back(storage::get_claim_opt(&env, id));
+        }
+
+        fees::aggregate_payout_preview(&env, &claims, ids.len(), false)
     }
 
     /// The claim's verdict with its explicit encoding version.
@@ -295,6 +393,18 @@ impl MimirMarket {
         Ok(results)
     }
 
+    /// Versioned snapshot of the contract's resource limits, so clients can size
+    /// batch and pagination requests without probing live failures.
+    ///
+    /// Response layout: `(version, max_batch_size)`. `version` is bumped whenever
+    /// the layout changes; existing fields keep their meaning across versions.
+    pub fn get_contract_limits(env: Env) -> Result<(u32, u32), Error> {
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        Ok((1u32, MAX_BATCH_SIZE))
+    }
+
     pub fn get_claim_market_config(env: Env, claim_id: u64) -> Result<MarketConfig, Error> {
         Ok(storage::get_claim(&env, claim_id)?.market)
     }
@@ -361,6 +471,14 @@ impl MimirMarket {
         storage::fee_policy(&env)
     }
 
+    /// Bounded fee-policy compatibility query for generated clients.
+    ///
+    /// Pure read returning supported policy fields, hard caps, timelock,
+    /// USDC escrow scale, rounding semantics, and current/pending policy state.
+    pub fn get_fee_policy_compatibility(env: Env) -> Result<FeePolicyCompatibility, Error> {
+        fees::fee_policy_compatibility(&env)
+    }
+
     pub fn get_pending_fee_policy(env: Env) -> Option<PendingFeePolicy> {
         storage::pending_fee_policy(&env)
     }
@@ -385,7 +503,24 @@ impl MimirMarket {
         storage::withdrawable(&env, &who)
     }
 
+    /// Batched withdrawable balances, position-stable with `addrs`.
+    ///
+    /// Refuses the whole call with `Error::BatchTooLarge` above
+    /// `MAX_BATCH_SIZE`; unknown addresses return `0` in their slot.
+    pub fn get_withdrawable_batch(env: Env, addrs: Vec<Address>) -> Result<Vec<i128>, Error> {
+        storage::get_withdrawable_batch(&env, addrs)
+    }
+
     pub fn get_accrued_fees(env: Env, who: Address) -> i128 {
         storage::accrued_fees(&env, &who)
+    }
+
+    /// Read-only descriptor of the currently approved oracle resolution and
+    /// claim expiration policy enforced by `claims` and `resolve`.
+    ///
+    /// Pure read: requires no auth, touches no storage, moves no USDC, and
+    /// preserves oracle-only resolution and existing withdrawal rights.
+    pub fn get_resolution_expiration_policy(_env: Env) -> ResolutionExpirationPolicy {
+        resolve::resolution_expiration_policy()
     }
 }

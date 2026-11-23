@@ -1359,6 +1359,10 @@ export default function DocsPage() {
             <code className="rounded bg-pv-surface2 px-1.5 py-0.5 text-xs">RESEARCH_DENIED_DOMAINS</code> subtracts from whatever is otherwise
             permitted.
           </li>
+          <li>
+            <strong className="text-pv-text">Redirect policy decisions are diagnostic-visible offline.</strong>{" "}
+            Captured redirect chains can be evaluated offline via <code className="rounded bg-pv-surface2 px-1.5 py-0.5 text-xs">diagnoseRedirectPolicy</code> and research content validation. It returns bounded per-hop scheme, domain, and SSRF verdicts while redacting URL identities (credentials, tokens, and wallet strkeys) without making new network requests.
+          </li>
         </ul>
 
         <h3 className="text-lg font-bold text-pv-text">Judging</h3>
@@ -1604,7 +1608,9 @@ that schedule is unrepresentable here.`}
         <p>
           A read-only dry run is available at <code className="rounded bg-pv-surface2 px-1 text-xs">POST /api/copy/preview</code>.
           It accepts a draft permission, signal and usage snapshot, and returns the first policy block and the
-          stake in atomic USDC. The supplied snapshot is hypothetical: the response explicitly says no Soroban
+          stake in atomic USDC. Preview cache entries are bound to the permission revision and invalidated upon
+          owner policy updates or revocation, ensuring exact amount preservation between preview and execution.
+          The supplied snapshot is hypothetical: the response explicitly says no Soroban
           simulation, transaction or audit write ran. Even a policy-eligible preview is not permission to spend; funded
           execution must re-read on-chain state and obtain its own signature.
         </p>

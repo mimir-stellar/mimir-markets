@@ -24,6 +24,10 @@ export type CitationRowStatus =
   | "cancelled"
   | "dependency_failure";
 
+export type CitationDigestStatus = "verified" | "malformed" | "missing";
+
+export type CitationSourceAvailability = "available" | "stale" | "unavailable" | "unverified";
+
 export type ResearchCitationsStatus =
   | "ready"
   | "empty"
@@ -60,6 +64,14 @@ export interface ResearchCitationView {
   externalSafe: boolean;
   /** Set when this row was collapsed as a duplicate of an earlier citation. */
   duplicatedOf?: string;
+  /** Epoch milliseconds when captured, or null if unknown / not recorded. */
+  capturedAt: number | null;
+  /** ISO 8601 string when captured, or null if unknown / not recorded. */
+  capturedAtIso: string | null;
+  /** Cryptographic integrity status of the content digest. */
+  digestStatus: CitationDigestStatus;
+  /** Snapshot availability, explicitly decoupled from claim truth value. */
+  sourceAvailability: CitationSourceAvailability;
 }
 
 export interface ResearchCitationsView {
@@ -151,6 +163,87 @@ function trustRank(tier: CitationTrustTier): number {
 }
 
 /**
+ * Evaluates the cryptographic digest status of a hash string.
+ * - "verified" if the hash is a valid 32-byte (64 character) hex digest.
+ * - "malformed" if non-empty string is provided but is not a valid 32-byte hex hash.
+ * - "missing" if null, undefined, or empty/whitespace.
+ */
+export function getCitationDigestStatus(
+  rawHash: string | null | undefined,
+): CitationDigestStatus {
+  if (!rawHash) return "missing";
+  const trimmed = rawHash.trim();
+  if (!trimmed) return "missing";
+  const bare = trimmed.startsWith("0x") ? trimmed.slice(2) : trimmed;
+  if (!bare) return "missing";
+  return isHash32Hex(bare) ? "verified" : "malformed";
+}
+
+/**
+ * Derives source availability status decoupled from the claim's truth value.
+ * - "unavailable" if row status is cancelled, invalid, or dependency_failure.
+ * - "stale" if row status is stale (captured after deadline or exceeds max age).
+ * - "unverified" if cryptographic digest is missing.
+ * - "available" if snapshot is ready with verified cryptographic digest.
+ */
+export function getCitationSourceAvailability(
+  status: CitationRowStatus,
+  digestStatus: CitationDigestStatus,
+): CitationSourceAvailability {
+  if (status === "cancelled" || status === "invalid" || status === "dependency_failure") {
+    return "unavailable";
+  }
+  if (status === "stale") {
+    return "stale";
+  }
+  if (digestStatus === "missing") {
+    return "unverified";
+  }
+  return "available";
+}
+
+function toValidIso(capturedAt: number | null | undefined): string | null {
+  if (capturedAt == null || !Number.isFinite(capturedAt) || capturedAt <= 0) {
+    return null;
+  }
+  try {
+    const d = new Date(capturedAt);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Format citation capture time to ISO + relative freshness (e.g. "2026-11-13T03:55:00.000Z (2m ago)").
+ * Returns empty string if capturedAt is null, non-finite, or <= 0.
+ */
+export function formatCitationCaptureTime(
+  capturedAt: number | null | undefined,
+  nowMs: number = Date.now(),
+): string {
+  if (capturedAt == null || !Number.isFinite(capturedAt) || capturedAt <= 0) {
+    return "";
+  }
+  try {
+    const date = new Date(capturedAt);
+    if (isNaN(date.getTime())) return "";
+    const iso = date.toISOString();
+    const diffMs = nowMs - capturedAt;
+    if (diffMs < 0) {
+      return `${iso} (just now)`;
+    }
+    const seconds = Math.floor(diffMs / 1000);
+    if (seconds < 60) return `${iso} (${seconds}s ago)`;
+    if (seconds < 3_600) return `${iso} (${Math.floor(seconds / 60)}m ago)`;
+    if (seconds < 86_400) return `${iso} (${Math.floor(seconds / 3_600)}h ago)`;
+    return `${iso} (${Math.floor(seconds / 86_400)}d ago)`;
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Build a citation list from raw research / evidence sources.
  * Dedupes by content hash (preferred) then by normalized URL.
  */
@@ -206,9 +299,22 @@ export function buildResearchCitations(
         excerpt: "",
         ageSeconds: null,
         externalSafe: false,
+        capturedAt: null,
+        capturedAtIso: null,
+        digestStatus: "missing",
+        sourceAvailability: "unavailable",
       });
       continue;
     }
+
+    const rawCapturedAt =
+      typeof source.capturedAt === "number" &&
+      Number.isFinite(source.capturedAt) &&
+      source.capturedAt > 0
+        ? source.capturedAt
+        : null;
+    const capturedAtIso = toValidIso(rawCapturedAt);
+    const digestStatus = getCitationDigestStatus(source.contentHash);
 
     const normalizedUrl = normalizeResolutionSource(String(source.url ?? ""));
     const trustTier = normalizeTrust(source.trustTier);
@@ -229,6 +335,10 @@ export function buildResearchCitations(
         excerpt: sanitizeExcerpt(source.excerpt),
         ageSeconds: null,
         externalSafe: false,
+        capturedAt: rawCapturedAt,
+        capturedAtIso,
+        digestStatus,
+        sourceAvailability: "unavailable",
       });
       continue;
     }
@@ -246,6 +356,10 @@ export function buildResearchCitations(
         excerpt: sanitizeExcerpt(source.excerpt),
         ageSeconds: null,
         externalSafe: true,
+        capturedAt: rawCapturedAt,
+        capturedAtIso,
+        digestStatus: "malformed",
+        sourceAvailability: "unavailable",
       });
       continue;
     }
@@ -256,20 +370,16 @@ export function buildResearchCitations(
       Number.isFinite(source.freshnessSeconds)
     ) {
       ageSeconds = Math.max(0, Math.floor(source.freshnessSeconds));
-    } else if (
-      typeof source.capturedAt === "number" &&
-      Number.isFinite(source.capturedAt) &&
-      source.capturedAt > 0
-    ) {
-      ageSeconds = Math.max(0, Math.floor((nowMs - source.capturedAt) / 1000));
+    } else if (rawCapturedAt != null) {
+      ageSeconds = Math.max(0, Math.floor((nowMs - rawCapturedAt) / 1000));
     }
 
     let status: CitationRowStatus = "ready";
     if (
       deadlineUnix != null &&
       Number.isFinite(deadlineUnix) &&
-      typeof source.capturedAt === "number" &&
-      source.capturedAt > deadlineUnix * 1000
+      rawCapturedAt != null &&
+      rawCapturedAt > deadlineUnix * 1000
     ) {
       status = "stale";
     } else if (
@@ -280,6 +390,8 @@ export function buildResearchCitations(
     ) {
       status = "stale";
     }
+
+    const sourceAvailability = getCitationSourceAvailability(status, digestStatus);
 
     prepared.push({
       id: `${trustTier}:${contentHash || normalizedUrl}:${index}`,
@@ -292,6 +404,10 @@ export function buildResearchCitations(
       excerpt: sanitizeExcerpt(source.excerpt),
       ageSeconds,
       externalSafe: true,
+      capturedAt: rawCapturedAt,
+      capturedAtIso,
+      digestStatus,
+      sourceAvailability,
     });
   }
 

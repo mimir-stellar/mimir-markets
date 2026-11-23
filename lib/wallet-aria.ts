@@ -49,6 +49,7 @@
  * - pending:    the signed transaction has been submitted; waiting for ledger
  * - confirmed:  the transaction was included in a ledger (Stellar is final)
  * - rejected:   the user declined to sign in their wallet
+ * - transport_unavailable: wallet extension or device transport is unreachable or not installed
  * - error:      any other failure (network, insufficient balance, contract revert)
  * - stale:      data may be out of date, the contract state should be re-read
  * - duplicate:  the same action was already submitted and confirmed
@@ -63,6 +64,7 @@ export type WalletActionState =
   | "pending"
   | "confirmed"
   | "rejected"
+  | "transport_unavailable"
   | "error"
   | "stale"
   | "duplicate"
@@ -136,6 +138,8 @@ export function actionLabel(
       return confirmedLabel(kind, amountUsdc);
     case "rejected":
       return rejectedLabel(kind, wallet);
+    case "transport_unavailable":
+      return `${kindTitle(kind)} — wallet transport unavailable`;
     case "error":
       return `${kindTitle(kind)} failed`;
     case "stale":
@@ -348,6 +352,8 @@ export function statusDescription(
       return confirmedDescription(kind, amountUsdc);
     case "rejected":
       return "The transaction was rejected in your wallet. You can try again.";
+    case "transport_unavailable":
+      return "Wallet transport is unavailable. Make sure your wallet extension is installed, active, and connected.";
     case "error":
       return "An error occurred. Check your wallet balance and try again.";
     case "stale":

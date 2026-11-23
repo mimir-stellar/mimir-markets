@@ -7,82 +7,31 @@ use crate::events;
 use crate::fees;
 use crate::storage;
 use crate::types::{
-    Challenger, Claim, ClaimState, CreateParams, Error, FeeSnapshot, MarketConfig, WinnerSide,
-    BPS_DIVISOR, CHALLENGE_LOCK_SECONDS, DEFAULT_PAYOUT_BPS, MAX_CHALLENGERS, MIN_STAKE,
+    Challenger, Claim, ClaimState, ClaimStatement, CreateParams, Error, FeeSnapshot, MarketConfig,
+    WinnerSide, BPS_DIVISOR, CHALLENGE_LOCK_SECONDS, DEFAULT_PAYOUT_BPS, MAX_CHALLENGERS, MIN_STAKE,
 };
 use crate::util;
 
-/// Number of claim ids stored per creator-index page. Bounds the size of any
-/// single persistent entry written by `create_claim`.
-const CREATOR_INDEX_PAGE_SIZE: u32 = 100;
-
-fn creator_index_page_key(env: &Env, creator: &Address, page: u32) {
-    (
-        soroban_sdk::symbol_short!("cclm_pg"),
-        creator.clone(),
-        page,
-    )
-}
-
-fn creator_index_count_key(env: &Env, creator: &Address) {
-    (soroban_sdk::symbol_short!("cclm_ct"), creator.clone())
-}
-
-pub fn creator_index_append(env: &Env, creator: &Address, id: u64) {
-    let count_key = creator_index_count_key(env, creator);
-    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-    let page = count / CREATOR_INDEX_PAGE_SIZE;
-    let key = creator_index_page_key(env, creator, page);
-    let mut ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
-    ids.push_back(id);
-    env.storage().persistent().set(&key, &ids);
-    env.storage().persistent().set(&count_key, &(count + 1));
-}
-
-pub fn get_creator_claims(
-    env: &Env,
-    creator: Address,
-    offset: u32,
-    limit: u32,
-) -> (Vec<u64>, u32) {
-    let count_key = creator_index_count_key(env, &creator);
-    let total: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-    let mut out = Vec::new(env);
-    if limit == 0 || offset >= total {
-        return (out, total);
-    }
-    let mut remaining = limit.min(total - offset);
-    let mut index = offset;
-    while remaining > 0 {
-        let page = index / CREATOR_INDEX_PAGE_SIZE;
-        let key = creator_index_page_key(env, &creator, page);
-        let ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
-        let page_start = page * CREATOR_INDEX_PAGE_SIZE;
-        let mut local = index - page_start;
-        while local < ids.len() && remaining > 0 {
-            out.push_back(ids.get(local).unwrap());
-            local += 1;
-            index += 1;
-            remaining -= 1;
-        }
-        if local >= ids.len() && remaining > 0 {
-            // Defensive: short page but count says more; avoid infinite loop.
-            break;
-        }
-    }
-    // TTL extension like other reads.
-    env.storage().persistent().extend_ttl(&count_key, 30, env.ledger().max_ttl() / 2);
-    if out.len() > 0 {
-        let first_page = offset / CREATOR_INDEX_PAGE_SIZE;
-        let last_page = (index - 1) / CREATOR_INDEX_PAGE_SIZE;
-        let mut p = first_page;
-        while p <= last_page {
-            let key = creator_index_page_key(env, &creator, p);
-            env.storage().persistent().extend_ttl(&key, 30, env.ledger().max_ttl() / 2);
-            p += 1;
-        }
-    }
-    (out, total)
+/// Export the claim's canonical statement and its v1 digest.
+///
+/// The three exported inputs are the public question, the immutable on-chain
+/// `context_hash` (as `source_commitment`), and the deadline. Settlement never
+/// changes them, so the statement is identical before and after resolution,
+/// challenge, or cancellation. An unknown id fails with `ClaimNotFound`.
+pub fn get_claim_statement(env: &Env, claim_id: u64) -> Result<ClaimStatement, Error> {
+    let claim = storage::get_claim(env, claim_id)?;
+    let digest = util::claim_statement_digest(
+        env,
+        &claim.question,
+        &claim.context_hash,
+        claim.deadline,
+    );
+    Ok(ClaimStatement {
+        question: claim.question,
+        source_commitment: claim.context_hash,
+        deadline: claim.deadline,
+        digest,
+    })
 }
 
 pub fn create_claim(env: &Env, creator: Address, params: CreateParams) -> Result<u64, Error> {
@@ -178,7 +127,7 @@ pub fn create_claim(env: &Env, creator: Address, params: CreateParams) -> Result
     let category = claim.category.clone();
     storage::set_claim(env, id, &claim);
     storage::set_challengers(env, id, &Vec::new(env));
-    creator_index_append(env, &creator, id);
+    storage::append_creator_claim(env, &creator, id);
 
     events::EscrowSeeded {
         id,
@@ -345,23 +294,9 @@ pub fn challenge_claim(
             challenger: challenger.clone(),
             stake: stake_amount,
             gross: fixed_odds_gross,
-            profit: fixed_odds_profit,
-            reserved_creator_liability: claim.reserved_creator_liability,
-            available_creator_liquidity: claim
-                .creator_stake
-                .checked_sub(claim.reserved_creator_liability)
-                .ok_or(Error::InsufficientCreatorLiquidity)?,
         }
         .publish(env);
     }
-
-    events::ClaimChallenged {
-        id: claim_id,
-        challenger,
-        stake: stake_amount,
-    }
-    .publish(env);
-    Ok(())
 }
 
 
@@ -436,8 +371,11 @@ pub fn cancel_claim(env: &Env, claim_id: u64) -> Result<(), Error> {
     //    is locked. That would break conservation and cheat challengers.
     // 2) The refund must never exceed the creator stake the claim actually
     //    holds; the conservation invariant is the authority for this.
-    if claim.challenger_count > 0 || claim.total_challenger_stake > 0 {
-        return Err(Error::ClaimNotOpen);
+    if claim.challenger_count > 0
+        || claim.total_challenger_stake > 0
+        || claim.reserved_creator_liability > 0
+    {
+        return Err(Error::ClaimHasActiveClaims);
     }
     util::assert_claim_conservation(&claim)?;
 

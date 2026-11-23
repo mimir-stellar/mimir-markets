@@ -18,6 +18,11 @@ const STATUS_THEME: Record<CopyPermissionStatus, { label: string; tone: string; 
   expired: { label: "Expired", tone: "border-pv-muted/40 bg-pv-surface text-pv-muted", icon: Clock },
 };
 
+const REASON_CODE_LABELS: Record<string, string> = {
+  revoked: "Permanently revoked: retry will not succeed.",
+  expired: "Expired: renew the permission to resume copying.",
+};
+
 export function CopyPermissionCard({
   feedback,
   executions = [],
@@ -31,6 +36,8 @@ export function CopyPermissionCard({
 }) {
   const theme = STATUS_THEME[feedback.status] ?? STATUS_THEME.invalid;
   const Icon = theme.icon;
+
+  const isPermanentlyRevoked = feedback.status === "revoked" || feedback.isRevoked;
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const confirmTitleId = useId();
@@ -110,6 +117,11 @@ export function CopyPermissionCard({
         aria-live="polite"
       >
         <span className="font-medium text-pv-text">Feedback:</span> {feedback.detail}
+        {REASON_CODE_LABELS[feedback.status] && (
+          <span className="mt-1 block text-pv-muted">
+            {isPermanentlyRevoked ? REASON_CODE_LABELS.revoked : REASON_CODE_LABELS[feedback.status]}
+          </span>
+        )}
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 text-xs">

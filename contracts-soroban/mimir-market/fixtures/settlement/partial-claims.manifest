@@ -1,0 +1,16 @@
+# Pool mode, one of three challengers has claimed; the rest is still owed.
+mimir-settlement-manifest v1
+claim 105
+winner challengers
+mode pool
+creator_stake 90000000
+platform_fee_bps 250
+agent_owner_fee_bps 0
+platform_recipient yes
+agent_owner_recipient no
+creator_paid 0
+creator_fee 0
+challenger 30000000 60000000 750000 59250000
+challenger 30000000 - - -
+challenger 30000000 - - -
+remaining 120000000

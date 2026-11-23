@@ -1,0 +1,16 @@
+# Fixed odds at 2x, challengers win. Unspent creator liability is refunded without a fee.
+mimir-settlement-manifest v1
+claim 102
+winner challengers
+mode fixed
+payout_bps 20000
+creator_stake 100000000
+platform_fee_bps 200
+agent_owner_fee_bps 100
+platform_recipient yes
+agent_owner_recipient yes
+creator_paid 65000000
+creator_fee 0
+challenger 20000000 40000000 600000 39400000
+challenger 15000000 30000000 450000 29550000
+remaining 0

@@ -1,15 +1,20 @@
 //! Public contract surface. Bodies live in `pool`; this file is the single
 //! `#[contractimpl]` block plus the read-only views.
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 use crate::escrow;
 use crate::pool;
 use crate::storage;
 use crate::types::{
-    ClaimResult, Error, Market, PendingOracle, SquadLimits, MAX_BATCH_SIZE, MAX_DURATION,
-    MAX_FEE_BPS, MAX_QUESTION_BYTES, MIN_DURATION,
+    ClaimResult, Error, Market, PendingOracle, SettlementReadiness, SquadLimits, MAX_BATCH_SIZE,
+    MAX_DURATION, MAX_FEE_BPS, MAX_QUESTION_BYTES, MIN_DURATION,
 };
+
+/// Storage schema version exposed to indexers. Bump only with a migration.
+pub const SCHEMA_VERSION: u32 = 1;
+/// Shape identifier so indexers can reject incompatible layouts.
+pub const SCHEMA_NAME: &str = "mimir-squad";
 
 #[contract]
 pub struct MimirSquad;
@@ -69,6 +74,13 @@ impl MimirSquad {
     /// to claim full refunds via claim(). No fees are charged on cancellation.
     pub fn cancel_market(env: Env, market_id: u64) -> Result<(), Error> {
         pool::cancel_market(&env, market_id)
+    }
+
+    /// Read-only preview of the refundable liabilities that `cancel_market`
+    /// would create for `market_id`. Performs no value movement or authority
+    /// changes.
+    pub fn preview_cancel_market(env: Env, market_id: u64) -> Result<CancelPreview, Error> {
+        pool::preview_cancel_market(&env, market_id)
     }
 
     /// Pull-based payout. Solidity used `msg.sender`; Soroban has no equivalent
@@ -162,6 +174,26 @@ impl MimirSquad {
         storage::accrued_fees(&env)
     }
 
+    /// Distinct claim status for a wallet on one side of a market.
+    ///
+    /// Returns `(claimable, already_claimed)` as separate fields so callers
+    /// never have to infer state from a zero amount. A wallet with no position
+    /// returns `(0, false)` through this read-only path without erroring.
+    pub fn get_claim_status(
+        env: Env,
+        market_id: u64,
+        side: u32,
+        who: Address,
+    ) -> Result<(i128, bool), Error> {
+        let already_claimed = storage::has_claimed(&env, market_id, side, &who);
+        let claimable = match pool::preview_claim(&env, market_id, side, &who) {
+            Ok(preview) => preview.amount,
+            Err(Error::NoPosition) => 0,
+            Err(e) => return Err(e),
+        };
+        Ok((claimable, already_claimed))
+    }
+
     /// Payout settled in the ledger but not delivered to one winner, because
     /// the token transfer trapped. `claim_parked_payout` moves it.
     pub fn parked_payout(env: Env, market_id: u64, side: u32, who: Address) -> i128 {
@@ -235,5 +267,34 @@ impl MimirSquad {
 
     pub fn get_paused_flag(env: Env) -> bool {
         storage::is_paused(&env)
+    }
+
+    /// Bounded compatibility descriptor for indexers: returns the storage
+    /// schema version and whether the caller's required version is supported.
+    /// Unsupported required versions are rejected with `Error::NotInitialized`
+    /// semantics avoided; callers receive `supported = false` instead.
+    pub fn get_schema_version(_env: Env) -> u32 {
+        SCHEMA_VERSION
+    }
+
+    /// Returns `Ok(())` only when `required` equals the supported schema
+    /// version; any other interpretation is rejected.
+    pub fn require_schema_version(_env: Env, required: u32) -> Result<(), Error> {
+        if required == SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(Error::BatchTooLarge)
+        }
+    }
+
+    /// Read-only settlement readiness for a market. Never mutates state.
+    /// `withdrawal_open` is reported independently of `resolved`, so callers can
+    /// see whether pre-deadline withdrawals remain available. Unknown markets
+    /// return `MarketNotFound` rather than a partial view.
+    pub fn get_settlement_readiness(
+        env: Env,
+        market_id: u64,
+    ) -> Result<SettlementReadiness, Error> {
+        pool::settlement_readiness(&env, market_id)
     }
 }

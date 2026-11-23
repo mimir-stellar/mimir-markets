@@ -49,6 +49,17 @@ Source: `contracts-soroban/mimir-market/src/fees.rs`, mirrored off-chain in
 - Exact-balance intake (`escrow::pull`) rejects fee-on-transfer and rebasing
   behaviour: the contract asserts escrow moved by exactly the requested amount and
   errors with `UnsupportedToken` otherwise.
+- Generated clients can inspect the bounded fee-policy compatibility descriptor via
+  `get_fee_policy_compatibility`, which returns `FeePolicyCompatibility` in O(1)
+  instance storage reads: `schema_version`, bounded `supported_fields`
+  (`platform_fee_bps`, `agent_owner_fee_bps`, `platform_recipient`,
+  `agent_owner_recipient`, `revision`), hard caps (`max_total_fee_bps`,
+  `bps_divisor`, `fee_timelock_seconds`, `usdc_decimals`, `min_stake`),
+  `rounding_mode` (`FeeRoundingMode::FloorPerLegParticipantRemainder`),
+  `profit_only`, `pull_based_payouts`, `exact_usdc_escrow`, and live
+  `current_revision`, `current_total_fee_bps`, and `has_pending_policy`. Uninitialized
+  contracts fail closed with `Error::NotInitialized`. Tests:
+  `src/test_fee_policy_compat.rs`.
 
 ### Principal-safe payout preview
 
@@ -79,6 +90,25 @@ established gross meaning for `total_return_multiple` and gains a `fee_adjusted`
 marker, so the fee-adjusted and fee-unknown cases stay distinguishable without
 renaming an event or an envelope field.
 
+### Payout preview completeness under truncated history
+
+When aggregating payout preview and liability across claim history (`preview_creator_payouts`
+and `preview_claims_batch` in `contracts-soroban/mimir-market/src/fees.rs` and `contract.rs`),
+the aggregate explicitly reports completeness:
+
+- **Explicit missing observations:** If claim history is truncated by pagination
+  (`limit < total_claims` or `offset > 0`) or if any claim in a requested batch cannot be
+  observed, `missing_observations` is marked explicitly and `is_complete` is `false`.
+- **Incomplete aggregates are never presented as verified total liability:**
+  `verified_total_liability` is `Option::Some(aggregate_liability)` ONLY when
+  `is_complete` is `true` (`missing_observations == 0` and `is_truncated == false`).
+  Whenever history is truncated or incomplete, `verified_total_liability` is `None`,
+  preventing any caller or keeper from presenting an incomplete aggregate as a verified
+  total liability.
+- Tests: `src/test_payout_preview_completeness.rs`. Covers complete history, limit-truncated
+  slices, offset-truncated slices, missing observations, boundary limits, and fixed-odds
+  reserved liability accounting.
+
 ### Settlement conservation
 
 `conservation_holds_across_every_verdict` asserts, for every `WinnerSide`, that
@@ -91,6 +121,37 @@ payouts + fees + dust equals escrow inflow. Alongside it:
 - `fixed_odds_with_several_challengers_conserves_exactly`
 - `draw_refunds_everyone_in_full_with_no_fee` and the `Unresolvable` equivalent
 - `a_quote_matches_what_the_pull_actually_pays`
+
+### Offline settlement conservation verifier
+
+`settlement_verifier::verify_manifest` (`src/settlement_verifier.rs`) re-checks a
+recorded settlement with no chain access: no `Env`, no RPC, no storage and no
+allocation, so it also builds for `wasm32v1-none`. It reads a canonical
+version-1 settlement manifest (plain text, atomic USDC integers, challengers in
+claim order) and re-derives every leg from the same integer rules the contract
+uses: fees on profit only with each leg floored and a leg without a recipient
+not charged, pool share or fixed-odds gross, principal back on a draw or an
+unresolvable verdict, and the last claimant taking the escrow that is left.
+
+It returns the first disagreement as a `Mismatch`:
+
+- `Leg { leg, field: Principal | Fee | Net, expected, found }` for a creator or
+  challenger leg whose gross, fee or net differs from the rule;
+- `Remainder { expected, found }` when the escrow left over is wrong, including
+  dust stranded after every challenger has claimed;
+- `Conservation { inflow, accounted }` when paid + fees + remaining is not the
+  inflow;
+- `Malformed { line }`, `UnsupportedVersion`, `Missing { record }` or `Overflow`
+  for a manifest that cannot be read safely. A repeated record, a signed or
+  decimal amount, and a claim listed after an unclaimed challenger are refused.
+
+The contract stays authoritative; the verifier is evidence, not a source of
+truth. The manifest format is documented at the top of the module, and the
+canonical synthetic fixtures live in
+`contracts-soroban/mimir-market/fixtures/settlement/` (pool with dust, fixed
+odds, creator win with a recipient-less fee leg, draw, partial claims). Tests:
+`src/test_settlement_verifier.rs`, which verifies each fixture and then moves
+one amount at a time to pin each mismatch.
 
 ### Settlement dust is deterministic and isolated
 
@@ -143,6 +204,21 @@ A payout the contract cannot deliver — a frozen or authorisation-revoked USDC
 trustline makes the Stellar Asset Contract transfer fail — is parked as a
 withdrawable balance rather than failing the whole settlement
 (`escrow::push_or_park`, tested by `a_blocked_challenger_has_their_payout_parked`).
+
+### Partial settlements, refunds, fees and incomplete history
+
+The off-chain portfolio statement is derived from indexed events and is checked
+against totals computed independently of the production reducer. Fixtures in
+`tests/node/portfolio-statement-comparison.fixtures.ts` are synthetic and
+deterministic: they cover partial settlements (a claim settled in several pulls
+with a remainder), refunds (cancelled claims and parked refunds), fees (profit-only
+fee snapshots with and without a recipient), and incomplete history (events that
+are missing or arrive out of order, which must be reported rather than silently
+totalled). The expected totals are summed directly from the fixture events with
+integer atomic-USDC arithmetic and compared against the reducer output in
+`lib/portfolio-performance.ts`. A boundary case with a missing settlement event
+asserts the statement is flagged incomplete instead of reporting a partial total
+as final.
 
 ### Cancellation is guarded against active claims
 
@@ -197,25 +273,4 @@ Source: `contracts-soroban/mimir-squad/src/pool.rs`. Tests: `src/test_lifecycle.
   a second payout.
 - `src/test_dust_isolation.rs` isolates the same dust property for the squad pool:
   the final winner's gross is `formula + dust`, the dust is identical under either
-  claim order, an exactly dividing pool leaves none, conservation holds after every
-  claim, and preview equals payout.
-
-## Virtual baskets
-
-Source: `lib/baskets.ts`. Tests: `tests/node/baskets.test.ts`,
-`tests/node/basket-returns.test.ts`.
-
-- Weights equal exactly 10,000 bps and single-agent/category caps are enforced.
-- Paused/stale/failed-copy allocation remains idle USDC and cannot fabricate NAV.
-- Share/deposit/redemption and high-water-mark calculations use integer rounding
-  with explicit dust ownership.
-- Funded deposits remain off until the external audit and legal/eligibility gates in
-  `LAUNCH_GATE_STATUS.md` are complete.
-
-## Reentrancy
-
-There is no reentrancy guard in these contracts, and that is not an omission: the
-Soroban host rejects a call that re-enters a contract already on the call stack, so
-the EVM `nonReentrant` modifier has no counterpart to port. The ordering discipline it protected
-(state written before an external transfer) is kept anyway, because it is also what
-makes the pull paths correct.
+  claim order, an exactly dividing pool leaves none

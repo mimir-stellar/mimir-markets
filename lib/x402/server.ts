@@ -38,6 +38,13 @@ import {
   proofPayer,
 } from "./stellar-scheme";
 import { recordPayment } from "../paid-revenue";
+import {
+  bindFulfillment,
+  isRedelivery,
+  redeliverySettle,
+  redeliveryVerify,
+  resourceFromTransport,
+} from "./fulfillment-receipt";
 import { sellingPausedResponse } from "./kill-switch";
 
 /**
@@ -55,8 +62,41 @@ export function getResourceServer(): x402ResourceServer {
   // map from facilitators and throws when that map is empty.
   _server = new x402ResourceServer(new LocalStellarFacilitatorClient([X402_NETWORK]))
     .register(X402_NETWORK, new ExactStellarScheme())
+    // A proof whose payment already settled for THIS resource, and whose response
+    // was lost, is admitted again without a new charge (./fulfillment-receipt.ts).
+    // Anything else falls through to the facilitator, which refuses it as
+    // `already_settled`.
+    .onBeforeVerify(async ({ paymentPayload, requirements, transportContext }) => {
+      const result = await redeliveryVerify(paymentPayload, requirements, transportContext);
+      return result ? { skip: true, result } : undefined;
+    })
+    .onBeforeSettle(async ({ paymentPayload, requirements, transportContext }) => {
+      const result = await redeliverySettle(paymentPayload, requirements, transportContext);
+      return result ? { skip: true, result } : undefined;
+    })
     .onAfterSettle(async ({ result, requirements, paymentPayload, transportContext }) => {
       if (!result.success) return;
+      const extra = (result.extra ?? {}) as Record<string, unknown>;
+      // A redelivery is not a new payment: the original settlement already booked
+      // the revenue and bound the receipt.
+      if (isRedelivery(result)) return;
+      const payer = result.payer ?? payerFromPayload(paymentPayload.payload);
+      const resource = resourceFromTransport(result.network, transportContext);
+      if (resource && payer && result.transaction) {
+        try {
+          await bindFulfillment({
+            network: result.network,
+            transaction: result.transaction,
+            payer,
+            amountAtomic: result.amount ?? requirements.amount,
+            resource,
+          });
+        } catch (err) {
+          // Never fail a paid response over the receipt: without it the buyer
+          // only loses the redelivery path, exactly the behaviour before receipts.
+          console.warn("[x402] fulfillment receipt not recorded:", err instanceof Error ? err.message : err);
+        }
+      }
       await recordPayment({
         resource: settledResource(transportContext, paymentPayload.resource?.url),
         scheme: requirements.scheme,
@@ -70,6 +110,9 @@ export function getResourceServer(): x402ResourceServer {
         paymentIdentifier: settlementIdentifier(result.transaction, paymentPayload.payload),
         facilitator: X402_SETTLEMENT_SOURCE(),
         settledAt: Date.now(),
+        observedAt: typeof extra.observedAt === "number" ? extra.observedAt : undefined,
+        policy: extra.policy as any,
+        explanation: typeof extra.explanation === "string" ? extra.explanation : undefined,
       });
     });
 

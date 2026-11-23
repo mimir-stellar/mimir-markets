@@ -13,7 +13,7 @@
  *
  * The rules that make this worth having:
  *
- *  - `**A tier declares its requirements; a route only names its tier.** A route
+ *  - **A tier declares its requirements; a route only names its tier.** A route
  *    cannot accidentally be laxer than its tier, because it does not get to
  *    choose.
  *  - **Money- or authority-changing calls demand an idempotency key** at any tier
@@ -41,6 +41,25 @@ export type AccessTier = (typeof ACCESS_TIERS)[number];
 
 export function isAccessTier(value: string): value is AccessTier {
   return (ACCESS_TIERS as readonly string[]).includes(value);
+}
+
+/**
+ * Reject repeated scalar query parameters that carry conflicting values.
+ *
+ * A scalar parameter repeated with identical values is tolerated; repeated with
+ * differing values it is ambiguous, so we refuse with a stable field-level error
+ * rather than silently trusting the first or last occurrence.
+ */
+export function assertScalarQueryParam(
+  name: string,
+  values: readonly string[] | string | undefined,
+): ApiErrorResult | null {
+  if (values === undefined || typeof values === "string") return null;
+  const distinct = new Set(values);
+  if (distinct.size > 1) {
+    return apiError("invalid_request", `query parameter "${name}" was repeated with conflicting values`);
+  }
+  return null;
 }
 
 export interface TierPolicy {

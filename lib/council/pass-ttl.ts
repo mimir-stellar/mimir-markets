@@ -1,6 +1,10 @@
 /**
  * Council pass lifetime (TTL) resolution.
  *
+ * Council deliberation deadlines are a separate concern handled elsewhere:
+ * an expired deadline is recorded as abstention (missing vote), never as a
+ * substantive disagreement, and never counted toward consensus.
+ *
  * `POST /api/council/subscribe` sells a time-boxed access pass. Its lifetime
  * comes from `COUNCIL_PASS_TTL_MS`, which is operator-supplied — so the raw
  * value can be a typo (`10m`), a blank string, a fraction or a negative

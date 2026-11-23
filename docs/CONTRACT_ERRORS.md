@@ -1,6 +1,6 @@
 # Mimir Contract Errors Reference
 
-This document provides a comprehensive reference of all error codes returned by the Mimir Soroban smart contracts (`mimir-market` and `mimir-squad`).
+This document provides a comprehensive reference of all error codes returned by the Mimir Soroban smart contracts (`mimir-market` and `mimir-squad`). Stale approved fee-policy changes are rejected with the typed `StaleFeePolicyRevision` error (`mimir-market`), preserving the active policy and all balances.
 
 ## Overview
 
@@ -30,7 +30,7 @@ Client SDKs and UI applications can map these numeric error codes or their varia
 | 9 | `StakeTooSmall` | `mimir-market` | `create_claim`, `challenge_claim` | Stake amount is below the required `MIN_STAKE` (2 USDC = 20,000,000 atomic units). | Increase stake to at least 2 USDC (20,000,000 stroops/units). |
 | 10 | `DeadlineInPast` | `mimir-market` | `create_claim` | Market deadline timestamp is less than or equal to current ledger timestamp. | Provide a future unix timestamp for the market resolution deadline. |
 | 11 | `EmptyQuestion` | `mimir-market` | `create_claim` | The claim question string is empty. | Provide a non-empty question string describing the market proposition. |
-| 12 | `ClaimNotFound` | `mimir-market` | `get_claim`, `get_claim_market_config`, `get_claim_fees`, `get_verdict`, `get_verdict_side`, `quote_challenger_payout`, `challenge_claim`, `resolve_claim`, `resolve_claim_versioned`, `transition_deadline`, `cancel_claim`, `claim_challenger_payout` | No market claim exists for the given `claim_id`. | Check the claim ID and verify the claim was created successfully. |
+| 12 | `ClaimNotFound` | `mimir-market` | `get_claim`, `get_claim_statement`, `export_claim_statement`, `get_claim_statement_digest`, `get_claim_market_config`, `get_claim_fees`, `get_verdict`, `get_verdict_side`, `quote_challenger_payout`, `challenge_claim`, `resolve_claim`, `resolve_claim_versioned`, `transition_deadline`, `cancel_claim`, `claim_challenger_payout` | No market claim exists for the given `claim_id`. | Check the claim ID and verify the claim was created successfully. |
 | 13 | `ClaimNotOpen` | `mimir-market` | `challenge_claim`, `transition_deadline`, `cancel_claim` | Operation requires `ClaimState::Open`, but the claim is in a different state (Active, Resolved, or Cancelled). | Check `get_claim(claim_id).state`; challenges and creator cancellations are only allowed while open. |
 | 14 | `SelfChallenge` | `mimir-market` | `challenge_claim` | The creator attempted to challenge their own claim. | A challenge must come from a different wallet address than the creator address. |
 | 15 | `AlreadyChallenged` | `mimir-market` | `challenge_claim` | The account has already submitted a challenge for this claim when duplicate challenges are restricted. | Use another account or wait for new challenge opportunities on other claims. |
@@ -64,7 +64,7 @@ Client SDKs and UI applications can map these numeric error codes or their varia
 | 43 | `ParentClaimNotFound` | `mimir-market` | `create_claim` | Specified `parent_id` for rematch does not exist. | Provide a valid existing parent claim ID, or set `parent_id: 0` for non-rematch claims. |
 | 44 | `ParentClaimInvalidState` | `mimir-market` | `create_claim` | Parent claim is not in a settled state (`Resolved` or `Cancelled`). | Wait for the parent claim to be resolved or cancelled before initiating a rematch. |
 | 45 | `ParentClaimAlreadyRematched` | `mimir-market` | `create_claim` | A rematch claim has already been linked to this parent claim ID. | A parent claim can only have one rematch child; create an independent new claim instead. |
-| 46 | `BatchTooLarge` | `mimir-market` | `get_claims_batch` | Batch query requested more than `MAX_BATCH_SIZE` (50) claim IDs in a single call. | Chunk batch requests into batches of 50 IDs or fewer. |
+| 46 | `BatchTooLarge` | `mimir-market` | `get_claims_batch`, `get_withdrawable_batch` | Batch query requested more than `MAX_BATCH_SIZE` (50) claim IDs or addresses in a single call. | Chunk batch requests into batches of 50 IDs or addresses or fewer. |
 | 47 | `ConservationViolation` | `mimir-market` | `create_claim`, `challenge_claim`, `resolve_claim`, `resolve_claim_versioned`, `cancel_claim`, `claim_challenger_payout` | State transition violated an accounting invariant (negative balances or liability > stake). | Invariant protection triggered to safeguard funds; audit state and report issue. |
 | 1 | `AlreadyInitialized` | `mimir-squad` | `initialize` | Squad pool was already initialized. | No action needed; initialization is one-time only. |
 | 2 | `NotInitialized` | `mimir-squad` | `deposit`, `withdraw_before_deadline`, `claim`, `claim_parked_payout`, `claim_fees`, `queue_oracle`, `execute_oracle`, `get_usdc`, `get_oracle`, `get_fee_recipient`, `get_escrow_balance` | Squad pool entry point called before `initialize`. | Call `initialize` with required USDC token, oracle, and fee recipient addresses before interacting. |
@@ -98,3 +98,5 @@ Client SDKs and UI applications can map these numeric error codes or their varia
 | 30 | `AlreadyResolved` | `mimir-squad` | `cancel_market` | Attempted to cancel a market that has already been resolved or cancelled. | Resolved markets cannot be cancelled; participants can withdraw funds via `claim`. |
 | 31 | `NothingQueued` | `mimir-squad` | `cancel_oracle`, `execute_oracle` | Attempted to cancel or execute an oracle rotation when none was queued. | Queue an oracle change using `queue_oracle` before attempting to cancel or execute. |
 | 32 | `Timelocked` | `mimir-squad` | `execute_oracle` | Oracle timelock period (2 days) has not elapsed since queuing. | Wait until the 2-day timelock has elapsed after `queue_oracle` before calling `execute_oracle`. |
+
+| 48 | `StaleClaimRevision` | `mimir-market` | `challenge_claim`, `resolve_claim`, `resolve_claim_versioned`, `cancel_claim`, `transition_deadline` | Mutation was reviewed against an obsolete claim revision: the caller's expected claim revision no longer matches the current on-chain claim state. No claim or transferred amounts are modified. | Re-read `get_claim(claim_id)` to obtain the current revision and state, re-review the claim, then resubmit the mutation with the updated expected revision. |

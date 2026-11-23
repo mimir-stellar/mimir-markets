@@ -9,6 +9,7 @@ import * as runnerModule from "../../scripts/run-node-tests.mjs";
 type SpawnLike = (command: string, args: string[], options: { cwd: string; env: Record<string, string>; stdio: string }) => { status: number | null; error?: Error };
 
 type RunnerOptions = {
+  nodeVersion?: string;
   argv?: string[];
   root?: string;
   sourceEnvironment?: NodeJS.ProcessEnv;
@@ -22,7 +23,7 @@ type Runner = {
   cacheIdentity: (root?: string, nodeVersion?: string) => { runnerVersion: number; nodeVersion: string; lockfile: string; tsxVersion: string };
   compileCacheDirectory: (options?: { root?: string; cacheRoot?: string; nodeVersion?: string }) => string;
   discoverTestFiles: (root?: string) => string[];
-  parseArgs: (argv?: string[], root?: string) => { cache: boolean; clearCache: boolean; coverage: boolean; coverageDir: string; cacheDir?: string; includeDatabase: boolean; help: boolean; files: string[] };
+  parseArgs: (argv?: string[], root?: string) => { cache: boolean; clearCache: boolean; coverage: boolean; coverageDir: string; cacheDir?: string; includeDatabase: boolean; help: boolean; files: string[]; filters: string[] };
   runNodeTests: (options?: RunnerOptions) => number;
 };
 
@@ -73,7 +74,7 @@ test("argument parsing supports cache, coverage, database opt-in, and explicit f
     assert.equal(options.cacheDir, path.join(root, "artifacts", "cache"));
     assert.equal(options.clearCache, true);
     assert.equal(options.includeDatabase, true);
-    assert.deepEqual(options.files, ["tests/node/sample.test.ts"]);
+    assert.deepEqual(options.filters, ["tests/node/sample.test.ts"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -205,4 +206,28 @@ test("runner publishes a successful coverage report and creates a compile cache"
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("an unsupported runtime reports the engine range before selecting or launching tests", () => {
+  assert.throws(() => runNodeTests({
+    nodeVersion: "21.9.0",
+    argv: ["no-such-test-file"],
+    spawn: () => assert.fail("unexpected test launch"),
+  }), /Detected Node\.js 21\.9\.0.*requires >=22\.0\.0.*nvm use/);
+});
+
+test("the minimum supported runtime reaches the child launcher", () => {
+  let launched = false;
+  const status = runNodeTests({
+    nodeVersion: "22.0.0",
+    argv: ["--no-cache", "node-test-runner.test.ts"],
+    spawn: (_command: string, args: string[]) => {
+      launched = true;
+      assert.ok(args.some((arg) => arg.endsWith("node-test-runner.test.ts")));
+      assert.ok(!args.includes("--experimental-test-isolation=process"));
+      return { status: 0 };
+    },
+  });
+  assert.ok(launched);
+  assert.equal(status, 0);
 });

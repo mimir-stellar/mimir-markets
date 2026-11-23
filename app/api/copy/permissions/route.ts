@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import {
-  copyGrantMessage, copyPolicyHash, copyRevokeMessage, validateCopyPermission, worstCaseCopySpend,
+  copyGrantMessage, copyPermissionReviewDigest, copyPolicyHash, copyRevokeMessage,
+  validateCopyPermission, verifyCopyPermissionReviewDigest, worstCaseCopySpend,
   type CopyPermission,
 } from "@/lib/copy-trading";
 import { getCopyPermission, listCopyExecutions, saveCopyPermission } from "@/lib/db";
@@ -67,6 +68,41 @@ function jsonResponse(data: unknown, init?: ResponseInit): Response {
   });
 }
 
+/**
+ * Describes why a permission is no longer usable. Revocation is terminal and is
+ * reported distinctly from expiry so clients never retry a revoked policy.
+ */
+function permissionStatusDetails(permission: CopyPermission, now: number): {
+  status: CopyPermission["status"];
+  reasonCode: "active" | "revoked" | "expired";
+  effectiveAt: number | null;
+  retryable: boolean;
+} {
+  if (permission.status === "revoked") {
+    return {
+      status: permission.status,
+      reasonCode: "revoked",
+      effectiveAt: permission.revokedAt ?? null,
+      retryable: false,
+    };
+  }
+  const expiresAt = permission.spendPermission.expiresAt;
+  if (typeof expiresAt === "number" && expiresAt <= now) {
+    return {
+      status: permission.status,
+      reasonCode: "expired",
+      effectiveAt: expiresAt,
+      retryable: true,
+    };
+  }
+  return {
+    status: permission.status,
+    reasonCode: "active",
+    effectiveAt: null,
+    retryable: false,
+  };
+}
+
 export async function POST(req: Request): Promise<Response> {
   const { authorizeRequest } = await import("@/lib/api/policy");
   const ip = clientIpFrom(req.headers);
@@ -80,7 +116,7 @@ export async function POST(req: Request): Promise<Response> {
   };
 
   const parsedBody = await readJsonBody<{
-    permission?: JsonPermission; signature?: string; nonce?: string; expiresAt?: number;
+    permission?: JsonPermission; signature?: string; nonce?: string; expiresAt?: number; reviewDigest?: string;
   }>(req);
   if (!parsedBody.ok) {
     return jsonResponse({ error: parsedBody.error }, { status: parsedBody.status });
@@ -125,18 +161,36 @@ export async function POST(req: Request): Promise<Response> {
     return jsonResponse({ error: validationError }, { status: 400 });
   }
 
+  if (body.reviewDigest !== undefined) {
+    const reviewCheck = verifyCopyPermissionReviewDigest(permission, body.reviewDigest);
+    if (!reviewCheck.ok) {
+      const status = reviewCheck.reason === "invalid_review_digest" ? 400 : 409;
+      return jsonResponse(
+        {
+          error: reviewCheck.reason,
+          detail: reviewCheck.reason === "review_digest_mismatch"
+            ? "copy permission changed after review; regenerate review digest before signing"
+            : "reviewDigest must be a 64-character hex SHA-256 digest",
+        },
+        { status },
+      );
+    }
+  }
+
   const window = validateSignedWindow(body.nonce, body.expiresAt);
   if (!window.ok) {
     return jsonResponse({ error: window.message, field: window.field }, { status: 400 });
   }
 
   const signedPolicyHash = copyPolicyHash(permission);
+  const computedReviewDigest = copyPermissionReviewDigest(permission);
   const valid = await verifyAgentSignature({
     address: permission.ownerWallet,
     message: copyGrantMessage({
       permissionId: permission.permissionId,
       ownerWallet: permission.ownerWallet,
       policyHash: signedPolicyHash,
+      ...(body.reviewDigest !== undefined ? { reviewDigest: computedReviewDigest } : {}),
       nonce: window.nonce,
       expiresAt: window.expiresAt,
     }),
@@ -151,7 +205,14 @@ export async function POST(req: Request): Promise<Response> {
   // another owner's row by reusing its id.
   const existing = await getCopyPermission(permission.permissionId);
   if (existing?.status === "revoked") {
-    return jsonResponse({ error: "permission was revoked; grant a new permissionId" }, { status: 409 });
+    return jsonResponse(
+      {
+        error: "permission was revoked; grant a new permissionId",
+        reasonCode: "revoked",
+        retryable: false,
+      },
+      { status: 409 },
+    );
   }
   if (existing && existing.ownerWallet !== permission.ownerWallet) {
     return jsonResponse({ error: "permissionId belongs to another owner" }, { status: 409 });
@@ -165,12 +226,15 @@ export async function POST(req: Request): Promise<Response> {
 
   const record: CopyPermission = { ...permission, signedPolicyHash };
   await saveCopyPermission(record);
+  invalidateCopyPreviewsForPermission(record.permissionId);
 
   const feedback = await evaluateCopyPermissionOnchain(record);
   return jsonResponse({
     permission: record,
+    reviewDigest: computedReviewDigest,
     worstCase: worstCaseCopySpend(record),
     feedback,
+    details: permissionStatusDetails(record, Math.floor(Date.now() / 1000)),
   });
 }
 
@@ -221,11 +285,15 @@ export async function DELETE(req: Request): Promise<Response> {
 
   const revoked: CopyPermission = { ...permission, status: "revoked" };
   await saveCopyPermission(revoked);
+  invalidateCopyPreviewsForPermission(revoked.permissionId);
 
   const feedback = await evaluateCopyPermissionOnchain(revoked);
   return jsonResponse({
     permissionId: revoked.permissionId,
     status: "revoked",
+    reasonCode: "revoked",
+    effectiveAt: revoked.revokedAt ?? Math.floor(Date.now() / 1000),
+    retryable: false,
     feedback,
   });
 }

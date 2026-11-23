@@ -76,6 +76,7 @@ export interface SpendPermissionRecord {
   createdAt: number;
   revokedAt?: number;
   revokedReason?: string;
+  revision?: number;
 }
 
 export type PermissionRejection =
@@ -87,6 +88,46 @@ export type PermissionRejection =
   | "zero_allowance"
   | "bad_period"
   | "allowance_exhausted";
+
+/**
+ * Stable reason codes for responses. A revoked grant is permanently dead and must
+ * never suggest a retry; an expired grant can only be replaced by a new signature.
+ */
+export const PERMISSION_REASON_CODES: Record<PermissionRejection, string> = {
+  wrong_token: "permission_wrong_token",
+  wrong_spender: "permission_wrong_spender",
+  not_started: "permission_not_started",
+  expired: "permission_expired",
+  revoked: "permission_revoked",
+  zero_allowance: "permission_zero_allowance",
+  bad_period: "permission_bad_period",
+  allowance_exhausted: "permission_allowance_exhausted",
+};
+
+/** Whether a client may usefully retry the same grant later. Revocation is terminal. */
+export function isRetryableRejection(reason: PermissionRejection): boolean {
+  return reason !== "revoked";
+}
+
+/**
+ * Response-ready description of a rejection, with stable code and effective times.
+ * `effectiveAt` is when the state began (revocation time, start, or expiry).
+ */
+export function describeRejection(
+  permission: SpendPermissionRecord,
+  reason: PermissionRejection,
+): { reason: PermissionRejection; code: string; retryable: boolean; effectiveAt?: number } {
+  let effectiveAt: number | undefined;
+  if (reason === "revoked") effectiveAt = permission.revokedAt;
+  else if (reason === "expired") effectiveAt = permission.endAt;
+  else if (reason === "not_started") effectiveAt = permission.startAt;
+  return {
+    reason,
+    code: PERMISSION_REASON_CODES[reason],
+    retryable: isRetryableRejection(reason),
+    effectiveAt,
+  };
+}
 
 /**
  * Mimir's spender address. Unset means funded actions cannot be delegated at all.
@@ -140,6 +181,17 @@ export function permissionKey(input: {
 }
 
 /**
+ * Canonical revision identifier for a delegated spend permission.
+ *
+ * Reflects the signed parameters, allowance, period, revision, and revocation state.
+ */
+export function spendPermissionRevision(permission: SpendPermissionRecord): string {
+  const rev = typeof permission.revision === "number" ? permission.revision : 0;
+  const status = permission.revokedAt ? `revoked:${permission.revokedAt}` : "active";
+  return sha256Hex(`${permission.permissionHash}|rev:${rev}|status:${status}|allowance:${permission.allowanceAtomic.toString()}`);
+}
+
+/**
  * Start of the period a moment falls in. Before `start` there is no period yet, so
  * the caller must treat that as not-yet-active rather than as period zero.
  */
@@ -158,6 +210,8 @@ export function checkPermission(
   nowSeconds: number,
   spender: string | null,
 ): { ok: true } | { ok: false; reason: PermissionRejection } {
+  // Revocation is checked first and wins over expiry: a permission that was revoked
+  // before its end must report `revoked` (terminal) rather than `expired`.
   if (permission.revokedAt) return { ok: false, reason: "revoked" };
   const token = requiredToken();
   // An unconfigured USDC contract id must not degrade into "any token passes":
@@ -176,6 +230,23 @@ export function checkPermission(
   return { ok: true };
 }
 
+/**
+ * Owner-readable copy execution timeline entry.
+ *
+ * References only: signal, policy, reservation and chain outcome identifiers.
+ * Signing seeds and private agent reasoning are never included.
+ */
+export interface CopyExecutionTimelineEntry {
+  at: number;
+  stage: "signal" | "policy" | "reservation" | "chain";
+  status: "ok" | "rejected" | "pending" | "failed";
+  signalRef?: string;
+  policyRef?: string;
+  reservationRef?: string;
+  chainRef?: string;
+  reason?: string;
+}
+
 export interface SpendDecision {
   allowed: boolean;
   reason?: PermissionRejection;
@@ -188,6 +259,20 @@ export interface SpendDecision {
 /**
  * Would this amount fit? Answers with the remaining allowance either way, because
  * "no" without a number is an agent that cannot decide whether to wait or to stop.
+ */
+/**
+ * ── In-flight intents (#885) ─────────────────────────────────────────────
+ * `spentThisPeriodAtomic` must include the atomic stake of every copy
+ * execution intent still in `pending` or `unknown` state
+ * (`reservedSpendAtomic(intents)` in `lib/copy-trading`). The chain allowance
+ * is authoritative and will move once the submit lands, but the local period
+ * budget must reserve the stake the moment the intent is persisted —
+ * otherwise the same budget can authorise two submissions whose outcome is
+ * unknown, and only one of them can be real.
+ *
+ * The reservation is dropped when the intent reconciles to `confirmed`; the
+ * intent must NOT be added again on top of the confirmed spend, or the budget
+ * would count the same stake twice.
  */
 export function evaluateSpend(args: {
   permission: SpendPermissionRecord;
@@ -213,6 +298,38 @@ export function evaluateSpend(args: {
   return { allowed: true, remainingAtomic: remainingBefore - amountAtomic, periodStart, periodEndsAt };
 }
 
+/**
+ * Build an owner-readable timeline from already-recorded execution events.
+ *
+ * Only reference identifiers and status are copied through; any sensitive
+ * field (seeds, reasoning) on the input is dropped by construction.
+ */
+export function buildCopyExecutionTimeline(
+  events: Array<{
+    at: number;
+    stage: CopyExecutionTimelineEntry["stage"];
+    status: CopyExecutionTimelineEntry["status"];
+    signalRef?: string;
+    policyRef?: string;
+    reservationRef?: string;
+    chainRef?: string;
+    reason?: string;
+  }>,
+): CopyExecutionTimelineEntry[] {
+  return events
+    .map((e) => ({
+      at: e.at,
+      stage: e.stage,
+      status: e.status,
+      ...(e.signalRef ? { signalRef: e.signalRef } : {}),
+      ...(e.policyRef ? { policyRef: e.policyRef } : {}),
+      ...(e.reservationRef ? { reservationRef: e.reservationRef } : {}),
+      ...(e.chainRef ? { chainRef: e.chainRef } : {}),
+      ...(e.reason ? { reason: e.reason } : {}),
+    }))
+    .sort((a, b) => a.at - b.at);
+}
+
 /** Shape accepted from the browser after the owner signs, before we trust any of it. */
 export interface SpendPermissionGrant {
   account?: unknown;
@@ -227,6 +344,7 @@ export interface SpendPermissionGrant {
   extraData?: unknown;
   signature?: unknown;
   permission?: unknown;
+  revision?: unknown;
 }
 
 function asStellarAddress(value: unknown): string | null {
@@ -300,6 +418,8 @@ export function parseSpendPermissionGrant(args: {
   const salt = asBigInt(grant.salt)?.toString() ?? "0";
   const extraData = typeof grant.extraData === "string" ? grant.extraData : "";
   const expirationLedger = asSeconds(grant.expirationLedger) ?? undefined;
+  const parsedRevision = asBigInt(grant.revision);
+  const revision = parsedRevision !== null && parsedRevision >= 0n ? Number(parsedRevision) : undefined;
 
   return {
     ok: true,
@@ -308,6 +428,7 @@ export function parseSpendPermissionGrant(args: {
       agentId, account, spender: grantSpender, token, allowanceAtomic, periodSeconds,
       startAt, endAt, salt, extraData, signature,
       ...(expirationLedger !== undefined ? { expirationLedger } : {}),
+      ...(revision !== undefined ? { revision } : {}),
       // Stored verbatim: a re-verification has to hash the object the owner
       // actually signed, not one we rebuilt from parsed parts.
       permissionJson: JSON.stringify(grant.permission ?? grant),

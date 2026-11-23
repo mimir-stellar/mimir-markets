@@ -1,4 +1,14 @@
-import { evaluateCopy, type CopyExecutionContext, type CopyPermission, type CopySignal } from "@/lib/copy-trading";
+import {
+  copyPermissionRevision,
+  createCopyPreviewCacheEntry,
+  evaluateCopy,
+  setCopyPreviewCache,
+  type CopyDryRunContext as _,
+  type CopyExecutionContext,
+  type CopyPermission,
+  type CopyPreviewCacheEntry,
+  type CopySignal,
+} from "@/lib/copy-trading";
 import { checkWriteAllowed, isPaused } from "@/lib/ops/flags";
 import { parseUsdcAtomic } from "@/lib/usdc";
 
@@ -9,12 +19,16 @@ export type CopyDryRunContext = Omit<CopyExecutionContext, "globalPaused" | "sim
  * insert, reservation or transaction is made here. In particular, a positive
  * result is never an authorization to stake: the executor must re-read live
  * state and simulate the exact invocation before any funded action.
+ *
+ * Previews are bound to the permission revision and cached. Any owner policy update
+ * or revocation invalidates the cached entry and changes the revision.
  */
 export function buildCopyExecutionDryRun(args: {
   permission: CopyPermission;
   signal: CopySignal;
   context: CopyDryRunContext;
   env?: Record<string, string | undefined>;
+  cache?: boolean;
 }) {
   const env = args.env ?? process.env;
   const writeGate = checkWriteAllowed(
@@ -34,15 +48,33 @@ export function buildCopyExecutionDryRun(args: {
   let stakeAtomic: string | null = null;
   try { stakeAtomic = parseUsdcAtomic(args.signal.stakeUsdc).toString(); } catch { /* malformed input has no amount */ }
 
+  const permissionRevision = copyPermissionRevision(args.permission);
+  const policyEligible = previewGate.allowed && decision.allowed;
+
+  let previewEntry: CopyPreviewCacheEntry | null = null;
+  if (args.cache !== false) {
+    previewEntry = createCopyPreviewCacheEntry({
+      permission: args.permission,
+      signal: args.signal,
+      decision,
+      policyEligible,
+      now: args.context.now,
+    });
+    setCopyPreviewCache(previewEntry);
+  }
+
   return {
     mode: "dry_run" as const,
+    preflight: true as const,
     stateSource: "supplied_snapshot" as const,
-    policyEligible: previewGate.allowed && decision.allowed,
+    policyEligible,
     reason: !decision.allowed ? decision.reason : !previewGate.allowed ? previewGate.reason : null,
     detail: !previewGate.allowed ? previewGate.detail : null,
     fundedGateOpen: writeGate.allowed,
     fundedGateBlock: writeGate.reason ?? null,
     stakeAtomic,
+    permissionRevision,
+    previewId: previewEntry?.previewId ?? null,
     simulation: "not_run" as const,
     executionReady: false as const,
     transactionSubmitted: false as const,

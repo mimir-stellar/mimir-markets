@@ -16,6 +16,17 @@ import { TRACE_HEADER } from "../ops/trace-http";
 import { currentTraceId } from "../ops/trace";
 import { isTraceId } from "../ops/trace-id";
 import { createApiError, type ApiErrorShape } from "../server/api-validation";
+import {
+  buildFeedSourceMetadata,
+  schemaVersionHeaders,
+  staleFeedSourceMetadata,
+  unavailableFeedSourceMetadata,
+  versionedMarketFeed,
+  type FeedSourceFailureReason,
+  type FeedSourceKind,
+  type FeedSourceMetadata,
+  type VersionedMarketFeedResponse,
+} from "./schema";
 
 export type ApiErrorCode =
   // ── 400: the caller must change the request ──
@@ -24,6 +35,8 @@ export type ApiErrorCode =
   | "unsupported_version"
   | "payload_too_large"
   | "idempotency_conflict"
+  // Cursor was issued for a different sort/filter selection, or is malformed.
+  | "invalid_cursor"
   // ── 401/403: identity and permission ──
   | "unauthenticated"
   | "nonce_reused"
@@ -35,6 +48,8 @@ export type ApiErrorCode =
   // ── 404/409 ──
   | "not_found"
   | "conflict"
+  // ── 412/304: conditional request outcomes ──
+  | "precondition_failed"
   // ── 429: slow down ──
   | "rate_limited"
   | "budget_exhausted"
@@ -61,6 +76,9 @@ const SPECS: Record<ApiErrorCode, ErrorSpec> = {
   // The same idempotency key arrived with a DIFFERENT body: retrying cannot fix
   // it, the caller must either reuse the original body or pick a new key.
   idempotency_conflict: { status: 409, retryable: false },
+  // A cursor bound to another query shape can never become valid for this one:
+  // the caller must restart pagination from the first page.
+  invalid_cursor: { status: 400, retryable: false },
 
   unauthenticated: { status: 401, retryable: false },
   nonce_reused: { status: 401, retryable: false },
@@ -74,6 +92,10 @@ const SPECS: Record<ApiErrorCode, ErrorSpec> = {
 
   not_found: { status: 404, retryable: false },
   conflict: { status: 409, retryable: false },
+
+  // A failed If-Match / If-None-Match precondition means the caller's view of the
+  // resource is stale; re-reading and retrying with the new validator can succeed.
+  precondition_failed: { status: 412, retryable: true, retryAfterSeconds: 0 },
 
   rate_limited: { status: 429, retryable: true, retryAfterSeconds: 60 },
   // A budget refills on a window boundary, so it is retryable but not soon.
@@ -98,7 +120,33 @@ export interface ApiError extends ApiErrorShape {
      * meaningless to an agent that ignores it.
      */
     trace_id?: string;
+    /**
+     * Observation freshness of the data behind this response, when the route
+     * serves market observations. Uses the same shared shape as success responses
+     * (see `lib/api/schema.ts`), so clients read freshness identically everywhere.
+     */
+    freshness?: ObservationFreshness;
   };
+}
+
+/**
+ * Shared observation-freshness descriptor, attached to feed, detail and
+ * performance responses (and error bodies that serve observations).
+ *
+ * - `ledger`: trusted ledger sequence the observation was read at.
+ * - `observed_at`: ISO-8601 time the observation was taken.
+ * - `known_gaps`: explicit, machine-readable gap descriptors; empty when none.
+ */
+export interface ObservationFreshness {
+  ledger: number;
+  observed_at: string;
+  known_gaps: ObservationGap[];
+}
+
+export interface ObservationGap {
+  from_ledger: number;
+  to_ledger: number;
+  reason: string;
 }
 
 export interface ApiErrorResult {
@@ -117,7 +165,12 @@ export interface ApiErrorResult {
 export function apiError(
   code: ApiErrorCode,
   message: string,
-  opts: { field?: string; retryAfterSeconds?: number; requestId?: string } = {},
+  opts: {
+    field?: string;
+    retryAfterSeconds?: number;
+    requestId?: string;
+    freshness?: ObservationFreshness;
+  } = {},
 ): ApiErrorResult {
   const spec = SPECS[code];
   const retryAfter = opts.retryAfterSeconds ?? spec.retryAfterSeconds;
@@ -129,6 +182,7 @@ export function apiError(
       ...(retryAfter !== undefined ? { retryAfterSeconds: retryAfter } : {}),
       ...(opts.field ? { field: opts.field } : {}),
       ...(opts.requestId ? { requestId: opts.requestId } : {}),
+      ...(opts.freshness ? { freshness: cloneFreshness(opts.freshness) } : {}),
     },
   };
   const headers: Record<string, string> = {};
@@ -146,6 +200,22 @@ export function apiError(
     headers[TRACE_HEADER] = traceId;
   }
   return { status: spec.status, body, headers };
+}
+
+/**
+ * Copy a freshness descriptor so callers cannot mutate a shared object after the
+ * response has been built.
+ */
+export function cloneFreshness(f: ObservationFreshness): ObservationFreshness {
+  return {
+    ledger: f.ledger,
+    observed_at: f.observed_at,
+    known_gaps: f.known_gaps.map((g) => ({
+      from_ledger: g.from_ledger,
+      to_ledger: g.to_ledger,
+      reason: g.reason,
+    })),
+  };
 }
 
 export function withRequestId(result: ApiErrorResult, requestId: string): ApiErrorResult {

@@ -1,0 +1,16 @@
+# Pool mode, challengers win. 100,000,000 / 30,000,001 truncates, so the last claimant absorbs the dust.
+mimir-settlement-manifest v1
+claim 101
+winner challengers
+mode pool
+creator_stake 100000000
+platform_fee_bps 200
+agent_owner_fee_bps 100
+platform_recipient yes
+agent_owner_recipient yes
+creator_paid 0
+creator_fee 0
+challenger 10000000 43333332 999999 42333333
+challenger 10000000 43333332 999999 42333333
+challenger 10000001 43333337 999999 42333338
+remaining 0

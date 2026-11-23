@@ -87,6 +87,59 @@ export const X402_PAYMENT_MAX_AGE_MS = (() => {
 })();
 
 /**
+ * Canonical version identifier for the x402 verification freshness policy.
+ */
+export const X402_FRESHNESS_POLICY_VERSION = "x402-freshness-v1";
+
+/**
+ * Versioned verification freshness policy shape applied during x402 proof checks.
+ */
+export interface X402FreshnessPolicy {
+  version: string;
+  maxAgeMs: number;
+}
+
+/**
+ * Resolved dynamically so configuration changes (e.g. via process.env)
+ * take effect without requiring module re-import.
+ */
+export function x402PaymentMaxAgeMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(env.X402_PAYMENT_MAX_AGE_MS ?? 0);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : X402_PAYMENT_MAX_AGE_MS;
+}
+
+/**
+ * Active verification freshness policy for current settlements.
+ */
+export function defaultFreshnessPolicy(maxAgeMs?: number): X402FreshnessPolicy {
+  return {
+    version: X402_FRESHNESS_POLICY_VERSION,
+    maxAgeMs: maxAgeMs ?? x402PaymentMaxAgeMs(),
+  };
+}
+
+/**
+ * How long after settlement a buyer whose paid response was lost may present the
+ * same proof again and receive the response for the SAME resource without paying
+ * again (see `./fulfillment-receipt.ts`). Default 15 minutes.
+ */
+export const X402_REDELIVERY_WINDOW_MS = (() => {
+  const raw = Number(process.env.X402_REDELIVERY_WINDOW_MS ?? 0);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 15 * 60 * 1000;
+})();
+
+/**
+ * How many redeliveries one payment may receive inside that window. Default 3;
+ * `0` turns redelivery off (every repeated proof is refused as `already_settled`).
+ */
+export const X402_REDELIVERY_MAX = (() => {
+  const raw = process.env.X402_REDELIVERY_MAX;
+  if (raw === undefined || raw.trim() === "") return 3;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : 3;
+})();
+
+/**
  * Default seller — usually the oracle wallet. Persona routes override per-request.
  */
 export function sellerAddress(payTo?: string): string {
