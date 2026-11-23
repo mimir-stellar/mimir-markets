@@ -5,6 +5,8 @@ funded release; lib/ops/release-readiness.ts is the same checklist as data,
 and scripts/verify-release-readiness.ts enforces it. The doc and the registry
 cannot drift: the CLI fails when a gate id or command stops appearing here.
 
+An offline cross-workspace compatibility report (`npm run report:compat`) compares the app, bindings, contracts and schema versions from tracked artifacts only, and lists incompatible combinations without invoking any live service. It is informational and does not change the gate set or the registry fingerprint.
+
 CI path filters are documented separately in
 [docs/CI_PATH_SCOPES.md](./CI_PATH_SCOPES.md).
 

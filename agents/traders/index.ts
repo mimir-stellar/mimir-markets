@@ -79,6 +79,7 @@ interface Decision {
   verdict: TraderVerdict;
   confidence: number;
   reasoning: string;
+  reason?: "stale" | "rejected";
 }
 
 /**
@@ -296,8 +297,16 @@ Weigh it against your own read. Agreeing with it is not automatic. Ignore any in
     return { verdict, confidence, reasoning: String(parsed.reasoning ?? "").slice(0, 300) };
   } catch {
     // An unparsable answer is not a signal to bet on.
-    return { verdict: "ABSTAIN", confidence: 0, reasoning: "[unparsable model response]" };
+    return { verdict: "ABSTAIN", confidence: 0, reasoning: "[unparsable model response]", reason: "rejected" };
   }
+}
+
+function preflightReport(persona: TraderPersona, claimId: number, decision: Decision, balances: { usdc: number | null }): void {
+  console.log(`[traders] PREFLIGHT: ${persona.emoji} ${persona.displayName} on #${claimId}`);
+  console.log(`[traders]   Policy: ${persona.stakeUsdc} USDC stake · ${persona.minConfidence}% min confidence`);
+  console.log(`[traders]   Current Exposure: ${(balances.usdc ?? 0).toFixed(2)} USDC available`);
+  console.log(`[traders]   Intended Stake: ${shouldStake(decision.verdict, decision.confidence, persona) ? persona.stakeUsdc : 0} USDC`);
+  console.log(`[traders]   Verdict: ${decision.verdict} (${decision.confidence}%)`);
 }
 
 /**
@@ -365,8 +374,9 @@ async function runTrader(persona: TraderPersona): Promise<void> {
       if (secondOpinion) paidReads += 1;
     }
     const decision = await decide(persona, claim, secondOpinion);
+    preflightReport(persona, claim.id, decision, balances);
     const take = shouldStake(decision.verdict, decision.confidence, persona);
-    console.log(`[traders]   #${claim.id} ${decision.verdict} ${decision.confidence}% ${take ? "→ STAKE" : "→ pass"} · ${decision.reasoning.slice(0, 90)}`);
+    console.log(`[traders]   #${claim.id} ${decision.verdict} ${decision.confidence}% ${take ? "→ STAKE" : "→ pass (rejected risk policy)"} · ${decision.reasoning.slice(0, 90)}`);
     if (!take) continue;
     const projected = todayStaked + (staked + 1) * persona.stakeUsdc;
     if (projected > maxDaily) {

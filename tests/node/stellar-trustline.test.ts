@@ -9,14 +9,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { Account, Keypair, StrKey } from "@stellar/stellar-sdk";
+
 import {
+  ensureUsdcTrustline,
+  formatTrustlineError,
   readUsdcTrustline,
+  sanitizeTrustlineDiagnostic,
+  USDC_TRUSTLINE_DESCRIPTOR,
   type HorizonAccount,
   type HorizonBalanceLine,
   type TrustlineStatus,
 } from "../../lib/stellar-trustline";
+import { type StellarSigner } from "../../lib/stellar";
 import { USDC_CODE, USDC_ISSUER } from "../../lib/usdc";
 import { evaluateUsdcTrustlineGate, usdcTrustlineGateFixture } from "../../lib/usdcTrustlineGate";
+import { sanitizeWalletMessage, toWalletError } from "../../lib/wallet";
 
 const ACCOUNT_A = "GBO43ZBS4RBC2QFDKB23U6TBFEEK47ZLGSXDJSRV2H3PNQK5ZDEYXVLE";
 const IMPOSTOR_ISSUER = "GD2SI5PUEFKC7TONNX7OR72WMYUO7WZDSCDSIVWWXPDIDYW5OP3ETM5D";
@@ -271,4 +279,246 @@ test("every TrustlineStatus value is produced by at least one fixture", async ()
     [...produced].sort(),
     ["missing", "ready", "unfunded", "unknown"],
   );
+});
+
+// ── Asset Identification and Seed Redaction Coverage ─────────────────────────
+
+test("USDC_TRUSTLINE_DESCRIPTOR exports safe asset code and issuer metadata", () => {
+  assert.equal(USDC_TRUSTLINE_DESCRIPTOR.code, USDC_CODE);
+  assert.equal(USDC_TRUSTLINE_DESCRIPTOR.issuer, USDC_ISSUER);
+  assert.equal(USDC_TRUSTLINE_DESCRIPTOR.code, "USDC");
+  assert.equal(
+    USDC_TRUSTLINE_DESCRIPTOR.issuer,
+    "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  );
+});
+
+test("sanitizeTrustlineDiagnostic: redacts secret seeds and sensitive tokens without altering public keys", () => {
+  const kp = Keypair.random();
+  const secretSeed = kp.secret();
+  const publicKey = kp.publicKey();
+
+  // Plain seed redaction
+  const leak1 = `connector error at seed ${secretSeed}`;
+  const clean1 = sanitizeTrustlineDiagnostic(leak1);
+  assert.equal(clean1.includes(secretSeed), false);
+  assert.equal(clean1, "connector error at seed [redacted-seed]");
+
+  // Seed with secret= key pattern
+  const leak2 = `failed submission secret=${secretSeed}`;
+  const clean2 = sanitizeTrustlineDiagnostic(leak2);
+  assert.equal(clean2.includes(secretSeed), false);
+  assert.equal(clean2, "failed submission secret=[redacted-seed]");
+
+  // Lowercase secret seed redaction
+  const leak3 = `leaked lowercase: ${secretSeed.toLowerCase()}`;
+  const clean3 = sanitizeTrustlineDiagnostic(leak3);
+  assert.equal(clean3.includes(secretSeed.toLowerCase()), false);
+  assert.equal(clean3, "leaked lowercase: [redacted-seed]");
+
+  // Sensitive auth / token redactions
+  const leak4 = "api_key=secret-xyz bearer=token-abc";
+  const clean4 = sanitizeTrustlineDiagnostic(leak4);
+  assert.equal(clean4, "api_key=[redacted] bearer=[redacted]");
+
+  // Boundary check: Public key, contract address, and official USDC issuer must NEVER be redacted
+  const safeMessage = `Asset USDC with issuer ${USDC_ISSUER} for account ${publicKey} and contract ${CONTRACT_A}`;
+  const safeClean = sanitizeTrustlineDiagnostic(safeMessage);
+  assert.equal(safeClean, safeMessage);
+  assert.equal(safeClean.includes(USDC_ISSUER), true);
+  assert.equal(safeClean.includes(publicKey), true);
+});
+
+test("formatTrustlineError: identifies asset metadata and omits private connector payloads", () => {
+  // Generic error gets asset identification
+  const genericErr = formatTrustlineError(new Error("network timeout"));
+  assert.equal(genericErr.message.includes(USDC_CODE), true);
+  assert.equal(genericErr.message.includes(USDC_ISSUER), true);
+  assert.equal(genericErr.message.includes("network timeout"), true);
+
+  // Private connector payloads (ext, payload, data) are strictly excluded
+  const connectorErrObj = {
+    code: -32603,
+    message: "Hardware wallet prompt failed",
+    ext: { privatePayload: "sensitive_transport_dump", internalSignature: 99 },
+    payload: { seedLeak: "private_data" },
+  };
+  const formattedConnectorErr = formatTrustlineError(connectorErrObj);
+  assert.equal(formattedConnectorErr.message.includes(USDC_CODE), true);
+  assert.equal(formattedConnectorErr.message.includes(USDC_ISSUER), true);
+  assert.equal(formattedConnectorErr.message.includes("Hardware wallet prompt failed"), true);
+  assert.equal(formattedConnectorErr.message.includes("sensitive_transport_dump"), false);
+  assert.equal(formattedConnectorErr.message.includes("privatePayload"), false);
+  assert.equal(formattedConnectorErr.message.includes("seedLeak"), false);
+
+  // Secret seed inside cause message is redacted
+  const kp = Keypair.random();
+  const seedInCause = formatTrustlineError(new Error(`Failed with seed ${kp.secret()}`));
+  assert.equal(seedInCause.message.includes(kp.secret()), false);
+  assert.equal(seedInCause.message.includes("[redacted-seed]"), true);
+  assert.equal(seedInCause.message.includes(USDC_CODE), true);
+  assert.equal(seedInCause.message.includes(USDC_ISSUER), true);
+
+  // Error already identifying asset and issuer is preserved
+  const preformatted = new Error(`Already identified: ${USDC_CODE} trustline for ${USDC_ISSUER}`);
+  assert.equal(formatTrustlineError(preformatted).message, preformatted.message);
+});
+
+test("ensureUsdcTrustline: unfunded error identifies the asset and safe issuer", async () => {
+  const kp = Keypair.random();
+  const signer: StellarSigner = {
+    publicKey: kp.publicKey(),
+    signTransaction: async (xdr) => ({ signedTxXdr: xdr, signerAddress: kp.publicKey() }),
+  };
+
+  await assert.rejects(
+    async () => {
+      await ensureUsdcTrustline(signer, {
+        loadAccount: async () => {
+          throw horizonError(404, "Not Found");
+        },
+      });
+    },
+    (err: unknown) => {
+      assert(err instanceof Error);
+      const error = err as Error;
+      assert.equal(error.message.includes(USDC_CODE), true);
+      assert.equal(error.message.includes(USDC_ISSUER), true);
+      assert.match(error.message, /does not exist on the Stellar ledger yet/);
+      assert.match(error.message, /Fund it with XLM first/);
+      // Compatible with UsdcTrustlineGate regex: /fund|account.*exist|not exist/i
+      assert.equal(/fund|account.*exist|not exist/i.test(error.message), true);
+      return true;
+    },
+  );
+});
+
+test("ensureUsdcTrustline: rejects secret seed as signer.publicKey without exposing seed", async () => {
+  const kp = Keypair.random();
+  const secretSeed = kp.secret();
+
+  const badSigner: StellarSigner = {
+    publicKey: secretSeed,
+    signTransaction: async (xdr) => ({ signedTxXdr: xdr, signerAddress: secretSeed }),
+  };
+
+  await assert.rejects(
+    async () => {
+      await ensureUsdcTrustline(badSigner);
+    },
+    (err: unknown) => {
+      assert(err instanceof Error);
+      const error = err as Error;
+      // Asset and issuer are identified
+      assert.equal(error.message.includes(USDC_CODE), true);
+      assert.equal(error.message.includes(USDC_ISSUER), true);
+      // The secret seed MUST NOT be exposed in the error message
+      assert.equal(error.message.includes(secretSeed), false);
+      assert.match(error.message, /secret seed must not be used as public key/i);
+      return true;
+    },
+  );
+});
+
+test("ensureUsdcTrustline: wraps connector signing failures, redacting seeds and omitting private payloads", async () => {
+  const kp = Keypair.random();
+  const secretSeed = kp.secret();
+  const publicKey = kp.publicKey();
+  const mockAccount = new Account(publicKey, "100");
+
+  const signer: StellarSigner = {
+    publicKey,
+    signTransaction: async () => {
+      // Simulate kit error with private connector payloads and leaked seed
+      throw {
+        code: -32603,
+        message: `Connector failed to sign with seed ${secretSeed}`,
+        ext: { privatePayload: "ext_private_connector_state" },
+        payload: { secretConnectorField: true },
+      };
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      await ensureUsdcTrustline(signer, {
+        loadAccount: async () => horizonAccountFixture([NATIVE_BALANCE_LINE], publicKey),
+        server: {
+          loadAccount: async () => mockAccount as any,
+          submitTransaction: async () => ({ hash: "tx_ok" }),
+        },
+      });
+    },
+    (err: unknown) => {
+      assert(err instanceof Error);
+      const error = err as Error;
+      // Asset and issuer are identified
+      assert.equal(error.message.includes(USDC_CODE), true);
+      assert.equal(error.message.includes(USDC_ISSUER), true);
+      // Secret seed is redacted
+      assert.equal(error.message.includes(secretSeed), false);
+      assert.equal(error.message.includes("[redacted-seed]"), true);
+      // Private connector payload is omitted
+      assert.equal(error.message.includes("ext_private_connector_state"), false);
+      assert.equal(error.message.includes("secretConnectorField"), false);
+      return true;
+    },
+  );
+});
+
+test("ensureUsdcTrustline: preserves user rejection keywords for UI gating compatibility", async () => {
+  const kp = Keypair.random();
+  const publicKey = kp.publicKey();
+  const mockAccount = new Account(publicKey, "100");
+
+  const signer: StellarSigner = {
+    publicKey,
+    signTransaction: async () => {
+      throw new Error("User rejected the transaction in wallet modal");
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      await ensureUsdcTrustline(signer, {
+        loadAccount: async () => horizonAccountFixture([NATIVE_BALANCE_LINE], publicKey),
+        server: {
+          loadAccount: async () => mockAccount as any,
+          submitTransaction: async () => ({ hash: "tx_ok" }),
+        },
+      });
+    },
+    (err: unknown) => {
+      assert(err instanceof Error);
+      const error = err as Error;
+      assert.equal(error.message.includes(USDC_CODE), true);
+      assert.equal(error.message.includes(USDC_ISSUER), true);
+      // Rejection keyword preserved for UI regex
+      assert.equal(/reject|denied|cancel/i.test(error.message), true);
+      return true;
+    },
+  );
+});
+
+test("toWalletError and sanitizeWalletMessage: keep private connector payloads out and redact seeds", () => {
+  const kp = Keypair.random();
+  const secretSeed = kp.secret();
+
+  const kitError = {
+    code: -32603,
+    message: `Sign failed with seed ${secretSeed}`,
+    ext: { privatePayload: "sensitive_connector_token_payload" },
+    payload: { internalKey: "abc123secret" },
+  };
+
+  const walletErr = toWalletError(kitError, "sign transaction");
+  assert.equal(walletErr.message.includes(secretSeed), false);
+  assert.equal(walletErr.message.includes("[redacted-seed]"), true);
+  assert.equal(walletErr.message.includes("sensitive_connector_token_payload"), false);
+  assert.equal(walletErr.message.includes("internalKey"), false);
+
+  const sanitized = sanitizeWalletMessage(`secret_seed: ${secretSeed} for issuer ${USDC_ISSUER}`);
+  assert.equal(sanitized.includes(secretSeed), false);
+  assert.equal(sanitized.includes("[redacted-seed]"), true);
+  assert.equal(sanitized.includes(USDC_ISSUER), true);
 });

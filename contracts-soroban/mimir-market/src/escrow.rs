@@ -73,6 +73,66 @@ pub fn push(env: &Env, usdc: &Address, to: &Address, amount: i128) {
     client.transfer(&env.current_contract_address(), to, &amount);
 }
 
+/// Split `total` atomic USDC across `shares` (basis points summing to 10_000).
+///
+/// Each recipient receives `floor(total * share / 10_000)`. Any indivisible
+/// remainder is assigned to the final recipient so the allocations always sum
+/// exactly to `total`, preserving escrow conservation for tiny stakes.
+pub fn allocate_exact(total: i128, shares: &[u32]) -> Result<soroban_sdk::Vec<i128>, Error> {
+    if total < 0 || shares.is_empty() {
+        return Err(Error::ZeroStake);
+    }
+    let mut sum: u32 = 0;
+    for s in shares {
+        sum = sum.checked_add(*s).ok_or(Error::ZeroStake)?;
+    }
+    if sum != 10_000 {
+        return Err(Error::ZeroStake);
+    }
+    let mut out = soroban_sdk::Vec::new(&soroban_sdk::Env::default());
+    let mut allocated: i128 = 0;
+    let last = shares.len() - 1;
+    for (i, s) in shares.iter().enumerate() {
+        let amt = if i == last {
+            total - allocated
+        } else {
+            total
+                .checked_mul(*s as i128)
+                .ok_or(Error::ZeroStake)?
+                / 10_000
+        };
+        allocated += amt;
+        out.push_back(amt);
+    }
+    Ok(out)
+}
+
 pub fn balance(env: &Env, usdc: &Address) -> i128 {
     token::TokenClient::new(env, usdc).balance(&env.current_contract_address())
+}
+
+#[cfg(test)]
+mod fee_balance_tests {
+    use super::fee_balance;
+
+    #[test]
+    fn no_accrual_is_all_zero() {
+        let b = fee_balance(0, 0);
+        assert_eq!(b.accrued, 0);
+        assert_eq!(b.claimed, 0);
+        assert_eq!(b.outstanding, 0);
+    }
+
+    #[test]
+    fn fully_claimed_differs_from_no_accrual() {
+        let b = fee_balance(5_000_000, 5_000_000);
+        assert_eq!(b.outstanding, 0);
+        assert_ne!(b, fee_balance(0, 0));
+    }
+
+    #[test]
+    fn partially_claimed_is_exact() {
+        let b = fee_balance(10_000_000, 3_500_000);
+        assert_eq!(b.outstanding, 6_500_000);
+    }
 }
