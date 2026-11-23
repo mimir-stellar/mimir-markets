@@ -1,6 +1,6 @@
 # Mimir Contract Errors Reference
 
-This document provides a comprehensive reference of all error codes returned by the Mimir Soroban smart contracts (`mimir-market` and `mimir-squad`).
+This document provides a comprehensive reference of all error codes returned by the Mimir Soroban smart contracts (`mimir-market` and `mimir-squad`). Stale approved fee-policy changes are rejected with the typed `StaleFeePolicyRevision` error (`mimir-market`), preserving the active policy and all balances.
 
 ## Overview
 

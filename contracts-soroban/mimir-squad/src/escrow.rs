@@ -122,3 +122,34 @@ mod withdrawal_reason_tests {
 pub fn balance(env: &Env, usdc: &Address) -> i128 {
     token::TokenClient::new(env, usdc).balance(&env.current_contract_address())
 }
+
+/// Read-only preview of the value a cancellation would move. Performs no
+/// transfer, no authority change and no storage write: it only reports the
+/// escrow balance the pool currently holds against its refundable liabilities.
+pub fn preview_refund_capacity(env: &Env, usdc: &Address, refundable: i128) -> i128 {
+    let held = balance(env, usdc);
+    if refundable <= 0 {
+        0
+    } else if refundable < held {
+        refundable
+    } else {
+        held
+    }
+}
+
+/// Read the escrow balance without trapping. Returns `None` when the token
+/// cannot answer a balance query, so callers can report an explicit state
+/// instead of overloading zero.
+pub fn try_balance(env: &Env, usdc: &Address) -> Option<i128> {
+    match token::TokenClient::new(env, usdc).try_balance(&env.current_contract_address()) {
+        Ok(Ok(amount)) => Some(amount),
+        _ => None,
+    }
+}
+
+/// Read-only escrow view for settlement readiness: returns the escrow balance
+/// without any state mutation, so callers can report withdrawal availability
+/// independently of resolution.
+pub fn readable_balance(env: &Env, usdc: &Address) -> i128 {
+    balance(env, usdc)
+}

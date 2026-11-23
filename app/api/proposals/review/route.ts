@@ -6,13 +6,17 @@
  * not a user-facing API, so every handler is gated on the `internal_worker` tier
  * and the shared `CRON_SECRET` — the same pattern as the cron routes. An unset
  * `CRON_SECRET` refuses rather than waving callers through.
+ *
+ * Cancellation is scoped to exactly one proposal per request: the transition is
+ * authorised for the named `proposalId` only, and never widens to other
+ * proposals or to delegated spending grants.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/api/policy";
 import { apiError } from "@/lib/api/errors";
-import { getDb, isDbConfigured } from "@/lib/db";
 import {
+  isDbConfigured,
   claimProposalForReview,
   completeProposalReview,
   cancelProposal,
@@ -20,9 +24,15 @@ import {
   markStaleProposals,
   updateProposalReviewStatus,
   listProposalsForReview,
+  getProposal,
   REVIEW_STATUSES,
   type ReviewStatus,
+  type MarketProposalRow,
 } from "@/lib/db";
+import {
+  validateSignedWindow,
+  validateReviewRevision,
+} from "@/lib/signed-window";
 
 export const runtime = "nodejs";
 
@@ -57,10 +67,31 @@ async function requireAuth(request: NextRequest): Promise<NextResponse | null> {
     presentedSecret: presented,
     expectedSecret: process.env.CRON_SECRET,
   });
-  if (auth.allowed) return null;
-  const error = auth.error;
-  if (!error) return errorResponse("Unauthorized", 401);
-  return NextResponse.json(error.body, { status: error.status, headers: error.headers });
+  if (!auth.allowed) {
+    const error = auth.error;
+    if (!error) return errorResponse("Unauthorized", 401);
+    return NextResponse.json(error.body, { status: error.status, headers: error.headers });
+  }
+
+  // Validate signed window if window headers or query parameters are present
+  const nonce = request.headers.get("x-mimir-nonce") ?? request.headers.get("x-nonce");
+  const expiresAtHeader = request.headers.get("x-mimir-expires-at") ?? request.headers.get("x-expires-at");
+  const url = new URL(request.url);
+  const nonceParam = url.searchParams.get("nonce");
+  const expiresAtParam = url.searchParams.get("expiresAt") ?? url.searchParams.get("expires_at");
+
+  const effectiveNonce = nonce ?? nonceParam;
+  const effectiveExpiresAtRaw = expiresAtHeader ?? expiresAtParam;
+
+  if (effectiveNonce !== null || effectiveExpiresAtRaw !== null) {
+    const expiresAt = effectiveExpiresAtRaw ? Number(effectiveExpiresAtRaw) : Number.NaN;
+    const windowResult = validateSignedWindow(effectiveNonce, expiresAt);
+    if (!windowResult.ok) {
+      return json({ error: { message: windowResult.message, code: windowResult.code, field: windowResult.field } }, 400);
+    }
+  }
+
+  return null;
 }
 
 function parseIntParam(raw: string | null): number | undefined {
@@ -68,6 +99,13 @@ function parseIntParam(raw: string | null): number | undefined {
   const n = Number(raw);
   if (!Number.isFinite(n) || Number.isNaN(n)) return undefined;
   return Math.trunc(n);
+}
+
+/** Require a non-empty string; returns the trimmed value or null. */
+function requireString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -79,9 +117,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   const { searchParams } = new URL(request.url);
-  const statusRaw = searchParams.get("status");
+  const exportType = searchParams.get("export");
+  const isTriage =
+    exportType === "triage" ||
+    searchParams.get("view") === "triage" ||
+    searchParams.get("triage") === "true";
+
   const limitRaw = searchParams.get("limit");
   const offsetRaw = searchParams.get("offset");
+  const limit = parseIntParam(limitRaw);
+  const offset = parseIntParam(offsetRaw);
+
+  if (isTriage) {
+    try {
+      const triageExport = await getProposalBacklogTriage({ limit, offset });
+      return json(triageExport);
+    } catch (err) {
+      console.error("[proposals/review] GET triage error:", err);
+      return internalErrorResponse(500);
+    }
+  }
+
+  const statusRaw = searchParams.get("status");
 
   let status: ReviewStatus | null = null;
   if (statusRaw !== null && statusRaw !== "") {
@@ -90,9 +147,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
     status = statusRaw as ReviewStatus;
   }
-
-  const limit = parseIntParam(limitRaw);
-  const offset = parseIntParam(offsetRaw);
 
   try {
     const result = await listProposalsForReview({ status, limit, offset });
@@ -122,16 +176,73 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return errorResponse("Invalid JSON body", 400);
   }
 
-  const { action, proposalId, reviewer, approve, reason } = body as {
+  const {
+    action,
+    proposalId,
+    reviewer,
+    approve,
+    reason,
+    nonce,
+    expiresAt,
+    expectedRevision,
+  } = (body ?? {}) as {
     action: "claim" | "complete" | "cancel" | "mark_stale" | "mark_dependency_failed";
     proposalId?: string;
     reviewer?: string;
     approve?: boolean;
     reason?: string;
+    nonce?: unknown;
+    expiresAt?: unknown;
+    expectedRevision?: unknown;
   };
+
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    ("nonce" in body || "expiresAt" in body || "expires_at" in body)
+  ) {
+    const b = body as Record<string, unknown>;
+    const windowResult = validateSignedWindow(b.nonce, b.expiresAt ?? b.expires_at);
+    if (!windowResult.ok) {
+      return json({ error: { message: windowResult.message, code: windowResult.code, field: windowResult.field } }, 400);
+    }
+  }
 
   if (!action) {
     return errorResponse("Missing action", 400);
+  }
+
+  if (nonce !== undefined || expiresAt !== undefined) {
+    const windowResult = validateSignedWindow(nonce, expiresAt);
+    if (!windowResult.ok) {
+      const err = apiError(windowResult.code, windowResult.message, { field: windowResult.field });
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+  }
+
+  if (expectedRevision !== undefined) {
+    const formatCheck = validateReviewRevision(expectedRevision);
+    if (!formatCheck.ok) {
+      const err = apiError(formatCheck.code, formatCheck.message, { field: formatCheck.field });
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+    if (!proposalId) {
+      const err = apiError("invalid_request", "expectedRevision requires proposalId", {
+        field: "expectedRevision",
+      });
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+    const currentProposal = await getProposal(proposalId);
+    if (!currentProposal) {
+      const err = apiError("not_found", `Proposal not found: ${proposalId}`);
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+    const currentRevision = getProposalRevision(currentProposal);
+    const revCheck = validateReviewRevision(expectedRevision, currentRevision);
+    if (!revCheck.ok) {
+      const err = apiError(revCheck.code, revCheck.message, { field: revCheck.field });
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
   }
 
   try {
@@ -140,8 +251,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         if (!proposalId || !reviewer) {
           return errorResponse("claim requires proposalId and reviewer", 400);
         }
+        const existing = await getProposal(proposalId);
+        if (existing && getProposalRevision(existing) > 0) {
+          const err = apiError("conflict", "proposal review revision is stale: review decision already recorded", {
+            field: "expectedRevision",
+          });
+          return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+        }
         const ok = await claimProposalForReview(proposalId, reviewer);
         if (!ok) {
+          const refreshed = await getProposal(proposalId);
+          if (refreshed && getProposalRevision(refreshed) > 0) {
+            const err = apiError("conflict", "proposal review revision is stale: review decision already recorded", {
+              field: "expectedRevision",
+            });
+            return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+          }
           return errorResponse("Proposal not available for claim (not queued or already claimed)", 409);
         }
         return json({ success: true, proposalId, status: "in_review" });
@@ -151,22 +276,42 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         if (!proposalId || !reviewer || typeof approve !== "boolean") {
           return errorResponse("complete requires proposalId, reviewer, and approve (boolean)", 400);
         }
+        const existing = await getProposal(proposalId);
+        if (existing && getProposalRevision(existing) > 0) {
+          const err = apiError("conflict", "proposal review revision is stale: review decision already recorded", {
+            field: "expectedRevision",
+          });
+          return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+        }
         const ok = await completeProposalReview(proposalId, reviewer, approve);
         if (!ok) {
+          const refreshed = await getProposal(proposalId);
+          if (refreshed && getProposalRevision(refreshed) > 0) {
+            const err = apiError("conflict", "proposal review revision is stale: review decision already recorded", {
+              field: "expectedRevision",
+            });
+            return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+          }
           return errorResponse("Proposal not in review by this reviewer", 409);
         }
         return json({ success: true, proposalId, status: approve ? "approved" : "rejected" });
       }
 
       case "cancel": {
-        if (!proposalId || !reason) {
+        // Authorise exactly one proposal transition. The id and reason are
+        // validated as non-empty strings so a malformed or blank request can
+        // never reach the state change, and only the named proposal is passed
+        // through. Other proposals and delegated spending grants are untouched.
+        const targetId = requireString(proposalId);
+        const cancelReason = requireString(reason);
+        if (!targetId || !cancelReason) {
           return errorResponse("cancel requires proposalId and reason", 400);
         }
-        const ok = await cancelProposal(proposalId, reason);
+        const ok = await cancelProposal(targetId, cancelReason);
         if (!ok) {
           return errorResponse("Proposal not cancellable (not queued or in_review)", 409);
         }
-        return json({ success: true, proposalId, status: "cancelled" });
+        return json({ success: true, proposalId: targetId, status: "cancelled" });
       }
 
       case "mark_dependency_failed": {
@@ -210,11 +355,22 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
     return errorResponse("Invalid JSON body", 400);
   }
 
-  const { proposalId, status, reviewer, failureReason } = body as {
+  const {
+    proposalId,
+    status,
+    reviewer,
+    failureReason,
+    nonce,
+    expiresAt,
+    expectedRevision,
+  } = (body ?? {}) as {
     proposalId: string;
     status: ReviewStatus;
     reviewer?: string;
     failureReason?: string;
+    nonce?: unknown;
+    expiresAt?: unknown;
+    expectedRevision?: unknown;
   };
 
   if (!proposalId || !status) {
@@ -225,9 +381,43 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
     return errorResponse(`Invalid status: ${status}`, 400);
   }
 
+  if (nonce !== undefined || expiresAt !== undefined) {
+    const windowResult = validateSignedWindow(nonce, expiresAt);
+    if (!windowResult.ok) {
+      const err = apiError(windowResult.code, windowResult.message, { field: windowResult.field });
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+  }
+
+  if (expectedRevision !== undefined) {
+    const formatCheck = validateReviewRevision(expectedRevision);
+    if (!formatCheck.ok) {
+      const err = apiError(formatCheck.code, formatCheck.message, { field: formatCheck.field });
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+    const currentProposal = await getProposal(proposalId);
+    if (!currentProposal) {
+      const err = apiError("not_found", `Proposal not found: ${proposalId}`);
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+    const currentRevision = getProposalRevision(currentProposal);
+    const revisionCheck = validateReviewRevision(expectedRevision, currentRevision);
+    if (!revisionCheck.ok) {
+      const err = apiError(revisionCheck.code, revisionCheck.message, { field: revisionCheck.field });
+      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    }
+  }
+
   try {
     const ok = await updateProposalReviewStatus(proposalId, status, { reviewer, failureReason });
     if (!ok) {
+      const refreshed = await getProposal(proposalId);
+      if (refreshed && getProposalRevision(refreshed) > 0) {
+        const err = apiError("conflict", "proposal review revision is stale: review decision already recorded", {
+          field: "expectedRevision",
+        });
+        return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+      }
       return errorResponse("Proposal not found or invalid state transition", 409);
     }
     return json({ success: true, proposalId, status });
