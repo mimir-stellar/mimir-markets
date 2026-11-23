@@ -126,7 +126,8 @@ export function basketMessage(args: {
  * signed. Matches TRANSFER_EXPIRY_MS so the clock-skew budget is the same
  * across all signed mutations.
  */
-export const BASKET_EXPIRY_MS = 5 * 60_000; // 5 minutes
+export const BASKET_CREATION_EXPIRY_MS = 5 * 60_000; // 5 minutes
+export const BASKET_EXPIRY_MS = BASKET_CREATION_EXPIRY_MS;
 
 /**
  * How long a transfer authorisation is valid from the moment it is signed.
@@ -142,7 +143,7 @@ export const TRANSFER_EXPIRY_MS = 5 * 60_000; // 5 minutes
  * What the CURRENT owner signs to authorise a transfer.
  *
  * Both addresses are interpolated verbatim — Stellar strkeys are case-sensitive
- * base32 and must never be lowercased. The message now also includes:
+ * base32 and must never be lowercased. The message also includes:
  *
  *  - `nonce`    — a client-generated UUID, stored on the server after first use
  *                  so the same signed message is rejected on any replay attempt.
@@ -253,7 +254,12 @@ export function parsePerMarketUsdc(raw: string): PerMarketParseResult {
  *
  * This list must stay in sync with the basket directory.
  */
-export const CURATED_BASKET_IDS: readonly string[] = [];
+export const CURATED_BASKET_IDS: readonly string[] = [
+  "council-core",
+  "philosopher-spread",
+  "byoa-traders",
+  "house-and-street",
+];
 
 /**
  * A single point on a basket's NAV series.
@@ -271,6 +277,13 @@ export interface NavPoint {
 export interface NavMember {
   agentId: string;
   weightBps: number;
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
+}
+
+export interface BasketAgentWeight {
+  agentId: string;
+  weightBps: number;
   category: string;
   mode: string;
   paused?: boolean;
@@ -283,7 +296,7 @@ export interface BasketReturnPoint { timestamp: number; returnsBps: Record<strin
 export interface BasketPolicy { maxSingleAgentBps: number; maxCategoryBps: number; staleSignalAction: "skip" | "pause"; failedCopyAction: "keep_idle" | "pause" }
 export interface BasketSnapshot { timestamp: number; navAtomic: bigint; drawdownBps: number }
 
-export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n ;
+export const VIRTUAL_BASKET_INITIAL_NAV_ATOMIC = 1_000_000_000n;
 
 export const DEFAULT_BASKET_POLICY: BasketPolicy = {
   maxSingleAgentBps: 4_000,
@@ -314,6 +327,15 @@ export interface BasketExposurePreview {
 }
 
 /**
+ * A member's contribution to the basket NAV.
+ */
+export interface NavMember {
+  agentId: string;
+  weightBps: number;
+  /** Per-period returns for this member, as decimals (e.g. 0.01 = +1%). */
+  returns: number[];
+}
+/**
  * Build a NAV series from basket member performance.
  *
  * The series is indexed to 100 at the first point. Each subsequent point is the
@@ -338,7 +360,7 @@ export function buildNavSeries(
   if (totalWeight <= 0) return [];
 
   const periods = Math.min(...validMembers.map((m) => m.returns.length));
-  if (periods < 1 || !completeSeries(validMembers, periods)) return [];
+  if (periods < 1) return [];
 
   const points: NavPoint[] = [];
   let nav = 100;

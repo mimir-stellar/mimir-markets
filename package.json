@@ -6,6 +6,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
+    "oracle:scenarios": "tsx scripts/oracle-outage-scenarios.ts",
     "dev": "next dev",
     "dev:clean": "rm -rf .next && next dev",
     "clean": "rm -rf .next",

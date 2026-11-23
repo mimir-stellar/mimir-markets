@@ -1,14 +1,14 @@
 //! Public contract surface. Bodies live in `pool`; this file is the single
 //! `#[contractimpl]` block plus the read-only views.
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::escrow;
 use crate::pool;
 use crate::storage;
 use crate::types::{
-    ClaimResult, Error, Market, PendingOracle, SquadLimits, MAX_BATCH_SIZE, MAX_DURATION,
-    MAX_FEE_BPS, MAX_QUESTION_BYTES, MIN_DURATION,
+    ClaimResult, Error, Market, PendingOracle, SettlementReadiness, SquadLimits, MAX_BATCH_SIZE,
+    MAX_DURATION, MAX_FEE_BPS, MAX_QUESTION_BYTES, MIN_DURATION,
 };
 
 #[contract]
@@ -69,6 +69,13 @@ impl MimirSquad {
     /// to claim full refunds via claim(). No fees are charged on cancellation.
     pub fn cancel_market(env: Env, market_id: u64) -> Result<(), Error> {
         pool::cancel_market(&env, market_id)
+    }
+
+    /// Read-only preview of the refundable liabilities that `cancel_market`
+    /// would create for `market_id`. Performs no value movement or authority
+    /// changes.
+    pub fn preview_cancel_market(env: Env, market_id: u64) -> Result<CancelPreview, Error> {
+        pool::preview_cancel_market(&env, market_id)
     }
 
     /// Pull-based payout. Solidity used `msg.sender`; Soroban has no equivalent
@@ -255,6 +262,16 @@ impl MimirSquad {
 
     pub fn get_paused_flag(env: Env) -> bool {
         storage::is_paused(&env)
+    }
+
+    /// Versioned squad settlement manifest. Returns the digest binding the
+    /// winning side, fee policy and pool totals for `market_id`, together with
+    /// the manifest version. Liability totals are exact integer USDC.
+    pub fn get_settlement_manifest(
+        env: Env,
+        market_id: u64,
+    ) -> Result<(u32, BytesN<32>), Error> {
+        pool::settlement_manifest(&env, market_id)
     }
 
     /// Read-only settlement readiness for a market. Never mutates state.

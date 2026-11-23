@@ -60,6 +60,20 @@ pub fn balance(env: &Env, usdc: &Address) -> i128 {
     token::TokenClient::new(env, usdc).balance(&env.current_contract_address())
 }
 
+/// Read-only preview of the value a cancellation would move. Performs no
+/// transfer, no authority change and no storage write: it only reports the
+/// escrow balance the pool currently holds against its refundable liabilities.
+pub fn preview_refund_capacity(env: &Env, usdc: &Address, refundable: i128) -> i128 {
+    let held = balance(env, usdc);
+    if refundable <= 0 {
+        0
+    } else if refundable < held {
+        refundable
+    } else {
+        held
+    }
+}
+
 /// Read the escrow balance without trapping. Returns `None` when the token
 /// cannot answer a balance query, so callers can report an explicit state
 /// instead of overloading zero.

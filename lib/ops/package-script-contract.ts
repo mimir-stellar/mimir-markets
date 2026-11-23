@@ -169,6 +169,11 @@ export const REVIEWED_PACKAGE_SCRIPTS: Readonly<Record<string, ReviewedScriptSpe
     category: "test",
     supportsArgForwarding: true,
   },
+  "oracle:scenarios": {
+    command: "tsx scripts/oracle-outage-scenarios.ts",
+    category: "test",
+    supportsArgForwarding: true,
+  },
   "test:schema": {
     command:
       "node --import tsx --test tests/node/schema-backlog.test.ts tests/node/schema-snapshot.test.ts",

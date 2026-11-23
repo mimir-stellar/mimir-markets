@@ -412,6 +412,25 @@ pub struct PlatformStats {
     pub fees_claimed: i128,
 }
 
+/// Version of the [`ContractLimits`] response shape.
+pub const LIMITS_VERSION_V1: u32 = 1;
+
+/// Bounded, versioned snapshot of the contract's resource and policy limits,
+/// so clients can read them instead of probing live calls for failures.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractLimits {
+    pub version: u32,
+    pub max_challengers: u32,
+    pub max_batch_size: u32,
+    pub max_invite_key_bytes: u32,
+    pub max_metadata_bytes: u32,
+    pub max_claim_metadata_bytes: u32,
+    pub max_total_fee_bps: u32,
+    pub fee_timelock_seconds: u64,
+    pub oracle_timelock_seconds: u64,
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 #[contracterror]

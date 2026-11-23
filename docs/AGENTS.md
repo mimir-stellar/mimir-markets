@@ -68,6 +68,8 @@ environment behavior.
 | `lib/wallet-connectors.ts` | Connector list and per-wallet capability matrix |
 | `lib/wallet-signing-coordinator.ts` | Cross-tab wallet signing lease & uncertain-recovery coordinator |
 | `lib/stellar-message.ts` | SEP-43 `signMessage` verification (Ed25519, base64) |
+| `lib/api/schema.ts` | Request/response schema versioning and read-index source freshness/availability metadata (`live`, `cached`, `stale`, `unavailable`) |
+| `lib/api/errors.ts` | Machine-readable API errors and read-index feed boundary resolution (`resolveReadIndexFeed`, `upstreamUnavailableError`) |
 | `lib/content-hash.ts` | SHA-256 content hashing — the hash Soroban's host exposes |
 | `lib/agent-wallets.ts` | Local Stellar keypairs for oracle / creator / council |
 | `lib/agents/wallet-adapter.ts` | Vendor-neutral wallet boundary + budget policy for BYOA |
@@ -246,6 +248,13 @@ Bash
 
 ## Node test workflow (must stay green on release)
 
+Run `npm run test:node -- --help` for text help. For tools, use
+`npm run --silent test:node -- --help-json` to get a JSON object with a
+`flags` array. Each entry describes the flag name, option key and default.
+Optional fields list aliases, negated forms, a path argument, or an option
+enabled by that flag. Path defaults are repository-relative. A null cache
+directory uses `MIMIR_NODE_TEST_CACHE_DIR` or the built-in cache root.
+
 The release entry point is `npm run test:node`; `test:smoke` remains an alias
 for callers that already use it. The runner discovers all
 `tests/node/*.test.ts` files in deterministic order and explicitly preserves
@@ -365,6 +374,18 @@ npm run workers
 | `TRADER_QUANT_PUBLIC` | _(derived)_ | Stellar public key (`G…`) for the Quant Thresholder persona. Derived from secret key by wallet tooling. |
 | `GROQ_API_KEY` | _(none)_ | Groq API key used for trader LLM inference (`agents/traders/index.ts` sets `LLM_PROVIDER = "groq"`). |
 
+| `TRADER_JOURNAL_CAPACITY` | `200` | Maximum capacity of the bounded in-memory trader decision journal before FIFO eviction. |
+
+### Trader decision journal
+
+Trader decision logic is implemented in [`agents/traders/policy.ts`](../agents/traders/policy.ts) with a bounded in-memory journal (`TraderDecisionJournal`). The journal coordinates with sequence reservations from [`lib/agents/sequence-manager.ts`](../lib/agents/sequence-manager.ts) to track autonomous staking evaluations within exact spending limits.
+
+Key characteristics:
+- **Bounded Capacity**: Retains up to `TRADER_JOURNAL_CAPACITY` (default: 200) decision entries using FIFO eviction.
+- **Deterministic Digests**: Computes and stores canonical SHA-256 digests for market signals (`signalDigest`), policy revisions (`policyRevisionDigest`), and disposition outcomes (`dispositionDigest`).
+- **Privacy & Safety Guarantees**: Strictly excludes full private model prompts (templates, persona prompt strategies) and fails closed if signing material (Stellar secret seeds `S…`, private keys) is detected.
+- **Sequence Coordination**: Captures and updates account sequence reservation snapshots (`SequenceReservationSnapshot`) to audit transactions and avoid duplicate or out-of-order sequence usage.
+
 ## Demo seed claims
 
 Preview the fixed demo claim set without a signer, contract id, or network access:
@@ -403,10 +424,12 @@ property testable on a clean checkout and in CI.
   `BACKUP_MISSING_TABLE`, `BACKUP_UNKNOWN_TABLE`, `BACKUP_EMPTY`,
   `BACKUP_CHECKSUM_MISMATCH`, `BACKUP_PRIVATE_CONTENT_LEAK`. A private claim's
   scrubbed content fields must stay `null` in the archive.
-- **Restore** (`npm run restore:read-index -- <file> [--dry-run]`) requires
+- **Restore** (`npm run restore:read-index -- <file> [--dry-run] [--batch-size <n>]`) requires
   `DATABASE_URL`. An unverified archive is refused before any write; writes run
-  in one transaction so a failure rolls back; afterwards the cache is re-read
-  and its fingerprint is compared against the archive's checksum.
+  in checkpointed transactions (or a single transaction when `--batch-size` is unset);
+  afterwards the cache is re-read and its fingerprint is compared against the
+  archive's checksum. Replay after interrupted batches is idempotent and does not
+  double-apply settlement or fee events.
 - **Rollback**: restore any verified archive, or — because contract state is
   the source of truth — re-warm from chain (`npm run warm:vs-index` / `npm run
   sync`). Restoring never writes to the chain.

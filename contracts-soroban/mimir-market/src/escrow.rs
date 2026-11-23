@@ -73,6 +73,58 @@ pub fn push(env: &Env, usdc: &Address, to: &Address, amount: i128) {
     client.transfer(&env.current_contract_address(), to, &amount);
 }
 
+/// Snapshot of a fee account in exact atomic USDC units.
+///
+/// Field meanings are stable:
+/// - `accrued`: total fees ever credited to the account.
+/// - `claimed`: total fees already withdrawn by the account owner.
+/// - `outstanding`: `accrued - claimed`, the amount still claimable.
+///
+/// `accrued == 0` means no accrual ever happened; `accrued > 0` with
+/// `outstanding == 0` means the balance is fully claimed. These two states are
+/// therefore distinguishable from the values alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeBalance {
+    pub accrued: i128,
+    pub claimed: i128,
+    pub outstanding: i128,
+}
+
+/// Build a [`FeeBalance`] from accrued and claimed atomic amounts.
+pub fn fee_balance(accrued: i128, claimed: i128) -> FeeBalance {
+    FeeBalance {
+        accrued,
+        claimed,
+        outstanding: accrued - claimed,
+    }
+}
+
 pub fn balance(env: &Env, usdc: &Address) -> i128 {
     token::TokenClient::new(env, usdc).balance(&env.current_contract_address())
+}
+
+#[cfg(test)]
+mod fee_balance_tests {
+    use super::fee_balance;
+
+    #[test]
+    fn no_accrual_is_all_zero() {
+        let b = fee_balance(0, 0);
+        assert_eq!(b.accrued, 0);
+        assert_eq!(b.claimed, 0);
+        assert_eq!(b.outstanding, 0);
+    }
+
+    #[test]
+    fn fully_claimed_differs_from_no_accrual() {
+        let b = fee_balance(5_000_000, 5_000_000);
+        assert_eq!(b.outstanding, 0);
+        assert_ne!(b, fee_balance(0, 0));
+    }
+
+    #[test]
+    fn partially_claimed_is_exact() {
+        let b = fee_balance(10_000_000, 3_500_000);
+        assert_eq!(b.outstanding, 6_500_000);
+    }
 }

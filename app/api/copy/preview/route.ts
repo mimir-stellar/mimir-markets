@@ -16,6 +16,25 @@ const numbers = (value: unknown, limit: number): value is number[] =>
   Array.isArray(value) && value.length <= limit && value.every((item) => Number.isSafeInteger(item) && item >= 0);
 const amount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
+// Lifecycle reasons that are permanent for the policy (no retry will help).
+const PERMANENT_REASONS = new Set(["revoked"]);
+
+function lifecycleResponse(
+  permission: CopyPermission,
+  now: number,
+): { reasonCode: string; retryable: boolean; effectiveAt: number | null } | null {
+  if (permission.status === "revoked") {
+    return { reasonCode: "permission_revoked", retryable: false, effectiveAt: null };
+  }
+  if (permission.expiresAt <= now) {
+    return { reasonCode: "permission_expired", retryable: false, effectiveAt: permission.expiresAt };
+  }
+  if (permission.status === "paused") {
+    return { reasonCode: "permission_paused", retryable: true, effectiveAt: null };
+  }
+  return null;
+}
+
 function parsePreviewInput(value: unknown, now: number): {
   permission: CopyPermission; signal: CopySignal; context: CopyDryRunContext;
 } | null {
@@ -97,7 +116,23 @@ export async function POST(req: Request): Promise<Response> {
     }
     input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch { return Response.json({ error: "invalid JSON" }, { status: 400 }); }
-  const parsed = parsePreviewInput(input, Date.now());
+  const now = Date.now();
+  const parsed = parsePreviewInput(input, now);
   if (!parsed) return Response.json({ error: "invalid copy preview input" }, { status: 400 });
+
+  const lifecycle = lifecycleResponse(parsed.permission, now);
+  if (lifecycle) {
+    return Response.json(
+      {
+        allowed: false,
+        reasonCode: lifecycle.reasonCode,
+        retryable: lifecycle.retryable,
+        effectiveAt: lifecycle.effectiveAt,
+        permissionStatus: parsed.permission.status,
+      },
+      { status: 200, headers: { "cache-control": "no-store" } },
+    );
+  }
+
   return Response.json(buildCopyExecutionDryRun(parsed), { headers: { "cache-control": "no-store" } });
 }

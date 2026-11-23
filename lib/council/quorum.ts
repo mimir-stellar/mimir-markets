@@ -44,7 +44,13 @@ export type VoteDisposition =
   | "duplicated"
   | "cancelled"
   | "paused"
-  | "dependency_failure";
+  | "dependency_failure"
+  /**
+   * Persona did not vote before the council deliberation deadline. Counted as
+   * abstention (never as a decisive or DRAW vote) so missing votes cannot be
+   * mistaken for consensus.
+   */
+  | "deadline_abstention";
 
 export type FallbackAction =
   /** Decisive votes met quorum — use the council tally. */
@@ -58,7 +64,9 @@ export type FallbackAction =
   /** Claim is paused — council must not settle it. */
   | "abort_paused"
   /** Quorum config is unusable after normalization refusal. */
-  | "abort_invalid_config";
+  | "abort_invalid_config"
+  /** Deadline passed with too few decisive votes — oracle settles solo, never by default consensus. */
+  | "fallback_deadline";
 
 export interface QuorumConfig {
   /**
@@ -147,7 +155,22 @@ const EMPTY_DISPOSITIONS = (): Record<VoteDisposition, number> => ({
   cancelled: 0,
   paused: 0,
   dependency_failure: 0,
+  deadline_abstention: 0,
 });
+
+/**
+ * Classify a persona that produced no response before the deliberation deadline.
+ * This is an explicit abstention, distinct from a substantive DRAW / UNRESOLVABLE
+ * verdict and from a dependency failure.
+ */
+export function classifyDeadlineAbstention(slug: string): ClassifiedVote {
+  return {
+    slug: (slug ?? "").trim().toLowerCase(),
+    disposition: "deadline_abstention",
+    reason: "no vote before council deliberation deadline",
+    decisive: false,
+  };
+}
 
 /**
  * Compare quorum/confidence policy outcomes across identical fixtures without

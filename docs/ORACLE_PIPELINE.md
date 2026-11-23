@@ -5,6 +5,8 @@ This document describes how an expired prediction market claim transitions from 
 For transaction incident handling and operator rollback, see [`AGENT_INCIDENT_RUNBOOK.md`](AGENT_INCIDENT_RUNBOOK.md).
 For evidence hash commitment layout and verification, see [`EVIDENCE_COMMITMENT.md`](EVIDENCE_COMMITMENT.md).
 
+This document also describes the oracle decision evidence manifest: a bounded, secret-free record of the source references, capture times, and content digests used to reach each verdict (see [Decision Evidence Manifest](#decision-evidence-manifest)).
+
 ---
 
 ## Table of Contents
@@ -22,6 +24,7 @@ For evidence hash commitment layout and verification, see [`EVIDENCE_COMMITMENT.
   - [8. Settlement Policy & Research Citations](#8-settlement-policy--research-citations)
   - [9. On-Chain Submission & Bounded Retry](#9-on-chain-submission--bounded-retry)
   - [10. Post-Settlement Council Bonuses](#10-post-settlement-council-bonuses)
+- [Decision Evidence Manifest](#decision-evidence-manifest)
 - [Failure Handling Matrix](#failure-handling-matrix)
 - [Environment Configuration Knobs](#environment-configuration-knobs)
 
@@ -243,6 +246,38 @@ If self-resolving council was used and `COUNCIL_BONUS_USDC` > 0:
 - Reserves bonus transfers in `lib/council-bonus-ledger.ts`.
 - Calls `payCouncilBonuses` to transfer USDC from the oracle wallet to jurors who achieved positive cross-entropy scores.
 - Failure of bonus transfers does not affect the already-final settlement.
+
+---
+
+## Decision Evidence Manifest
+
+The oracle worker emits a decision evidence manifest alongside each settlement decision so operators and auditors can review what evidence informed a verdict without exposing secrets.
+
+**Contents (bounded):**
+- `sources`: at most a small fixed number of entries, each with the normalized source URL (query string and fragment stripped, credentials removed), the fetcher kind (`coingecko-api`, `direct`, `bot-paid`, `jina`, or `none`), the capture time (ISO-8601 UTC), and the SHA-256 content digest of the captured evidence body.
+- `commitment`: the `evidence_hash` already produced by the canonical evidence commitment (see [`EVIDENCE_COMMITMENT.md`](EVIDENCE_COMMITMENT.md)).
+- `council`: the canonical council record summary when council settlement was used, or `"none"`.
+
+**Exclusions (never recorded):**
+- LLM provider credentials (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `GROQ_API_KEYS`, `OPENROUTER_API_KEY`, `ORACLE_GEMINI_API_KEY`) and any `ORACLE_SECRET` material.
+- Sensitive raw response bodies, including provider response payloads, HTTP headers, cookies, and x402 payment receipts. Only the digest of the evidence body is retained.
+- Full evidence text beyond the digest; the manifest is a reference, not a copy.
+
+**Bounds and compatibility:**
+- Each source digest is computed over the same bytes covered by the evidence commitment and is subject to the existing 64 KiB body limit.
+- The manifest is additive. Existing settlement, commitment, and on-chain payload behavior is unchanged; the manifest is informational and is not written to the contract.
+- Manifest generation failures are logged and do not block settlement.
+
+**Verification:** Tests use synthetic fixtures, fake transports, and temporary state directories. Coverage includes the boundary of the source count bound, redaction of credential-bearing URLs and provider keys, and the failure path where a fetch failure yields a manifest with no sources and no settlement.
+
+| Manifest field | Source | Redacted |
+|---|---|---|
+| `sources[].url` | `resolution_url` after normalization | Query, fragment, userinfo |
+| `sources[].fetcher` | `EvidenceResult.fetcher` | — |
+| `sources[].captured_at` | Evidence capture timestamp | — |
+| `sources[].digest` | SHA-256 of evidence body | Body not stored |
+| `commitment` | `evidence_hash` | — |
+| `council` | Canonical council record summary | Persona prompts |
 
 ---
 

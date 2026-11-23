@@ -26,6 +26,15 @@
   actually signed for is Mimir's own accounting on top; both must pass, so
   exceeding either is a skip.
 
+- Pre-signature review digest: before owner signing, `POST /api/copy/permissions/review`
+  (backed by `buildCopyPermissionReviewDigest` in `lib/copy-trading.ts`) exposes a
+  canonical SHA-256 `reviewDigest` binding the execution/signal agents, allowed
+  categories/modes, thresholds, expiry, and every spending limit (per-position, daily,
+  weekly, open-exposure, realized-loss, and delegated spend permission). Submitting a
+  signed grant to `POST /api/copy/permissions` with `reviewDigest` re-verifies the
+  digest via `verifyCopyPermissionReviewDigest` and rejects with `409 review_digest_mismatch`
+  if any bound field changed between review and signature.
+
 Every decision writes source position, permission, simulation ledger, attribution,
 stake, fee lines, tx hash and status/skip reason to the audit ledger.
 
