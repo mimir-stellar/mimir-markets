@@ -1,0 +1,15 @@
+# Draw: principal back to everyone, no fee.
+mimir-settlement-manifest v1
+claim 104
+winner draw
+mode pool
+creator_stake 40000000
+platform_fee_bps 200
+agent_owner_fee_bps 100
+platform_recipient yes
+agent_owner_recipient yes
+creator_paid 40000000
+creator_fee 0
+challenger 25000000 25000000 0 25000000
+challenger 15000000 15000000 0 15000000
+remaining 0

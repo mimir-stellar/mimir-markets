@@ -1,0 +1,15 @@
+# Creator wins the pot. The agent-owner fee has no recipient, so it is not charged.
+mimir-settlement-manifest v1
+claim 103
+winner creator
+mode pool
+creator_stake 50000000
+platform_fee_bps 200
+agent_owner_fee_bps 100
+platform_recipient yes
+agent_owner_recipient no
+creator_paid 99000000
+creator_fee 1000000
+challenger 20000000 - - -
+challenger 30000000 - - -
+remaining 0

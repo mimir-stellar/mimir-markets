@@ -111,6 +111,37 @@ payouts + fees + dust equals escrow inflow. Alongside it:
 - `draw_refunds_everyone_in_full_with_no_fee` and the `Unresolvable` equivalent
 - `a_quote_matches_what_the_pull_actually_pays`
 
+### Offline settlement conservation verifier
+
+`settlement_verifier::verify_manifest` (`src/settlement_verifier.rs`) re-checks a
+recorded settlement with no chain access: no `Env`, no RPC, no storage and no
+allocation, so it also builds for `wasm32v1-none`. It reads a canonical
+version-1 settlement manifest (plain text, atomic USDC integers, challengers in
+claim order) and re-derives every leg from the same integer rules the contract
+uses: fees on profit only with each leg floored and a leg without a recipient
+not charged, pool share or fixed-odds gross, principal back on a draw or an
+unresolvable verdict, and the last claimant taking the escrow that is left.
+
+It returns the first disagreement as a `Mismatch`:
+
+- `Leg { leg, field: Principal | Fee | Net, expected, found }` for a creator or
+  challenger leg whose gross, fee or net differs from the rule;
+- `Remainder { expected, found }` when the escrow left over is wrong, including
+  dust stranded after every challenger has claimed;
+- `Conservation { inflow, accounted }` when paid + fees + remaining is not the
+  inflow;
+- `Malformed { line }`, `UnsupportedVersion`, `Missing { record }` or `Overflow`
+  for a manifest that cannot be read safely. A repeated record, a signed or
+  decimal amount, and a claim listed after an unclaimed challenger are refused.
+
+The contract stays authoritative; the verifier is evidence, not a source of
+truth. The manifest format is documented at the top of the module, and the
+canonical synthetic fixtures live in
+`contracts-soroban/mimir-market/fixtures/settlement/` (pool with dust, fixed
+odds, creator win with a recipient-less fee leg, draw, partial claims). Tests:
+`src/test_settlement_verifier.rs`, which verifies each fixture and then moves
+one amount at a time to pin each mismatch.
+
 ### Settlement dust is deterministic and isolated
 
 The pool-share formula truncates, so a few atomic units can be left over. The
