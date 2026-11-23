@@ -6,7 +6,7 @@
  * `evidence_hash` is the one piece of the oracle's off-chain work that lands on
  * chain. It is supposed to be a commitment: anyone can re-fetch the resolution
  * URL, reproduce the bytes, and check the digest the contract stored. The EVM
- * code committed a plain `sha256(utf8(text + "\\n[council]" + JSON.stringify(…)))`.
+ * code committed a plain `sha256(utf8(text + "\n[council]" + JSON.stringify(…)))`.
  * That is not a commitment to anything in particular, for three separate reasons:
  *
  *  1. **Boundary forgery.** `text` is attacker-chosen: it is whatever the
@@ -280,88 +280,52 @@ function validateEvidence(evidence: string): Buffer {
 
 function assertFresh(fetchedAt: number | null | undefined, now: number): void {
   if (fetchedAt === null || fetchedAt === undefined) return;
-  if (typeof fetchedAt !== "number" || !Number.isFinite(fetchedAt) || fetchedAt <= 0) {
-    fail("stale_evidence", "fetchedAt must be a positive epoch ms");
+  if (typeof fetchedAt !== "number" || !Number.isFinite(fetchedAt)) {
+    fail("stale_evidence", "fetchedAt must be a finite epoch-ms number");
   }
   if (now - fetchedAt > MAX_EVIDENCE_AGE_MS) {
-    fail(
-      "stale_evidence",
-      `evidence is ${Math.round((now - fetchedAt) / 1000)}s old; max is ${MAX_EVIDENCE_AGE_MS / 1000}s`,
-    );
+    fail("stale_evidence", "evidence snapshot is older than the settlement freshness window");
   }
 }
 
 /**
- * The exact bytes SHA-256 is taken over, in a documented order:
- *
- * ```text
- * mimir-evidence-commitment
- * version:1
- * fetcher:<kind>
- * source:<url or empty>
- * bytes:<n>
- * <0x1e>
- * <n UTF-8 bytes of the evidence body>
- * <0x1e>
- * council:<canonical record or "none">
- * ```
- *
- * `bytes:<n>` makes the split explicit: no value inside the untrusted body can
- * forge a boundary because the length is fixed in the header before it. The
- * evidence body is the only field permitted to contain separators.
+ * Build the canonical, length-framed evidence bytes. Exposed so verifiers and
+ * tests can inspect exactly what is hashed. Does not hash.
  */
 export function canonicalEvidenceBytes(input: EvidenceCommitmentInput): Buffer {
+  const body = validateEvidence(input.evidence);
   if (!FETCHER_KINDS.includes(input.fetcher)) {
     fail("invalid_fetcher", `unknown fetcher kind: ${String(input.fetcher)}`);
   }
-  const evidenceBytes = validateEvidence(input.evidence);
-  const sourceUrl = validateSourceUrl(input.sourceUrl);
   assertFresh(input.fetchedAt, input.now ?? Date.now());
+  const url = validateSourceUrl(input.sourceUrl);
+  const council = input.council ? serializeCouncil(input.council) : "";
 
+  // Header is ASCII, separator-delimited, and fixed-order. The evidence body is
+  // appended length-prefixed, so no byte of the body can be mistaken for a
+  // header field boundary regardless of what the page returned.
   const header = [
-    "mimir-evidence-commitment",
-    `version:${EVIDENCE_COMMITMENT_VERSION}`,
+    `mimir-evidence-v${EVIDENCE_COMMITMENT_VERSION}`,
     `fetcher:${input.fetcher}`,
-    `source:${sourceUrl}`,
-    `bytes:${evidenceBytes.length}`,
-  ].join("\n");
+    `url:${url}`,
+    `council:${council}`,
+  ].join(RECORD_SEPARATOR);
 
-  const council = input.council ? serializeCouncil(input.council) : "none";
-
+  const headerBytes = Buffer.from(header, "utf8");
+  const lengthPrefix = Buffer.alloc(4);
+  lengthPrefix.writeUInt32BE(body.length, 0);
   return Buffer.concat([
-    Buffer.from(header, "utf8"),
-    Buffer.from(RECORD_SEPARATOR, "utf8"),
-    evidenceBytes,
-    Buffer.from(RECORD_SEPARATOR, "utf8"),
-    Buffer.from(`council:${council}`, "utf8"),
+    Buffer.from(`${headerBytes.length}:`, "ascii"),
+    headerBytes,
+    lengthPrefix,
+    body,
   ]);
 }
 
-/** SHA-256 over {@link canonicalEvidenceBytes}, as 64 lowercase hex characters. */
+/**
+ * SHA-256 commitment over {@link canonicalEvidenceBytes}. Throws
+ * {@link EvidenceCommitmentError} on anything it cannot canonicalise.
+ */
 export function evidenceCommitmentHash(input: EvidenceCommitmentInput): string {
-  return sha256Bytes(canonicalEvidenceBytes(input)).toString("hex");
-}
-
-/**
- * SHA-256 over the evidence text's UTF-8 bytes alone, no framing.
- *
- * This is the "re-fetch and hash it yourself" value: it depends only on the
- * public body, so a reader does not need the oracle's fetcher metadata to check
- * that the committed evidence matches what the URL served. The on-chain digest is
- * the framed commitment; this is the sub-digest a verifier compares first.
- */
-export function evidenceContentHash(evidence: string): string {
-  return sha256Bytes(validateEvidence(evidence)).toString("hex");
-}
-
-/**
- * Constant-shape verification helper for a reader holding the canonical bytes.
- * Mirrors what a re-fetch + re-encode would compare against the on-chain value.
- */
-export function verifyEvidenceCommitment(input: EvidenceCommitmentInput, expectedHash: string): boolean {
-  try {
-    return evidenceCommitmentHash(input) === expectedHash.trim().toLowerCase().replace(/^0x/, "");
-  } catch {
-    return false;
-  }
+  return sha256Bytes(canonicalEvidenceBytes(input));
 }

@@ -3,7 +3,7 @@
  *
  * Following a basket records an intent; it cannot move money on its own. Soroban
  * has no `msg.sender` for a top-level call, so the staking account is an explicit
- * argument that must itself authorise -- `challenge_claim(challenger, …#` cannot
+ * argument that must itself authorise -- `challenge_claim(challenger, …)` cannot
  * execute without that account's signature, and Mimir holds no key for the
  * subscriber. Delegated signing would need an owner-granted USDC allowance
  * (`lib/agents/spend-permissions.ts`), which a plain basket follower has not given.
@@ -20,6 +20,7 @@
 import "server-only";
 
 import { getChallengersByClaimId, getClaimsByFilter, listBasketSubscriptions } from "@/lib/db";
+import { computeMirrorAmountAtomic, toUsdcAtomic } from "@/lib/baskets";
 import { allBasketDefinitions } from "./basket-directory";
 import { listDirectoryAgents } from "./agent-directory";
 import { parseAddressParam } from "./api-validation";
@@ -32,12 +33,17 @@ export interface PendingMirror {
   /** The member whose position is being copied. */
   agentId: string;
   agentName: string;
-  /** What that member staked, display USDC. */
-  memberStakeUsdc: number;
-  /** What the subscriber would stake: their per-market cap scaled by weight. */
-  mirrorUsdc: number;
+  /** What that member staked, in exact 7-decimal atomic USDC units (base-10 integer string). */
+  memberStakeAtomic: string;
+  /** What the subscriber would stake: per-market cap scaled by weight, in exact 7-decimal atomic USDC units. */
+  mirrorAmountAtomic: string;
   weightBps: number;
   deadline: number;
+  category: string;
+  mode: string;
+  remainingBudgetUsdc: number;
+  requiresUserSignature: true;
+  delegatedAuthority: false;
 }
 
 /** The data sources the queue is built from, injectable for testing. */
@@ -46,7 +52,7 @@ export interface MirrorQueueDependencies {
   listDefinitions: () => Promise<Array<{ id: string; name: string; members: Array<{ agentId: string; weightBps: number }> }>>;
   listAgents: () => Promise<Array<{ id: string; displayName: string; address: string }>>;
   listOpenClaims: () => Promise<Array<{ id: number; question?: string | null; deadline: number; creator?: string | null }>>;
-  listChallengers: (claimId: number) => Promise<Array<{ address: string; stake: number }>>;
+  listChallengers: (claimId: number) => Promise<Array<{ address: string; stake: number; stakeAtomic?: string | bigint }>>;
 }
 
 const defaultDependencies: MirrorQueueDependencies = {
@@ -89,6 +95,7 @@ export async function pendingMirrorsFor(
   const nowSeconds = Math.floor(Date.now() / 1000);
 
   const pending: PendingMirror[] = [];
+  const seenClaims = new Set<number>();
 
   for (const basketId of subscribed) {
     const definition = definitions.find((candidate) => candidate.id === basketId);
@@ -96,6 +103,7 @@ export async function pendingMirrorsFor(
     const budget = perMarketUsdc[basketId] ?? 2;
 
     for (const claim of openClaims) {
+      if (seenClaims.has(claim.id)) continue;
       // No point offering a mirror that cannot be staked before it settles.
       if (claim.deadline <= nowSeconds + 300) continue;
       if (claim.creator === wallet) continue;
@@ -110,16 +118,33 @@ export async function pendingMirrorsFor(
         const position = challengers.find((c) => c.address === agent.address);
         if (!position) continue;
 
-        const mirrorUsdc = Math.round((budget * member.weightBps / 10_000) * 100) / 100;
-        // Below a cent there is nothing to stake; the contract's minimum would
-        // reject it anyway and the row would only be noise.
-        if (mirrorUsdc <= 0) continue;
+        const mirrorAtomic = computeMirrorAmountAtomic(budget, member.weightBps);
+        if (mirrorAtomic <= 0n) continue;
 
+        let memberStakeAtomic: string;
+        try {
+          memberStakeAtomic =
+            position.stakeAtomic !== undefined
+              ? toUsdcAtomic(
+                  typeof position.stakeAtomic === "bigint"
+                    ? position.stakeAtomic
+                    : BigInt(position.stakeAtomic),
+                ).toString()
+              : toUsdcAtomic(position.stake).toString();
+        } catch {
+          continue;
+        }
+
+        const category = claim.category ?? "general";
+        const mode = claim.market_type ?? "pool";
+        const remainingBudgetUsdc = Math.max(0, Math.round((budget - mirrorUsdc) * 100) / 100);
+
+        seenClaims.add(claim.id);
         pending.push({
           basketId, basketName: definition.name,
           claimId: claim.id, question: claim.question ?? `Claim #${claim.id}`,
           agentId: agent.id, agentName: agent.displayName,
-          memberStakeUsdc: position.stake, mirrorUsdc: mirrorUsdc,
+          memberStakeAtomic, mirrorAmountAtomic: mirrorAtomic.toString(),
           weightBps: member.weightBps, deadline: claim.deadline,
         });
         break; // one mirror per claim: the basket takes a side, not several
@@ -128,4 +153,181 @@ export async function pendingMirrorsFor(
   }
 
   return pending.sort((a, b) => a.deadline - b.deadline);
+}
+
+/**
+ * Generate a follower mirror preview with portfolio exposure impact for a single claim.
+ */
+export async function previewFollowerMirror(args: {
+  subscriber: string;
+  claimId: number;
+  perMarketUsdc?: Record<string, number>;
+  policy?: BasketPolicy;
+  currentPositions?: FollowerPosition[];
+  dependencies?: MirrorQueueDependencies;
+}): Promise<FollowerMirrorPreview | null> {
+  const {
+    subscriber,
+    claimId,
+    perMarketUsdc = {},
+    policy = DEFAULT_BASKET_POLICY,
+    dependencies = defaultDependencies,
+  } = args;
+
+  const wallet = parseAddressParam(subscriber);
+  if (!wallet) return null;
+
+  const [pendingList, definitions, directory, openClaims] = await Promise.all([
+    pendingMirrorsFor(wallet, perMarketUsdc, dependencies),
+    dependencies.listDefinitions().catch(() => []),
+    dependencies.listAgents().catch(() => []),
+    dependencies.listOpenClaims().catch(() => []),
+  ]);
+
+  let currentPositions = args.currentPositions;
+  if (!currentPositions) {
+    if (dependencies.listFollowerPositions) {
+      currentPositions = await dependencies.listFollowerPositions(wallet).catch(() => []);
+    } else {
+      const positions: FollowerPosition[] = [];
+      for (const openClaim of openClaims) {
+        if (openClaim.id === claimId) continue;
+        const challengers = await dependencies.listChallengers(openClaim.id).catch(() => []);
+        const entry = challengers.find((c) => c.address === wallet);
+        if (entry) {
+          positions.push({
+            claimId: openClaim.id,
+            agentId: "self",
+            category: openClaim.category ?? "general",
+            mode: openClaim.market_type ?? "pool",
+            amountUsdc: entry.stake,
+          });
+        }
+      }
+      currentPositions = positions;
+    }
+  }
+
+  const targetMirror = pendingList.find((m) => m.claimId === claimId);
+  if (targetMirror) {
+    const configuredBudget = perMarketUsdc[targetMirror.basketId] ?? 2;
+    return previewFollowerMirrorExposure({
+      currentPositions,
+      pendingMirror: {
+        claimId: targetMirror.claimId,
+        agentId: targetMirror.agentId,
+        category: targetMirror.category,
+        mode: targetMirror.mode,
+        mirrorUsdc: targetMirror.mirrorUsdc,
+      },
+      configuredBudgetUsdc: configuredBudget,
+      policy,
+    });
+  }
+
+  // If not in pending list, check if claim exists and is already mirrored
+  const claim = openClaims.find((c) => c.id === claimId);
+  if (!claim) return null;
+
+  const challengers = await dependencies.listChallengers(claim.id).catch(() => []);
+  const taken = challengers.find((c) => c.address === wallet);
+  const isAlreadyInPositions = currentPositions.some((p) => p.claimId === claimId);
+
+  if (taken || isAlreadyInPositions) {
+    const subscribed = await dependencies.listSubscriptions(wallet).catch(() => []);
+    const definition = definitions.find((d) => subscribed.includes(d.id));
+    const configuredBudget = definition ? (perMarketUsdc[definition.id] ?? 2) : 2;
+    const member = definition?.members[0];
+    const agent = member ? directory.find((a) => a.id === member.agentId) : undefined;
+
+    return previewFollowerMirrorExposure({
+      currentPositions: isAlreadyInPositions
+        ? currentPositions
+        : [
+            ...currentPositions,
+            {
+              claimId: claim.id,
+              agentId: agent?.id ?? "unknown",
+              category: claim.category ?? "general",
+              mode: claim.market_type ?? "pool",
+              amountUsdc: taken?.stake ?? 0,
+            },
+          ],
+      pendingMirror: {
+        claimId: claim.id,
+        agentId: agent?.id ?? "unknown",
+        category: claim.category ?? "general",
+        mode: claim.market_type ?? "pool",
+        mirrorUsdc: taken?.stake ?? 1,
+      },
+      configuredBudgetUsdc: configuredBudget,
+      policy,
+    });
+  }
+
+  return null;
+}
+
+/**
+ * Generate previews with portfolio exposure impact for all pending mirrors.
+ */
+export async function previewFollowerMirrors(args: {
+  subscriber: string;
+  perMarketUsdc?: Record<string, number>;
+  policy?: BasketPolicy;
+  currentPositions?: FollowerPosition[];
+  dependencies?: MirrorQueueDependencies;
+}): Promise<FollowerMirrorPreview[]> {
+  const {
+    subscriber,
+    perMarketUsdc = {},
+    policy = DEFAULT_BASKET_POLICY,
+    dependencies = defaultDependencies,
+  } = args;
+
+  const wallet = parseAddressParam(subscriber);
+  if (!wallet) return [];
+
+  const pendingList = await pendingMirrorsFor(wallet, perMarketUsdc, dependencies);
+  if (pendingList.length === 0) return [];
+
+  let currentPositions = args.currentPositions;
+  if (!currentPositions) {
+    if (dependencies.listFollowerPositions) {
+      currentPositions = await dependencies.listFollowerPositions(wallet).catch(() => []);
+    } else {
+      const openClaims = await dependencies.listOpenClaims().catch(() => []);
+      const positions: FollowerPosition[] = [];
+      for (const openClaim of openClaims) {
+        const challengers = await dependencies.listChallengers(openClaim.id).catch(() => []);
+        const entry = challengers.find((c) => c.address === wallet);
+        if (entry) {
+          positions.push({
+            claimId: openClaim.id,
+            agentId: "self",
+            category: openClaim.category ?? "general",
+            mode: openClaim.market_type ?? "pool",
+            amountUsdc: entry.stake,
+          });
+        }
+      }
+      currentPositions = positions;
+    }
+  }
+
+  return pendingList.map((mirror) => {
+    const configuredBudget = perMarketUsdc[mirror.basketId] ?? 2;
+    return previewFollowerMirrorExposure({
+      currentPositions: currentPositions!,
+      pendingMirror: {
+        claimId: mirror.claimId,
+        agentId: mirror.agentId,
+        category: mirror.category,
+        mode: mirror.mode,
+        mirrorUsdc: mirror.mirrorUsdc,
+      },
+      configuredBudgetUsdc: configuredBudget,
+      policy,
+    });
+  });
 }
