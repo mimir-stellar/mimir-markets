@@ -1,17 +1,12 @@
 /**
- * Pure policy predicates and bounded decision journal for the demo BYOA traders.
+ * Pure policy predicates and durable signal consumption tracking for the demo BYOA traders.
  *
- * Keeps decision criteria, claim filtering, and decision journaling testable
- * in Node without needing live network connections, wallets, or databases.
- *
- * The decision journal coordinates with sequence reservations from
- * `lib/agents/sequence-manager.ts` to track autonomous staking decisions within
- * strict spending and sequence bounds, recording signal, policy revision, and
- * disposition digests while strictly excluding private model prompts and signing keys.
+ * Keeps decision criteria, claim filtering, and consumed-signal gating testable in Node
+ * without needing live network connections, wallets, or databases.
  */
 
-import { sha256Hex, isHash32Hex } from "../../lib/content-hash";
-import type { SequenceReservation, ReservationState } from "../../lib/agents/sequence-manager";
+import fs from "node:fs";
+import path from "node:path";
 
 export interface JoinableClaimCandidate {
   id: number;
@@ -26,18 +21,21 @@ export interface JoinableClaimCandidate {
  * - Must not be created by the trader
  * - Must have public visibility
  * - Must not already have a position by this trader
+ * - Must not be blocked by restart reconciliation (uncertain outcomes)
  */
 export function filterJoinableClaims<T extends JoinableClaimCandidate>(
   claims: readonly T[],
   challengersById: Map<number, { address: string }[]>,
   myAddress: string,
   nowSeconds: number,
+  blockedClaimIds: ReadonlySet<number> = new Set(),
 ): T[] {
   const joinable: T[] = [];
   for (const claim of claims) {
     if (claim.deadline <= nowSeconds + 300) continue; // too close to settle into
     if (claim.creator === myAddress) continue; // never challenge yourself
     if (claim.visibility !== "public") continue;
+    if (blockedClaimIds.has(claim.id)) continue; // uncertain prior outcome
     const challengers = challengersById.get(claim.id) ?? [];
     if (challengers.some((c) => c.address === myAddress)) continue; // one position each
     joinable.push(claim);
@@ -102,11 +100,145 @@ export interface SecondOpinionClaimFields {
   settlement_rule?: string | null;
 }
 
+export interface SignalConsumptionRecord {
+  signalId: string;
+  consumedAt: number;
+  outcome?: string;
+}
+
+export interface SignalConsumptionStore {
+  isConsumed(signalId: string): boolean;
+  markConsumed(signalId: string, outcome?: string, nowMs?: number): SignalConsumptionRecord;
+}
+
+/**
+ * Build a deterministic signal identity for a trader's decision on a claim.
+ */
+export function buildSignalIdentity(agentId: string, claimId: number | string): string {
+  const normalizedAgent = agentId.trim();
+  if (!normalizedAgent) {
+    throw new Error("signal identity requires a non-empty agentId");
+  }
+  const normalizedClaim =
+    typeof claimId === "number"
+      ? Number.isFinite(claimId)
+        ? String(claimId)
+        : ""
+      : claimId.trim();
+  if (!normalizedClaim) {
+    throw new Error("signal identity requires a valid claimId");
+  }
+  return `${normalizedAgent}:${normalizedClaim}`;
+}
+
+/**
+ * File-backed durable store of consumed signal identities.
+ *
+ * Persists a JSON object mapping `signalId -> SignalConsumptionRecord` using
+ * atomic temp-file + rename writes so repeat polling or worker restarts never
+ * repurchase paid quotes for an already-completed decision.
+ */
+export class FileSignalConsumptionStore implements SignalConsumptionStore {
+  private readonly filePath: string;
+  private readonly records = new Map<string, SignalConsumptionRecord>();
+
+  constructor(filePath: string) {
+    const resolved = filePath.trim();
+    if (!resolved) {
+      throw new Error("signal consumption store requires a non-empty file path");
+    }
+    this.filePath = resolved;
+    this.load();
+  }
+
+  private load(): void {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.filePath, "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (code === "ENOENT") return;
+      throw err;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(
+        `corrupt signal consumption store at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`invalid signal consumption store format at ${this.filePath}`);
+    }
+
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!key.trim() || !value || typeof value !== "object" || Array.isArray(value)) continue;
+      const entry = value as Partial<SignalConsumptionRecord>;
+      const consumedAt = typeof entry.consumedAt === "number" && Number.isFinite(entry.consumedAt)
+        ? entry.consumedAt
+        : 0;
+      const record: SignalConsumptionRecord = {
+        signalId: typeof entry.signalId === "string" && entry.signalId.trim() ? entry.signalId.trim() : key.trim(),
+        consumedAt,
+        ...(typeof entry.outcome === "string" && entry.outcome ? { outcome: entry.outcome } : {}),
+      };
+      this.records.set(record.signalId, record);
+    }
+  }
+
+  private persist(): void {
+    const dir = path.dirname(this.filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    const payload: Record<string, SignalConsumptionRecord> = {};
+    for (const [key, record] of this.records.entries()) {
+      payload[key] = record;
+    }
+    const tmpPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    fs.renameSync(tmpPath, this.filePath);
+  }
+
+  isConsumed(signalId: string): boolean {
+    const key = signalId.trim();
+    if (!key) return false;
+    return this.records.has(key);
+  }
+
+  markConsumed(signalId: string, outcome?: string, nowMs: number = Date.now()): SignalConsumptionRecord {
+    const key = signalId.trim();
+    if (!key) {
+      throw new Error("cannot consume an empty signal identity");
+    }
+    const existing = this.records.get(key);
+    if (existing) return existing;
+
+    const record: SignalConsumptionRecord = {
+      signalId: key,
+      consumedAt: nowMs,
+      ...(outcome ? { outcome } : {}),
+    };
+    this.records.set(key, record);
+    this.persist();
+    return record;
+  }
+
+  size(): number {
+    return this.records.size;
+  }
+}
+
 export interface ShouldBuySecondOpinionOptions {
   buySecondOpinion?: boolean;
   mimirUrl?: string | null;
   dryRun?: boolean;
   claim?: SecondOpinionClaimFields | null;
+  /** Stable identity for this trader+claim decision signal (e.g. from `buildSignalIdentity`). */
+  signalId?: string | null;
+  /** Durable store or set of already-consumed signal identities. */
+  consumedSignals?: Pick<SignalConsumptionStore, "isConsumed"> | ReadonlySet<string> | null;
 }
 
 /**
@@ -117,6 +249,7 @@ export interface ShouldBuySecondOpinionOptions {
  * - BUY_SECOND_OPINION must be true
  * - MIMIR_URL must be a non-empty string
  * - claim must have a valid question and resolution_url
+ * - If `consumedSignals` is provided, `signalId` must be non-empty and not already consumed
  */
 export function shouldBuySecondOpinion(
   options: ShouldBuySecondOpinionOptions,
@@ -139,6 +272,8 @@ export function shouldBuySecondOpinion(
       firstArg.mimirUrl,
       Boolean(firstArg.dryRun),
       firstArg.claim,
+      firstArg.signalId,
+      firstArg.consumedSignals,
     );
   }
   return evaluateShouldBuySecondOpinion(
@@ -149,11 +284,26 @@ export function shouldBuySecondOpinion(
   );
 }
 
+function isSignalAlreadyConsumed(
+  signalId: string | null | undefined,
+  consumedSignals: Pick<SignalConsumptionStore, "isConsumed"> | ReadonlySet<string> | null | undefined,
+): boolean {
+  if (!consumedSignals) return false;
+  const key = typeof signalId === "string" ? signalId.trim() : "";
+  if (!key) return true; // Fail closed when a consumption store is supplied without a valid signalId.
+  if ("isConsumed" in consumedSignals && typeof consumedSignals.isConsumed === "function") {
+    return consumedSignals.isConsumed(key);
+  }
+  return consumedSignals.has(key);
+}
+
 function evaluateShouldBuySecondOpinion(
   buySecondOpinion: boolean,
   mimirUrl: string | null | undefined,
   dryRun: boolean,
   claim: SecondOpinionClaimFields | null | undefined,
+  signalId?: string | null,
+  consumedSignals?: Pick<SignalConsumptionStore, "isConsumed"> | ReadonlySet<string> | null,
 ): boolean {
   if (dryRun) return false;
   if (!buySecondOpinion) return false;
@@ -161,418 +311,237 @@ function evaluateShouldBuySecondOpinion(
   if (!claim) return false;
   if (!claim.question || !claim.question.trim()) return false;
   if (!claim.resolution_url || !claim.resolution_url.trim()) return false;
+  if (isSignalAlreadyConsumed(signalId, consumedSignals)) return false;
   return true;
 }
 
-// ── Bounded Trader Decision Journal ──────────────────────────────────────────
-
-/** Default maximum capacity for the in-memory decision journal. */
-export const DEFAULT_TRADER_DECISION_JOURNAL_CAPACITY = 200;
-
-/** Stellar secret seeds start with 'S' and have 56 base32 characters. */
-const STELLAR_SECRET_SEED_PATTERN = /\bS[A-Z2-7]{55}\b/;
-
-/** Sensitive key identifiers representing signing secrets or private keys. */
-const FORBIDDEN_SECRET_KEY_NAMES = new Set([
-  "secret",
-  "seed",
-  "privatekey",
-  "secretkey",
-  "signingkey",
-  "signer",
-  "keyenv",
-  "secretkeyenv",
-]);
-
-/** Model prompt fields that must not be stored in journal entries. */
-const PRIVATE_PROMPT_KEY_NAMES = new Set([
-  "prompt",
-  "systemprompt",
-  "userprompt",
-  "modelprompt",
-  "privateprompt",
-  "rawprompt",
-  "strategy",
-  "personastrategy",
-  "systeminstruction",
-  "instructions",
-]);
-
-export class TraderJournalSecurityError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "TraderJournalSecurityError";
-  }
-}
 
 /**
- * Scan an object or string for raw signing material (e.g. Stellar secret seeds, private key properties).
- * Fails closed by throwing TraderJournalSecurityError if detected.
- */
-export function assertNoSigningMaterial(value: unknown, path = "input"): void {
-  if (value === null || value === undefined) return;
-  if (typeof value === "string") {
-    if (STELLAR_SECRET_SEED_PATTERN.test(value)) {
-      throw new TraderJournalSecurityError(
-        `signing material detected in ${path}: Stellar secret seed must be excluded`,
-      );
-    }
-    return;
-  }
-  if (typeof value === "object") {
-    if (Buffer.isBuffer(value) || value instanceof Uint8Array || typeof value === "bigint") {
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (let i = 0; i < value.length; i++) {
-        assertNoSigningMaterial(value[i], `${path}[${i}]`);
-      }
-      return;
-    }
-    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      const lowerKey = key.toLowerCase().replace(/[^a-z]/g, "");
-      if (FORBIDDEN_SECRET_KEY_NAMES.has(lowerKey)) {
-        throw new TraderJournalSecurityError(
-          `signing material detected in ${path}.${key}: forbidden secret key name`,
-        );
-      }
-      assertNoSigningMaterial(val, `${path}.${key}`);
-    }
-  }
-}
-
-/**
- * Strip private model prompt fields recursively so prompt templates and persona strategies
- * are never recorded in decision entries or digests.
- */
-export function stripPrivatePrompts<T>(input: T): T {
-  if (input === null || typeof input !== "object") {
-    return input;
-  }
-  if (Array.isArray(input)) {
-    return input.map(stripPrivatePrompts) as unknown as T;
-  }
-  const result: Record<string, unknown> = {};
-  for (const [key, val] of Object.entries(input as Record<string, unknown>)) {
-    const lowerKey = key.toLowerCase().replace(/[^a-z]/g, "");
-    if (PRIVATE_PROMPT_KEY_NAMES.has(lowerKey)) {
-      continue;
-    }
-    result[key] = stripPrivatePrompts(val);
-  }
-  return result as T;
-}
-
-/**
- * Canonical JSON serialization with sorted keys and omitted undefined fields,
- * producing deterministic output for SHA-256 digest computation.
- */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj)
-    .filter((k) => obj[k] !== undefined)
-    .sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
-}
-
-/**
- * Compute the SHA-256 digest of market signal data after stripping private model prompts
- * and asserting no signing material is present.
- */
-export function computeSignalDigest(signal: unknown): string {
-  assertNoSigningMaterial(signal, "signal");
-  const sanitized = stripPrivatePrompts(signal);
-  return sha256Hex(canonicalJson(sanitized));
-}
-
-/**
- * Compute the SHA-256 digest of policy configuration or revision identifier.
- */
-export function computePolicyRevisionDigest(policyRevision: unknown): string {
-  assertNoSigningMaterial(policyRevision, "policyRevision");
-  const sanitized = stripPrivatePrompts(policyRevision);
-  return sha256Hex(canonicalJson(sanitized));
-}
-
-/**
- * Compute the SHA-256 digest of the final trader disposition.
- */
-export function computeDispositionDigest(disposition: unknown): string {
-  assertNoSigningMaterial(disposition, "disposition");
-  const sanitized = stripPrivatePrompts(disposition);
-  return sha256Hex(canonicalJson(sanitized));
-}
-
-export type TraderDispositionAction =
-  | "stake"
-  | "pass"
-  | "skip_exposure"
-  | "dry_run"
-  | "abstain"
-  | (string & {});
-
-export interface TraderDisposition {
-  action: TraderDispositionAction;
-  verdict?: "AGREE" | "DISAGREE" | "ABSTAIN";
-  confidence?: number;
-  stakeUsdc?: number;
-  sequence?: string | bigint;
-  reason?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface SequenceReservationSnapshot {
-  readonly address: string;
-  readonly sequence: string;
-  readonly state: ReservationState;
-}
-
-export interface TraderDecisionEntry {
-  readonly id: string;
-  readonly timestamp: number;
-  readonly agentId: string;
-  readonly claimId: number;
-  readonly signalDigest: string;
-  readonly policyRevision: string;
-  readonly policyRevisionDigest: string;
-  readonly disposition: TraderDisposition;
-  readonly dispositionDigest: string;
-  readonly sequenceReservation?: SequenceReservationSnapshot;
-}
-
-export interface TraderDecisionInput {
-  agentId: string;
-  claimId: number;
-  timestamp?: number;
-  /** Raw signal data or a precomputed 64-character hex SHA-256 digest */
-  signal: Record<string, unknown> | string;
-  signalDigest?: string;
-  /** Policy revision identifier/config or a precomputed 64-character hex SHA-256 digest */
-  policyRevision: Record<string, unknown> | string | number;
-  policyRevisionDigest?: string;
-  /** Disposition outcome or a precomputed 64-character hex SHA-256 digest */
-  disposition: TraderDisposition | TraderDispositionAction | string;
-  dispositionDigest?: string;
-  /** Sequence reservation from SequenceManager or snapshot */
-  sequenceReservation?: SequenceReservation | SequenceReservationSnapshot | null;
-}
-
-export interface TraderDecisionJournalOptions {
-  /** Maximum number of entries retained before the oldest are evicted (FIFO). */
-  capacity?: number;
-}
-
-/**
- * Bounded trader decision journal.
+ * Authorized spending limits for an autonomous trader, denominated in integer USDC.
  *
- * Records deterministic digests for market signals, policy revisions, and disposition outcomes,
- * strictly excluding private model prompts and signing keys while bounding in-memory capacity.
+ * Soroban contract state remains authoritative for settled stakes; these limits
+ * gate new autonomous staking attempts before signing or submission.
  */
-export class TraderDecisionJournal {
-  private readonly maxCapacity: number;
-  private readonly buffer: TraderDecisionEntry[] = [];
-  private sequenceCounter = 0;
+export interface TraderExposureLimits {
+  /** Maximum integer USDC allowed for a single position. */
+  maxPositionUsdc: number;
+  /** Maximum cumulative integer USDC allowed across committed + in-flight stakes. */
+  maxDailyExposureUsdc: number;
+}
 
-  constructor(options?: TraderDecisionJournalOptions) {
-    const rawCap =
-      options?.capacity ??
-      Number(process.env.TRADER_JOURNAL_CAPACITY ?? DEFAULT_TRADER_DECISION_JOURNAL_CAPACITY);
-    if (!Number.isFinite(rawCap) || !Number.isInteger(rawCap) || rawCap <= 0) {
-      throw new RangeError(`Journal capacity must be a positive integer, got ${rawCap}`);
+/** Point-in-time integer USDC exposure snapshot for a trader wallet. */
+export interface TraderExposureSnapshot {
+  /** Settled/landed integer USDC already committed in the current window. */
+  committedUsdc: number;
+  /** Unsettled integer USDC currently reserved for in-flight submissions. */
+  inFlightUsdc: number;
+}
+
+export type ExposureRejectionReason =
+  | "invalid_stake"
+  | "invalid_limits"
+  | "invalid_snapshot"
+  | "exceeds_position_limit"
+  | "exceeds_daily_limit"
+  | "duplicate_reservation";
+
+export type ExposureAuthorizationResult =
+  | {
+      allowed: true;
+      nextInFlightUsdc: number;
+      totalExposureUsdc: number;
     }
-    this.maxCapacity = rawCap;
+  | {
+      allowed: false;
+      reason: ExposureRejectionReason;
+      totalExposureUsdc: number;
+    };
+
+function isNonNegativeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Pure predicate verifying whether staking `stakeUsdc` keeps both per-position
+ * and cumulative (committed + in-flight) exposure within authorized integer USDC limits.
+ */
+export function evaluateExposureAuthorization(
+  stakeUsdc: number,
+  snapshot: TraderExposureSnapshot,
+  limits: TraderExposureLimits,
+): ExposureAuthorizationResult {
+  if (
+    !isNonNegativeInteger(snapshot.committedUsdc) ||
+    !isNonNegativeInteger(snapshot.inFlightUsdc)
+  ) {
+    return {
+      allowed: false,
+      reason: "invalid_snapshot",
+      totalExposureUsdc: 0,
+    };
   }
 
-  capacity(): number {
-    return this.maxCapacity;
+  const currentTotal = snapshot.committedUsdc + snapshot.inFlightUsdc;
+
+  if (
+    !isNonNegativeInteger(limits.maxPositionUsdc) ||
+    !isNonNegativeInteger(limits.maxDailyExposureUsdc)
+  ) {
+    return {
+      allowed: false,
+      reason: "invalid_limits",
+      totalExposureUsdc: currentTotal,
+    };
   }
 
-  size(): number {
-    return this.buffer.length;
+  if (!Number.isSafeInteger(stakeUsdc) || stakeUsdc <= 0) {
+    return {
+      allowed: false,
+      reason: "invalid_stake",
+      totalExposureUsdc: currentTotal,
+    };
   }
 
-  record(input: TraderDecisionInput): TraderDecisionEntry {
-    assertNoSigningMaterial(input, "decisionInput");
+  if (stakeUsdc > limits.maxPositionUsdc) {
+    return {
+      allowed: false,
+      reason: "exceeds_position_limit",
+      totalExposureUsdc: currentTotal,
+    };
+  }
 
-    if (!input.agentId || !input.agentId.trim()) {
-      throw new Error("agentId must be a non-empty string");
+  const nextTotal = currentTotal + stakeUsdc;
+  if (nextTotal > limits.maxDailyExposureUsdc) {
+    return {
+      allowed: false,
+      reason: "exceeds_daily_limit",
+      totalExposureUsdc: currentTotal,
+    };
+  }
+
+  return {
+    allowed: true,
+    nextInFlightUsdc: snapshot.inFlightUsdc + stakeUsdc,
+    totalExposureUsdc: nextTotal,
+  };
+}
+
+/**
+ * Deterministic in-process exposure guard for coordinating simultaneous trader
+ * opportunities, sequence retries, and late submission settlements.
+ *
+ * Counts both committed and in-flight integer USDC against `maxDailyExposureUsdc`
+ * so concurrent submissions or delayed network responses can never push exposure
+ * past authorized limits.
+ */
+export class TraderExposureGuard {
+  private readonly limits: TraderExposureLimits;
+  private committedUsdc: number;
+  private readonly inFlight = new Map<string, number>();
+  private highWaterUsdc: number;
+
+  constructor(limits: TraderExposureLimits, initialCommittedUsdc = 0) {
+    if (
+      !isNonNegativeInteger(limits.maxPositionUsdc) ||
+      !isNonNegativeInteger(limits.maxDailyExposureUsdc)
+    ) {
+      throw new Error("TraderExposureGuard requires non-negative integer USDC limits");
     }
-    if (!Number.isInteger(input.claimId) || input.claimId <= 0) {
-      throw new Error(`claimId must be a positive integer, got ${input.claimId}`);
+    if (!isNonNegativeInteger(initialCommittedUsdc)) {
+      throw new Error("TraderExposureGuard requires non-negative integer initialCommittedUsdc");
     }
+    this.limits = { ...limits };
+    this.committedUsdc = initialCommittedUsdc;
+    this.highWaterUsdc = initialCommittedUsdc;
+  }
 
-    const timestamp = input.timestamp ?? Date.now();
+  /** Current integer USDC reserved for unsettled in-flight submissions. */
+  inFlightUsdc(): number {
+    let sum = 0;
+    for (const amount of this.inFlight.values()) sum += amount;
+    return sum;
+  }
 
-    // Signal digest
-    let signalDigest = input.signalDigest;
-    if (signalDigest !== undefined) {
-      if (!isHash32Hex(signalDigest)) {
-        throw new Error("signalDigest must be a 64-character hex string");
-      }
-      signalDigest = signalDigest.toLowerCase();
-    } else {
-      signalDigest = computeSignalDigest(input.signal);
-    }
+  /** Current point-in-time exposure snapshot. */
+  snapshot(): TraderExposureSnapshot {
+    return {
+      committedUsdc: this.committedUsdc,
+      inFlightUsdc: this.inFlightUsdc(),
+    };
+  }
 
-    // Policy revision & digest
-    const policyRevision =
-      typeof input.policyRevision === "string"
-        ? input.policyRevision
-        : canonicalJson(stripPrivatePrompts(input.policyRevision));
+  /** Total current exposure (`committedUsdc + inFlightUsdc`). */
+  totalExposureUsdc(): number {
+    return this.committedUsdc + this.inFlightUsdc();
+  }
 
-    let policyRevisionDigest = input.policyRevisionDigest;
-    if (policyRevisionDigest !== undefined) {
-      if (!isHash32Hex(policyRevisionDigest)) {
-        throw new Error("policyRevisionDigest must be a 64-character hex string");
-      }
-      policyRevisionDigest = policyRevisionDigest.toLowerCase();
-    } else {
-      policyRevisionDigest = computePolicyRevisionDigest(input.policyRevision);
-    }
+  /** Maximum total exposure ever observed by this guard. */
+  highWaterExposureUsdc(): number {
+    return this.highWaterUsdc;
+  }
 
-    // Disposition & digest
-    const rawDisp =
-      typeof input.disposition === "string"
-        ? { action: input.disposition as TraderDispositionAction }
-        : input.disposition;
-    const disposition: TraderDisposition = stripPrivatePrompts({
-      action: rawDisp.action,
-      ...(rawDisp.verdict ? { verdict: rawDisp.verdict } : {}),
-      ...(rawDisp.confidence !== undefined ? { confidence: rawDisp.confidence } : {}),
-      ...(rawDisp.stakeUsdc !== undefined ? { stakeUsdc: rawDisp.stakeUsdc } : {}),
-      ...(rawDisp.sequence !== undefined ? { sequence: String(rawDisp.sequence) } : {}),
-      ...(rawDisp.reason ? { reason: String(rawDisp.reason).slice(0, 256) } : {}),
-      ...(rawDisp.metadata ? { metadata: rawDisp.metadata } : {}),
-    });
-
-    let dispositionDigest = input.dispositionDigest;
-    if (dispositionDigest !== undefined) {
-      if (!isHash32Hex(dispositionDigest)) {
-        throw new Error("dispositionDigest must be a 64-character hex string");
-      }
-      dispositionDigest = dispositionDigest.toLowerCase();
-    } else {
-      dispositionDigest = computeDispositionDigest(disposition);
-    }
-
-    // Sequence reservation snapshot if provided
-    let sequenceReservation: SequenceReservationSnapshot | undefined;
-    if (input.sequenceReservation) {
-      sequenceReservation = {
-        address: input.sequenceReservation.address,
-        sequence: input.sequenceReservation.sequence.toString(),
-        state: input.sequenceReservation.state,
+  /**
+   * Atomically authorize and reserve `stakeUsdc` under a unique `reservationKey`.
+   * Rejects duplicate keys and any stake that would breach position or daily limits.
+   */
+  tryReserve(reservationKey: string, stakeUsdc: number): ExposureAuthorizationResult {
+    const key = reservationKey.trim();
+    if (!key || this.inFlight.has(key)) {
+      return {
+        allowed: false,
+        reason: "duplicate_reservation",
+        totalExposureUsdc: this.totalExposureUsdc(),
       };
     }
 
-    this.sequenceCounter += 1;
-    const id = `tdj_${timestamp}_${input.claimId}_${this.sequenceCounter}`;
+    const result = evaluateExposureAuthorization(stakeUsdc, this.snapshot(), this.limits);
+    if (!result.allowed) return result;
 
-    const entry: TraderDecisionEntry = Object.freeze({
-      id,
-      timestamp,
-      agentId: input.agentId.trim(),
-      claimId: input.claimId,
-      signalDigest,
-      policyRevision,
-      policyRevisionDigest,
-      disposition: Object.freeze(disposition),
-      dispositionDigest,
-      ...(sequenceReservation ? { sequenceReservation: Object.freeze(sequenceReservation) } : {}),
-    });
-
-    this.buffer.push(entry);
-    while (this.buffer.length > this.maxCapacity) {
-      this.buffer.shift();
+    this.inFlight.set(key, stakeUsdc);
+    if (result.totalExposureUsdc > this.highWaterUsdc) {
+      this.highWaterUsdc = result.totalExposureUsdc;
     }
-
-    return entry;
+    return result;
   }
 
-  get(id: string): TraderDecisionEntry | undefined {
-    return this.buffer.find((e) => e.id === id);
-  }
-
-  entries(): readonly TraderDecisionEntry[] {
-    return [...this.buffer];
-  }
-
-  recent(limit = this.buffer.length): TraderDecisionEntry[] {
-    const n = Math.max(0, limit);
-    return this.buffer.slice(-n);
-  }
-
-  byAgent(agentId: string): TraderDecisionEntry[] {
-    const id = agentId.trim();
-    return this.buffer.filter((e) => e.agentId === id);
-  }
-
-  byClaim(claimId: number): TraderDecisionEntry[] {
-    return this.buffer.filter((e) => e.claimId === claimId);
-  }
-
-  last(): TraderDecisionEntry | undefined {
-    return this.buffer[this.buffer.length - 1];
-  }
-
-  clear(): void {
-    this.buffer.length = 0;
-  }
-
-  updateReservationState(id: string, state: ReservationState): boolean {
-    const index = this.buffer.findIndex((e) => e.id === id);
-    if (index === -1) return false;
-    const existing = this.buffer[index];
-    if (!existing.sequenceReservation) return false;
-    const updatedReservation: SequenceReservationSnapshot = Object.freeze({
-      ...existing.sequenceReservation,
-      state,
-    });
-    this.buffer[index] = Object.freeze({
-      ...existing,
-      sequenceReservation: updatedReservation,
-    });
+  /**
+   * Mark a reserved opportunity as landed on-chain. Idempotent: calling commit
+   * more than once (or after release) is a no-op.
+   */
+  commit(reservationKey: string): boolean {
+    const key = reservationKey.trim();
+    const amount = this.inFlight.get(key);
+    if (amount === undefined) return false;
+    this.inFlight.delete(key);
+    this.committedUsdc += amount;
+    const total = this.totalExposureUsdc();
+    if (total > this.highWaterUsdc) {
+      this.highWaterUsdc = total;
+    }
     return true;
   }
-}
 
-export function createTraderDecisionJournal(
-  options?: TraderDecisionJournalOptions,
-): TraderDecisionJournal {
-  return new TraderDecisionJournal(options);
-}
+  /**
+   * Release an unsettled reservation after a confirmed failure or abort.
+   * Idempotent: calling release more than once (or after commit) is a no-op.
+   */
+  release(reservationKey: string): boolean {
+    const key = reservationKey.trim();
+    return this.inFlight.delete(key);
+  }
 
-/**
- * Verify that a recorded decision entry matches the canonical digests of its component inputs.
- */
-export function verifyDecisionDigest(
-  entry: Pick<TraderDecisionEntry, "signalDigest" | "policyRevisionDigest" | "dispositionDigest">,
-  components: {
-    signal: unknown;
-    policyRevision: unknown;
-    disposition: unknown;
-  },
-): {
-  valid: boolean;
-  signalMatches: boolean;
-  policyRevisionMatches: boolean;
-  dispositionMatches: boolean;
-} {
-  const signalMatches = computeSignalDigest(components.signal) === entry.signalDigest;
-  const policyRevisionMatches =
-    computePolicyRevisionDigest(components.policyRevision) === entry.policyRevisionDigest;
-  const dispositionMatches =
-    computeDispositionDigest(components.disposition) === entry.dispositionDigest;
-  return {
-    valid: signalMatches && policyRevisionMatches && dispositionMatches,
-    signalMatches,
-    policyRevisionMatches,
-    dispositionMatches,
-  };
+  /**
+   * Reconcile committed exposure against authoritative on-chain Soroban state
+   * (e.g. after a late submission landed following an RPC timeout).
+   */
+  reconcileCommitted(authoritativeCommittedUsdc: number): void {
+    if (!isNonNegativeInteger(authoritativeCommittedUsdc)) {
+      throw new Error("authoritativeCommittedUsdc must be a non-negative integer");
+    }
+    this.committedUsdc = Math.max(this.committedUsdc, authoritativeCommittedUsdc);
+    const total = this.totalExposureUsdc();
+    if (total > this.highWaterUsdc) {
+      this.highWaterUsdc = total;
+    }
+  }
 }

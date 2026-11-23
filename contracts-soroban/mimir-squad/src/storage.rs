@@ -1,6 +1,6 @@
 //! Storage keys and typed accessors.
 
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, Env, String};
 
 use crate::types::{Error, Market, PendingFeeRecipient, PendingOracle};
 
@@ -16,6 +16,8 @@ pub enum DataKey {
     MarketCount,
     AccruedFees,
     Market(u64),
+    /// (market) -> monotonically increasing revision, bumped only after a successful mutation.
+    Revision(u64),
     /// Global pause flag. When set, state-mutating entry points that are not
     /// withdrawals are rejected. Withdrawals (claim, claim_parked_payout)
     /// MUST remain available while paused.
@@ -32,6 +34,22 @@ pub enum DataKey {
 
 const BUMP_THRESHOLD: u32 = 120_960;
 const BUMP_EXTEND: u32 = 518_400;
+
+/// Storage schema version exposed to indexers. Bump when the layout of any
+/// `DataKey` variant or persisted struct changes incompatibly.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Bounded compatibility descriptor returned to indexers so they can decide
+/// whether they understand the on-chain storage layout.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaDescriptor {
+    pub version: u32,
+    pub min_supported_version: u32,
+    pub name: String,
+}
+
+pub const SCHEMA_NAME: &str = "mimir-squad";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -75,6 +93,25 @@ pub fn set_oracle(env: &Env, oracle: &Address) {
 }
 
 // ── Pause ────────────────────────────────────────────────────────────────────
+
+/// Returns the schema descriptor for indexers. Clients must reject any
+/// descriptor whose `version` they do not support.
+pub fn schema_descriptor(env: &Env) -> SchemaDescriptor {
+    SchemaDescriptor {
+        version: SCHEMA_VERSION,
+        min_supported_version: SCHEMA_VERSION,
+        name: String::from_str(env, SCHEMA_NAME),
+    }
+}
+
+/// Validates that a required schema version is supported by this contract.
+pub fn check_schema_version(required: u32) -> Result<(), Error> {
+    if required == SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(Error::NotInitialized)
+    }
+}
 
 /// Returns true when the contract is paused. Pause only gates non-withdrawal
 /// state mutations; withdrawal paths must not consult this flag.
@@ -180,6 +217,26 @@ pub fn get_market_opt(env: &Env, id: u64) -> Option<Market> {
 pub fn set_market(env: &Env, id: u64, market: &Market) {
     let key = DataKey::Market(id);
     env.storage().persistent().set(&key, market);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);
+}
+
+// ── Revisions ────────────────────────────────────────────────────────────────
+
+/// Current squad market revision. Zero when no successful mutation has occurred.
+pub fn revision_of(env: &Env, id: u64) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Revision(id))
+        .unwrap_or(0)
+}
+
+/// Write a revision. Callers must only invoke this after a mutation has succeeded,
+/// so that rejected invocations leave the revision unchanged.
+pub fn set_revision(env: &Env, id: u64, value: u64) {
+    let key = DataKey::Revision(id);
+    env.storage().persistent().set(&key, &value);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_EXTEND);

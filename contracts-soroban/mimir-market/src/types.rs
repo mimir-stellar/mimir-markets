@@ -1,7 +1,7 @@
 //! Value types for the Mimir market. Mirrors the structs and enums of
 //! `contracts/MimirV2.sol`.
 
-use soroban_sdk::{contracterror, contracttype, Address, BytesN, String};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, String, Symbol, Vec};
 
 // ── Limits (mirror MimirV2.sol) ──────────────────────────────────────────────
 
@@ -55,6 +55,18 @@ pub const FEE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
 /// Same delay as fee policy so participants get equal notice of trust-boundary
 /// changes that control settlement.
 pub const ORACLE_TIMELOCK_SECONDS: u64 = 172_800; // 2 days
+
+/// Post-deadline resolution expiration window, in seconds.
+///
+/// `0` means there is no post-deadline resolution expiration or permissionless
+/// timeout fallback for `Active` claims: oracle-only resolution remains
+/// authoritative after `deadline`, while unchallenged `Open` claims can still
+/// be permissionlessly cancelled via `transition_deadline` once `deadline` is
+/// reached.
+pub const RESOLUTION_EXPIRY_SECONDS: u64 = 0;
+
+/// Maximum valid oracle confidence score accepted by `resolve_claim` (0..=100).
+pub const MAX_CONFIDENCE: u32 = 100;
 
 /// Upper bound on the byte length of an invite key.
 ///
@@ -226,6 +238,49 @@ pub struct FeeSnapshot {
     pub agent_owner_recipient: Option<Address>,
 }
 
+/// Current schema version returned by `get_fee_policy_compatibility`.
+pub const FEE_POLICY_COMPAT_VERSION: u32 = 1;
+
+/// Hard upper bound on the number of field identifiers returned in
+/// `FeePolicyCompatibility::supported_fields`.
+pub const FEE_POLICY_COMPAT_MAX_FIELDS: u32 = 5;
+
+/// Rounding semantics applied by `fees::quote_fees` and `fees::apply_fees`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FeeRoundingMode {
+    /// Each fee leg is `floor(profit * bps / BPS_DIVISOR)` computed
+    /// independently; the fractional remainder stays with the participant
+    /// (`owed = gross - fees_taken`), so principal is never reduced and fee
+    /// rounding leaves no dust in escrow.
+    FloorPerLegParticipantRemainder = 0,
+}
+
+/// Bounded fee-policy compatibility descriptor for generated clients.
+///
+/// Returned by `get_fee_policy_compatibility` in O(1) instance storage reads so
+/// generated clients and indexers can verify supported policy fields, hard
+/// caps, timelock, escrow scale, rounding semantics, and live/pending policy
+/// revision without mutating state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeePolicyCompatibility {
+    pub schema_version: u32,
+    pub supported_fields: Vec<Symbol>,
+    pub max_total_fee_bps: u32,
+    pub bps_divisor: i128,
+    pub fee_timelock_seconds: u64,
+    pub usdc_decimals: u32,
+    pub min_stake: i128,
+    pub rounding_mode: FeeRoundingMode,
+    pub profit_only: bool,
+    pub pull_based_payouts: bool,
+    pub exact_usdc_escrow: bool,
+    pub current_revision: u64,
+    pub current_total_fee_bps: u32,
+    pub has_pending_policy: bool,
+}
+
 // ── Claim ────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -283,6 +338,22 @@ pub struct Claim {
     pub context_hash: BytesN<32>,
     pub market: MarketConfig,
     pub fees: FeeSnapshot,
+}
+
+/// Canonical export of the fields that define what a claim asks.
+/// `source_commitment` is the claim's on-chain `context_hash`: the bytes
+/// the creator committed to at creation, not the mutable resolution URL.
+///
+/// `digest` commits to exactly the three public inputs above. Its encoding is
+/// documented on `util::claim_statement_digest` so any client can recompute it
+/// from the exported fields without trusting the contract's answer.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimStatement {
+    pub question: String,
+    pub source_commitment: BytesN<32>,
+    pub deadline: u64,
+    pub digest: BytesN<32>,
 }
 
 // ── Create parameters ────────────────────────────────────────────────────────
@@ -412,23 +483,42 @@ pub struct PlatformStats {
     pub fees_claimed: i128,
 }
 
-/// Version of the [`ContractLimits`] response shape.
-pub const LIMITS_VERSION_V1: u32 = 1;
-
-/// Bounded, versioned snapshot of the contract's resource and policy limits,
-/// so clients can read them instead of probing live calls for failures.
+/// Completeness and aggregate liability for a payout preview across claim history.
+///
+/// When claim history is read across a paginated window, truncated slice, or
+/// sparse set of IDs, the preview aggregates liabilities across observed claims
+/// while explicitly reporting whether all observations were accounted for.
+///
+/// Invariant: `verified_total_liability` is `Some(amount)` ONLY when
+/// `is_complete` is true (`missing_observations == 0` and not truncated).
+/// An incomplete aggregate is NEVER presented as a verified total liability.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractLimits {
-    pub version: u32,
-    pub max_challengers: u32,
-    pub max_batch_size: u32,
-    pub max_invite_key_bytes: u32,
-    pub max_metadata_bytes: u32,
-    pub max_claim_metadata_bytes: u32,
-    pub max_total_fee_bps: u32,
-    pub fee_timelock_seconds: u64,
-    pub oracle_timelock_seconds: u64,
+pub struct PayoutPreview {
+    /// Aggregate liability computed across all observed claims in the window/slice.
+    pub aggregate_liability: i128,
+    /// Verified total liability across full claim history. Populated (`Some`)
+    /// ONLY when the preview is complete (no truncation, no missing observations).
+    /// `None` when the preview is incomplete so an incomplete aggregate is never
+    /// presented as a verified total liability.
+    pub verified_total_liability: Option<i128>,
+    /// Aggregate gross payouts across observed claims.
+    pub aggregate_gross: i128,
+    /// Aggregate fees across observed claims.
+    pub aggregate_fees: i128,
+    /// Aggregate net payouts across observed claims.
+    pub aggregate_net: i128,
+    /// Number of claims successfully observed and included in this preview.
+    pub observed_count: u32,
+    /// Total number of claims in the creator's history or requested scope.
+    pub total_claims: u32,
+    /// Number of unobserved claims (either truncated beyond the window or
+    /// missing from storage). Marked explicitly so callers can detect omissions.
+    pub missing_observations: u32,
+    /// True if the history slice was truncated by offset or limit.
+    pub is_truncated: bool,
+    /// True ONLY if all claims in history were observed and accounted for.
+    pub is_complete: bool,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -507,4 +597,7 @@ pub enum Error {
     /// in). The write is refused so the contract never records an impossible
     /// state.
     ConservationViolation = 47,
+    /// An ownership or governance action was refused while the market is
+    /// paused, so pause cannot be used to strand already-committed funds.
+    Paused = 48,
 }

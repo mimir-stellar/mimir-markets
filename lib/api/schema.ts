@@ -22,6 +22,10 @@
  *    Taking the first or last value silently would let a caller believe a filter
  *    applied when another one was actually used.
  *
+ * Observation freshness (feed, detail and performance endpoints) shares one
+ * meaning via `ObservationFreshness` / `observationFreshness()` below: trusted
+ * ledger, observation time and known gaps are always reported under the same keys.
+ *
  * Pagination cursors are bound to the normalized query they were issued for
  * (see `bindCursor` / `verifyCursor`): a cursor minted under one sort or filter
  * selection is refused under any other, so a client cannot silently splice pages
@@ -78,6 +82,52 @@ export function resolveRequestVersion(
     };
   }
   return { ok: true, version };
+}
+
+// ── Observation freshness ─────────────────────────────────────────────────────
+
+/**
+ * Freshness metadata attached to every market observation payload (feed, detail
+ * and performance endpoints). The same keys and meaning apply everywhere.
+ *
+ *  - `trustedLedger`: the ledger sequence the observation was read from. Soroban
+ *    contract state is authoritative; this is the ledger the Postgres read index
+ *    was verified against. `null` when no trusted ledger is known.
+ *  - `observedAt`: ISO-8601 UTC time the observation was taken.
+ *  - `knownGaps`: ledger ranges or sources known to be missing from the index.
+ *    Empty when the observation is complete.
+ */
+export interface ObservationFreshness {
+  trustedLedger: number | null;
+  observedAt: string;
+  knownGaps: string[];
+}
+
+export interface ObservationFreshnessInput {
+  trustedLedger?: number | null;
+  observedAt: Date | string;
+  knownGaps?: readonly string[];
+}
+
+/**
+ * Build the shared freshness block. Normalises the observation time to ISO UTC,
+ * rejects an invalid time or a non-integer ledger rather than emitting them, and
+ * copies `knownGaps` so callers cannot mutate a returned payload.
+ */
+export function observationFreshness(input: ObservationFreshnessInput): ObservationFreshness {
+  const observed = input.observedAt instanceof Date ? input.observedAt : new Date(input.observedAt);
+  if (Number.isNaN(observed.getTime())) {
+    throw new RangeError("observedAt must be a valid date");
+  }
+  const ledger = input.trustedLedger ?? null;
+  if (ledger !== null && (!Number.isInteger(ledger) || ledger < 0)) {
+    throw new RangeError("trustedLedger must be a non-negative integer or null");
+  }
+  return {
+    trustedLedger: ledger,
+    observedAt: observed.toISOString(),
+    knownGaps: [...(input.knownGaps ?? [])],
+  };
 }
 
 // ── Query parameters ──────────────────────────────────────────────────────────
@@ -352,252 +402,46 @@ export function schemaVersionHeaders(): Record<string, string> {
   return { [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION) };
 }
 
-// ── Read-index and upstream source metadata ───────────────────────────────────
-
-export const FEED_SOURCE_KINDS = ["index", "contract"] as const;
-export type FeedSourceKind = (typeof FEED_SOURCE_KINDS)[number];
-
-export const FEED_SOURCE_STATUSES = ["live", "cached", "stale", "unavailable"] as const;
-export type FeedSourceStatus = (typeof FEED_SOURCE_STATUSES)[number];
-
-export const FEED_SOURCE_FAILURE_REASONS = [
-  "read_index_unavailable",
-  "read_index_not_configured",
-  "read_index_query_failed",
-  "upstream_timeout",
-  "contract_unavailable",
-] as const;
-export type FeedSourceFailureReason = (typeof FEED_SOURCE_FAILURE_REASONS)[number];
+// ── Conditional read responses ────────────────────────────────────────────────
 
 /**
- * Stable availability and freshness metadata attached to market feed and read-index
- * responses. Keeps a genuinely empty feed (`status: "live"` with `items: []`)
- * distinct from a degraded fallback (`status: "stale"`) or a failed upstream read
- * (`status: "unavailable"`).
+ * Visibility of a market read view. Private (invite-scoped) views must never
+ * share a cache key with public ones, so visibility is part of the key input.
  */
-export interface FeedSourceMetadata {
-  source: FeedSourceKind;
-  status: FeedSourceStatus;
-  stale: boolean;
-  unavailable: boolean;
-  degraded: boolean;
-  lastUpdatedAt: string | null;
-  ageMs: number | null;
-  freshnessWindowMs: number;
-  reason?: FeedSourceFailureReason;
-}
+export type ReadVisibility = "public" | "invite";
 
-const DEFAULT_FRESHNESS_WINDOW_MS = 60_000;
-const STALE_WINDOW_MULTIPLIER = 5;
-
-function normalizePositiveWindow(windowMs?: number): number {
-  return typeof windowMs === "number" && Number.isFinite(windowMs) && windowMs > 0
-    ? Math.floor(windowMs)
-    : DEFAULT_FRESHNESS_WINDOW_MS;
-}
-
-function normalizeTimestampMs(timestampMs?: number | null): number | null {
-  return typeof timestampMs === "number" && Number.isFinite(timestampMs) && timestampMs >= 0
-    ? Math.floor(timestampMs)
-    : null;
+export interface SettlementIdentity {
+  marketId: string;
+  settlementId: string;
+  visibility: ReadVisibility;
+  /** Invite scope identifier. Required when visibility is "invite". */
+  inviteScope?: string;
 }
 
 /**
- * Build deterministic source metadata for a healthy or cached read-index / contract
- * snapshot. An unknown `updatedAtMs` is classified as `"stale"` rather than `"live"`
- * so an unverified cache age never masquerades as fresh data.
+ * Build the cache-key material for a settled-market read. Visibility and invite
+ * scope are bound into the identity so a private response cannot be served to,
+ * or collide with, a public one.
  */
-export function buildFeedSourceMetadata(args: {
-  source?: FeedSourceKind;
-  updatedAtMs?: number | null;
-  freshnessWindowMs?: number;
-  nowMs?: number;
-  status?: Exclude<FeedSourceStatus, "unavailable">;
-  reason?: FeedSourceFailureReason;
-} = {}): FeedSourceMetadata {
-  const source: FeedSourceKind = args.source ?? "index";
-  const freshnessWindowMs = normalizePositiveWindow(args.freshnessWindowMs);
-  const nowMs = normalizeTimestampMs(args.nowMs) ?? Date.now();
-  const updatedAtMs = normalizeTimestampMs(args.updatedAtMs);
-  const ageMs = updatedAtMs === null ? null : Math.max(0, nowMs - updatedAtMs);
-
-  let status: Exclude<FeedSourceStatus, "unavailable">;
-  if (args.status) {
-    status = args.status;
-  } else if (ageMs === null) {
-    status = "stale";
-  } else if (ageMs <= freshnessWindowMs) {
-    status = "live";
-  } else if (ageMs <= freshnessWindowMs * STALE_WINDOW_MULTIPLIER) {
-    status = "cached";
-  } else {
-    status = "stale";
+export function settlementCacheKey(id: SettlementIdentity): string {
+  if (id.visibility === "invite" && !id.inviteScope) {
+    throw new Error("invite-scoped settlement identity requires inviteScope");
   }
+  const scope = id.visibility === "invite" ? `invite:${id.inviteScope}` : "public";
+  return `v${API_SCHEMA_VERSION}|${id.marketId}|${id.settlementId}|${scope}`;
+}
 
-  const stale = status === "stale";
+/**
+ * Headers for a conditional response. Private views are marked `private` so
+ * shared caches never store them, and the ETag is derived from the cache key.
+ */
+export function conditionalReadHeaders(id: SettlementIdentity, etag: string): Record<string, string> {
+  const cacheControl = id.visibility === "invite" ? "private, no-cache" : "public, max-age=0, must-revalidate";
   return {
-    source,
-    status,
-    stale,
-    unavailable: false,
-    degraded: stale || args.reason !== undefined,
-    lastUpdatedAt: updatedAtMs === null ? null : new Date(updatedAtMs).toISOString(),
-    ageMs,
-    freshnessWindowMs,
-    ...(args.reason !== undefined ? { reason: args.reason } : {}),
-  };
-}
-
-/**
- * Build explicit stale-source metadata when a read-index query fails or times out
- * and a previously cached snapshot is served in its place.
- */
-export function staleFeedSourceMetadata(args: {
-  source?: FeedSourceKind;
-  updatedAtMs?: number | null;
-  freshnessWindowMs?: number;
-  nowMs?: number;
-  reason?: FeedSourceFailureReason;
-} = {}): FeedSourceMetadata {
-  return buildFeedSourceMetadata({
-    ...args,
-    status: "stale",
-    reason: args.reason ?? "read_index_query_failed",
-  });
-}
-
-/**
- * Build explicit unavailable-source metadata when a read-index or upstream query
- * fails and no trustworthy snapshot can be served.
- */
-export function unavailableFeedSourceMetadata(args: {
-  source?: FeedSourceKind;
-  updatedAtMs?: number | null;
-  freshnessWindowMs?: number;
-  nowMs?: number;
-  reason?: FeedSourceFailureReason;
-} = {}): FeedSourceMetadata {
-  const source: FeedSourceKind = args.source ?? "index";
-  const freshnessWindowMs = normalizePositiveWindow(args.freshnessWindowMs);
-  const nowMs = normalizeTimestampMs(args.nowMs) ?? Date.now();
-  const updatedAtMs = normalizeTimestampMs(args.updatedAtMs);
-  const ageMs = updatedAtMs === null ? null : Math.max(0, nowMs - updatedAtMs);
-
-  return {
-    source,
-    status: "unavailable",
-    stale: true,
-    unavailable: true,
-    degraded: true,
-    lastUpdatedAt: updatedAtMs === null ? null : new Date(updatedAtMs).toISOString(),
-    ageMs,
-    freshnessWindowMs,
-    reason: args.reason ?? "read_index_unavailable",
-  };
-}
-
-export const FEED_SOURCE_METADATA_SPEC: ShapeSpec = {
-  source: { type: "string", required: true, oneOf: FEED_SOURCE_KINDS },
-  status: { type: "string", required: true, oneOf: FEED_SOURCE_STATUSES },
-  stale: { type: "boolean", required: true },
-  unavailable: { type: "boolean", required: true },
-  degraded: { type: "boolean", required: true },
-  lastUpdatedAt: { type: "string", min: 1 },
-  ageMs: { type: "integer", min: 0 },
-  freshnessWindowMs: { type: "integer", required: true, min: 1 },
-  reason: { type: "string", oneOf: FEED_SOURCE_FAILURE_REASONS },
-};
-
-/**
- * Validate source metadata including semantic invariants between `status`,
- * `stale`, `unavailable`, `degraded`, `lastUpdatedAt`, and `ageMs`.
- */
-export function validateFeedSourceMetadata(payload: unknown): ShapeResult {
-  const shape = checkShape(payload, FEED_SOURCE_METADATA_SPEC);
-  if (!shape.ok) return shape;
-
-  const record = payload as Record<string, unknown>;
-  const errors = [...shape.errors];
-
-  if (record.status === "unavailable") {
-    if (record.unavailable !== true) {
-      errors.push("unavailable must be true when status is unavailable");
-    }
-    if (record.stale !== true) {
-      errors.push("stale must be true when status is unavailable");
-    }
-    if (record.degraded !== true) {
-      errors.push("degraded must be true when status is unavailable");
-    }
-  } else if (record.unavailable !== false) {
-    errors.push("unavailable must be false when status is not unavailable");
-  }
-
-  if (record.status === "stale") {
-    if (record.stale !== true) {
-      errors.push("stale must be true when status is stale");
-    }
-    if (record.degraded !== true) {
-      errors.push("degraded must be true when status is stale");
-    }
-  }
-
-  if (record.status === "live" || record.status === "cached") {
-    if (record.stale !== false) {
-      errors.push(`stale must be false when status is ${String(record.status)}`);
-    }
-  }
-
-  const hasUpdatedAt = record.lastUpdatedAt !== null && record.lastUpdatedAt !== undefined;
-  const hasAge = record.ageMs !== null && record.ageMs !== undefined;
-  if (hasUpdatedAt !== hasAge) {
-    errors.push("lastUpdatedAt and ageMs must either both be present or both be null");
-  }
-
-  return { ok: errors.length === 0, errors, unexpected: shape.unexpected };
-}
-
-export interface MarketFeedPayload<T> {
-  items: T[];
-  count: number;
-  cache: FeedSourceMetadata;
-  nextCursor: number | null;
-}
-
-export interface VersionedMarketFeedResponse<T> extends VersionedResponse<MarketFeedPayload<T>> {
-  items: T[];
-  count: number;
-  cache: FeedSourceMetadata;
-  nextCursor: number | null;
-}
-
-/**
- * Wrap a market feed payload with schema version and explicit source metadata.
- * A healthy empty market feed (`items: []`) retains `status: "live" | "cached"`
- * with `unavailable: false`, keeping it distinct from an upstream failure.
- */
-export function versionedMarketFeed<T>(args: {
-  items: readonly T[];
-  cache: FeedSourceMetadata;
-  nextCursor?: number | null;
-}): VersionedMarketFeedResponse<T> {
-  if (args.cache.unavailable) {
-    throw new Error(
-      "unavailable read-index source cannot be wrapped as a successful market feed response",
-    );
-  }
-  const items = [...args.items];
-  const nextCursor = args.nextCursor ?? null;
-  const payload: MarketFeedPayload<T> = {
-    items,
-    count: items.length,
-    cache: args.cache,
-    nextCursor,
-  };
-  return {
-    schemaVersion: API_SCHEMA_VERSION,
-    data: payload,
-    ...payload,
+    ...schemaVersionHeaders(),
+    ETag: `"${etag}"`,
+    "Cache-Control": cacheControl,
+    Vary: "Accept-Encoding",
   };
 }
 
@@ -624,3 +468,190 @@ export const AGENT_API_REQUEST_SPEC: ShapeSpec = {
 export function validateAgentApiRequest(payload: unknown): ShapeResult {
   return checkShape(payload, AGENT_API_REQUEST_SPEC);
 }
+
+// ── Capability Discovery Schema Versioning ────────────────────────────────────
+
+export const CAPABILITY_SCHEMA_VERSION = "mimir.capabilities.v1" as const;
+
+export const SUPPORTED_CAPABILITY_SCHEMA_VERSIONS = [
+  CAPABILITY_SCHEMA_VERSION,
+] as const;
+
+export type CapabilitySchemaVersion =
+  (typeof SUPPORTED_CAPABILITY_SCHEMA_VERSIONS)[number];
+
+export type CapabilityVersionReason =
+  | "unsupported_version"
+  | "malformed_version"
+  | "conflicting_version";
+
+export interface CapabilityVersionVerdict {
+  ok: boolean;
+  schemaVersion?: CapabilitySchemaVersion;
+  reason?: CapabilityVersionReason;
+  field?: "version" | "schemaVersion";
+  detail?: string;
+}
+
+const CAPABILITY_SCHEMA_VERSION_RE = /^mimir\.capabilities\.v(0|[1-9]\d*)$/;
+const CAPABILITY_VERSION_ALIAS_RE = /^v?(0|[1-9]\d*)$/;
+
+function parseCapabilitySchemaVersionValue(raw: string): CapabilityVersionVerdict {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      reason: "malformed_version",
+      field: "schemaVersion",
+      detail: "schemaVersion must not be empty",
+    };
+  }
+  if (!CAPABILITY_SCHEMA_VERSION_RE.test(trimmed)) {
+    return {
+      ok: false,
+      reason: "malformed_version",
+      field: "schemaVersion",
+      detail: `schemaVersion must match ${CAPABILITY_SCHEMA_VERSION} format`,
+    };
+  }
+  if (
+    !(SUPPORTED_CAPABILITY_SCHEMA_VERSIONS as readonly string[]).includes(trimmed)
+  ) {
+    return {
+      ok: false,
+      reason: "unsupported_version",
+      field: "schemaVersion",
+      detail: `unsupported capability schemaVersion: ${trimmed}`,
+    };
+  }
+  return { ok: true, schemaVersion: trimmed as CapabilitySchemaVersion };
+}
+
+function parseCapabilityVersionAliasValue(raw: string): CapabilityVersionVerdict {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      reason: "malformed_version",
+      field: "version",
+      detail: "version must not be empty",
+    };
+  }
+  if (
+    trimmed === CAPABILITY_SCHEMA_VERSION ||
+    trimmed === "1" ||
+    trimmed === "v1"
+  ) {
+    return { ok: true, schemaVersion: CAPABILITY_SCHEMA_VERSION };
+  }
+  if (
+    CAPABILITY_SCHEMA_VERSION_RE.test(trimmed) ||
+    CAPABILITY_VERSION_ALIAS_RE.test(trimmed)
+  ) {
+    return {
+      ok: false,
+      reason: "unsupported_version",
+      field: "version",
+      detail: `unsupported capability version: ${trimmed}`,
+    };
+  }
+  return {
+    ok: false,
+    reason: "malformed_version",
+    field: "version",
+    detail: `malformed capability version: ${trimmed}`,
+  };
+}
+
+/**
+ * Resolve and validate `?version=` and `?schemaVersion=` query parameters for
+ * the capability discovery endpoint.
+ *
+ * Enforces strict scalar-parameter semantics (duplicate scalar keys are
+ * rejected rather than silently taking the first value), refuses unknown or
+ * newer versions rather than coercing them, and rejects conflicting values when
+ * both parameters are supplied.
+ */
+export function resolveCapabilityVersionQuery(
+  searchParams: URLSearchParams,
+): CapabilityVersionVerdict {
+  const versions = searchParams.getAll("version");
+  if (versions.length > 1) {
+    return {
+      ok: false,
+      reason: "conflicting_version",
+      field: "version",
+      detail: "duplicate scalar query parameter 'version'",
+    };
+  }
+
+  const schemaVersions = searchParams.getAll("schemaVersion");
+  if (schemaVersions.length > 1) {
+    return {
+      ok: false,
+      reason: "conflicting_version",
+      field: "schemaVersion",
+      detail: "duplicate scalar query parameter 'schemaVersion'",
+    };
+  }
+
+  const schemaVerdict =
+    schemaVersions.length === 1
+      ? parseCapabilitySchemaVersionValue(schemaVersions[0]!)
+      : undefined;
+  const versionVerdict =
+    versions.length === 1
+      ? parseCapabilityVersionAliasValue(versions[0]!)
+      : undefined;
+
+  if (schemaVerdict && !schemaVerdict.ok) {
+    return schemaVerdict;
+  }
+  if (versionVerdict && !versionVerdict.ok) {
+    return versionVerdict;
+  }
+
+  if (
+    schemaVerdict?.schemaVersion &&
+    versionVerdict?.schemaVersion &&
+    schemaVerdict.schemaVersion !== versionVerdict.schemaVersion
+  ) {
+    return {
+      ok: false,
+      reason: "conflicting_version",
+      field: "schemaVersion",
+      detail: "version and schemaVersion query parameters conflict",
+    };
+  }
+
+  return {
+    ok: true,
+    schemaVersion:
+      schemaVerdict?.schemaVersion ??
+      versionVerdict?.schemaVersion ??
+      CAPABILITY_SCHEMA_VERSION,
+  };
+}
+
+/** Top-level shape spec for the public capability discovery document. */
+export const CAPABILITY_DOCUMENT_SPEC: ShapeSpec = {
+  schemaVersion: {
+    type: "string",
+    required: true,
+    oneOf: SUPPORTED_CAPABILITY_SCHEMA_VERSIONS,
+  },
+  apiSchemaVersion: {
+    type: "integer",
+    required: true,
+    min: API_SCHEMA_VERSION,
+    max: API_SCHEMA_VERSION,
+  },
+  supportedSchemaVersions: { type: "array", required: true },
+  discoveryPath: { type: "string", required: true, oneOf: ["/api/capabilities"] },
+  service: { type: "object", required: true },
+  network: { type: "object", required: true },
+  asset: { type: "object", required: true },
+  paymentProtocol: { type: "object", required: true },
+  rateLimits: { type: "object", required: true },
+  endpoints: { type: "array", required: true },
+};

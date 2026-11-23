@@ -5,17 +5,9 @@
 # the live route dependencies (lib/ops/public-api-openapi.ts) and verified
 # against lib/ops/json-schema-subset.ts in tests/node/public-api-openapi.test.ts.
 #
-# Regenerate with `npm run check:schema-snapshot -- --write` after schema changes.
-#
-# Filter arrays (categories, states) are bounded before read-index queries are
-# constructed: at most 10 entries each, and at most 512 total bytes across all
-# entries. Violations return 400 `invalid_request` before any database work.
-#
-# CI note (browser-smoke): the TypeScript errors in tests/node/xmtp-chat-thread.test.ts
-# and tests/node/xmtp-optimistic-send.test.ts (missing `vitest` types, unresolved
-# `returnType`, implicit any parameters, and `ThreadDisplayRow` vs `Row` mismatches)
-# are not addressed by this generated contract file and must be fixed in those test
-# sources and their imports, without changing toolchain or dependency versions.
+# Observation freshness: indexed market reads expose a shared `observation`
+# block (trusted ledger, observation time, known gaps) with identical meaning
+# across feed, detail, and performance endpoints.
 
 openapi: "3.1.0"
 info:
@@ -31,6 +23,1225 @@ servers:
   - url: "https://mimir.example"
     description: "Placeholder host. Substitute your deployment URL in your own copy; the audit reports SERVER_URL_NOT_PLACEHOLDER as a warning."
 paths:
+  "/api/capabilities":
+    get:
+      operationId: getApiCapabilities
+      summary: Fetch the versioned public API capability discovery document.
+      description: "Returns a deterministic, privacy-safe capability discovery document describing supported schema versions, Stellar network metadata, public USDC asset metadata, x402 v2 payment parameters, rate-limit tiers, and reviewed public/x402/agent endpoint capabilities.\n\nAccepts optional `?schemaVersion=` or `?version=` query selection and rejects unsupported, malformed, or conflicting duplicate scalar query parameters with HTTP 400. Unsupported HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`) return HTTP 405."
+      x-mimir-cache-control: "public, s-maxage=300, stale-while-revalidate=600"
+      x-mimir-access-tier: public_read
+      x-mimir-rate-limit-route: "/api/capabilities"
+      parameters:
+        - name: version
+          in: query
+          required: false
+          description: "Capability version alias (`1`, `v1`, or `mimir.capabilities.v1`)."
+          schema:
+            type: string
+            enum:
+              - "1"
+              - v1
+              - mimir.capabilities.v1
+        - name: schemaVersion
+          in: query
+          required: false
+          description: "Canonical capability document schema version (`mimir.capabilities.v1`)."
+          schema:
+            type: string
+            enum:
+              - mimir.capabilities.v1
+      responses:
+        "200":
+          description: Fetch the versioned public API capability discovery document.
+          content:
+            "application/json":
+              schema:
+                type: object
+                description: "Response payload for `GET /api/capabilities` (`lib/api/capabilities.ts`)."
+                required:
+                  - schemaVersion
+                  - apiSchemaVersion
+                  - supportedSchemaVersions
+                  - discoveryPath
+                  - service
+                  - network
+                  - asset
+                  - paymentProtocol
+                  - rateLimits
+                  - endpoints
+                additionalProperties: false
+                properties:
+                  schemaVersion:
+                    type: string
+                    enum:
+                      - mimir.capabilities.v1
+                  apiSchemaVersion:
+                    type: integer
+                    const: 1
+                  supportedSchemaVersions:
+                    type: array
+                    items:
+                      type: string
+                      enum:
+                        - mimir.capabilities.v1
+                  discoveryPath:
+                    type: string
+                    const: "/api/capabilities"
+                  service:
+                    type: object
+                    required:
+                      - name
+                      - domain
+                      - agentApiVersion
+                      - schemaVersionHeader
+                    additionalProperties: false
+                    properties:
+                      name:
+                        type: string
+                        const: Mimir
+                      domain:
+                        type: string
+                        const: prediction-market
+                      agentApiVersion:
+                        type: string
+                        const: v1
+                      schemaVersionHeader:
+                        type: string
+                        const: x-mimir-schema-version
+                  network:
+                    type: object
+                    required:
+                      - caip2
+                      - network
+                      - passphrase
+                      - addressKinds
+                      - nativeFeeAsset
+                    additionalProperties: false
+                    properties:
+                      caip2:
+                        type: string
+                        pattern: "^stellar:[a-z0-9-]+$"
+                      network:
+                        type: string
+                        pattern: "^[a-z0-9-]+$"
+                      passphrase:
+                        type: string
+                        minLength: 1
+                      addressKinds:
+                        type: array
+                        items:
+                          type: string
+                          enum:
+                            - G
+                            - C
+                      nativeFeeAsset:
+                        type: object
+                        required:
+                          - code
+                          - decimals
+                        additionalProperties: false
+                        properties:
+                          code:
+                            type: string
+                            const: XLM
+                          decimals:
+                            type: integer
+                            const: 7
+                  asset:
+                    type: object
+                    required:
+                      - code
+                      - symbol
+                      - issuer
+                      - asset
+                      - decimals
+                      - minStakeUsdc
+                    additionalProperties: false
+                    properties:
+                      code:
+                        type: string
+                        const: USDC
+                      symbol:
+                        type: string
+                        const: USDC
+                      issuer:
+                        type: string
+                        pattern: "^[GC][A-Z2-7]{55}$"
+                      asset:
+                        type: string
+                        minLength: 61
+                        maxLength: 61
+                      decimals:
+                        type: integer
+                        const: 7
+                      minStakeUsdc:
+                        type: number
+                        minimum: 1
+                  paymentProtocol:
+                    type: object
+                    required:
+                      - protocol
+                      - version
+                      - scheme
+                      - network
+                      - asset
+                      - proofKind
+                      - maxAgeMs
+                      - headers
+                    additionalProperties: false
+                    properties:
+                      protocol:
+                        type: string
+                        const: x402
+                      version:
+                        type: integer
+                        const: 2
+                      scheme:
+                        type: string
+                        const: exact
+                      network:
+                        type: string
+                        pattern: "^stellar:[a-z0-9-]+$"
+                      asset:
+                        type: string
+                        minLength: 61
+                        maxLength: 61
+                      proofKind:
+                        type: string
+                        const: stellar-payment-v1
+                      maxAgeMs:
+                        type: integer
+                        minimum: 1
+                      headers:
+                        type: object
+                        required:
+                          - paymentRequired
+                          - paymentSignature
+                          - paymentResponse
+                        additionalProperties: false
+                        properties:
+                          paymentRequired:
+                            type: string
+                            const: PAYMENT-REQUIRED
+                          paymentSignature:
+                            type: string
+                            const: PAYMENT-SIGNATURE
+                          paymentResponse:
+                            type: string
+                            const: PAYMENT-RESPONSE
+                  rateLimits:
+                    type: object
+                    required:
+                      - publicRead
+                      - authenticatedUser
+                      - registeredAgent
+                      - apiKeyAgent
+                    additionalProperties: false
+                    properties:
+                      publicRead:
+                        type: object
+                        required:
+                          - tier
+                          - dimensions
+                          - rules
+                        additionalProperties: false
+                        properties:
+                          tier:
+                            type: string
+                            enum:
+                              - public_read
+                              - authenticated_user
+                              - registered_agent
+                              - api_key_agent
+                          dimensions:
+                            type: array
+                            items:
+                              type: string
+                              enum:
+                                - ip
+                                - wallet
+                                - agent
+                                - route
+                          rules:
+                            type: array
+                            items:
+                              type: object
+                              required:
+                                - dimension
+                                - limit
+                                - windowMs
+                              additionalProperties: false
+                              properties:
+                                dimension:
+                                  type: string
+                                  enum:
+                                    - ip
+                                    - wallet
+                                    - agent
+                                    - route
+                                limit:
+                                  type: integer
+                                  minimum: 1
+                                windowMs:
+                                  type: integer
+                                  minimum: 1
+                      authenticatedUser:
+                        type: object
+                        required:
+                          - tier
+                          - dimensions
+                          - rules
+                        additionalProperties: false
+                        properties:
+                          tier:
+                            type: string
+                            enum:
+                              - public_read
+                              - authenticated_user
+                              - registered_agent
+                              - api_key_agent
+                          dimensions:
+                            type: array
+                            items:
+                              type: string
+                              enum:
+                                - ip
+                                - wallet
+                                - agent
+                                - route
+                          rules:
+                            type: array
+                            items:
+                              type: object
+                              required:
+                                - dimension
+                                - limit
+                                - windowMs
+                              additionalProperties: false
+                              properties:
+                                dimension:
+                                  type: string
+                                  enum:
+                                    - ip
+                                    - wallet
+                                    - agent
+                                    - route
+                                limit:
+                                  type: integer
+                                  minimum: 1
+                                windowMs:
+                                  type: integer
+                                  minimum: 1
+                      registeredAgent:
+                        type: object
+                        required:
+                          - tier
+                          - dimensions
+                          - rules
+                        additionalProperties: false
+                        properties:
+                          tier:
+                            type: string
+                            enum:
+                              - public_read
+                              - authenticated_user
+                              - registered_agent
+                              - api_key_agent
+                          dimensions:
+                            type: array
+                            items:
+                              type: string
+                              enum:
+                                - ip
+                                - wallet
+                                - agent
+                                - route
+                          rules:
+                            type: array
+                            items:
+                              type: object
+                              required:
+                                - dimension
+                                - limit
+                                - windowMs
+                              additionalProperties: false
+                              properties:
+                                dimension:
+                                  type: string
+                                  enum:
+                                    - ip
+                                    - wallet
+                                    - agent
+                                    - route
+                                limit:
+                                  type: integer
+                                  minimum: 1
+                                windowMs:
+                                  type: integer
+                                  minimum: 1
+                      apiKeyAgent:
+                        type: object
+                        required:
+                          - tier
+                          - dimensions
+                          - rules
+                        additionalProperties: false
+                        properties:
+                          tier:
+                            type: string
+                            enum:
+                              - public_read
+                              - authenticated_user
+                              - registered_agent
+                              - api_key_agent
+                          dimensions:
+                            type: array
+                            items:
+                              type: string
+                              enum:
+                                - ip
+                                - wallet
+                                - agent
+                                - route
+                          rules:
+                            type: array
+                            items:
+                              type: object
+                              required:
+                                - dimension
+                                - limit
+                                - windowMs
+                              additionalProperties: false
+                              properties:
+                                dimension:
+                                  type: string
+                                  enum:
+                                    - ip
+                                    - wallet
+                                    - agent
+                                    - route
+                                limit:
+                                  type: integer
+                                  minimum: 1
+                                windowMs:
+                                  type: integer
+                                  minimum: 1
+                  endpoints:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - id
+                        - path
+                        - methods
+                        - category
+                        - summary
+                        - auth
+                        - paymentRequired
+                        - rateLimit
+                        - schemaVersion
+                        - cacheControl
+                      additionalProperties: false
+                      properties:
+                        id:
+                          type: string
+                          minLength: 1
+                          maxLength: 100
+                        path:
+                          type: string
+                          minLength: 1
+                          maxLength: 200
+                        methods:
+                          type: array
+                          items:
+                            type: string
+                            enum:
+                              - GET
+                              - POST
+                              - PATCH
+                              - DELETE
+                        category:
+                          type: string
+                          enum:
+                            - discovery
+                            - public_read
+                            - paid_x402
+                            - agent_api
+                        summary:
+                          type: string
+                          minLength: 1
+                          maxLength: 300
+                        auth:
+                          type: string
+                          enum:
+                            - none
+                            - none_or_invite
+                            - x402
+                            - x402_or_pass
+                            - signed_envelope_or_api_key
+                        paymentRequired:
+                          type: boolean
+                        payment:
+                          type: object
+                          required:
+                            - protocol
+                            - scheme
+                            - network
+                            - asset
+                            - priceUsd
+                            - priceAtomic
+                            - recipientMode
+                          additionalProperties: false
+                          properties:
+                            protocol:
+                              type: string
+                              const: x402-v2
+                            scheme:
+                              type: string
+                              const: exact
+                            network:
+                              type: string
+                              pattern: "^stellar:[a-z0-9-]+$"
+                            asset:
+                              type: string
+                              minLength: 61
+                              maxLength: 61
+                            priceUsd:
+                              type: string
+                              minLength: 2
+                              maxLength: 32
+                            priceAtomic:
+                              type: string
+                              pattern: "^[1-9]\\d*$"
+                            recipientMode:
+                              type: string
+                              enum:
+                                - platform
+                                - persona
+                            passPlan:
+                              type: string
+                              enum:
+                                - council
+                        rateLimit:
+                          type: object
+                          required:
+                            - tier
+                            - dimensions
+                            - routeKey
+                          additionalProperties: false
+                          properties:
+                            tier:
+                              type: string
+                              enum:
+                                - public_read
+                                - authenticated_user
+                                - registered_agent
+                                - api_key_agent
+                            dimensions:
+                              type: array
+                              items:
+                                type: string
+                                enum:
+                                  - ip
+                                  - wallet
+                                  - agent
+                                  - route
+                            routeKey:
+                              type: string
+                              minLength: 1
+                              maxLength: 200
+                        schemaVersion:
+                          type:
+                            - string
+                            - integer
+                          minLength: 1
+                          minimum: 1
+                        cacheControl:
+                          type: string
+                          minLength: 1
+                          maxLength: 120
+              examples:
+                capabilitiesDocument:
+                  summary: "Versioned capability discovery document for Mimir public, x402, and agent APIs."
+                  x-mimir-response-headers:
+                    Cache-Control: "public, s-maxage=300, stale-while-revalidate=600"
+                    x-mimir-schema-version: "1"
+                  value:
+                    schemaVersion: mimir.capabilities.v1
+                    apiSchemaVersion: 1
+                    supportedSchemaVersions:
+                      - mimir.capabilities.v1
+                    discoveryPath: "/api/capabilities"
+                    service:
+                      name: Mimir
+                      domain: prediction-market
+                      agentApiVersion: v1
+                      schemaVersionHeader: x-mimir-schema-version
+                    network:
+                      caip2: "stellar:testnet"
+                      network: testnet
+                      passphrase: "Test SDF Network ; September 2015"
+                      addressKinds:
+                        - G
+                        - C
+                      nativeFeeAsset:
+                        code: XLM
+                        decimals: 7
+                    asset:
+                      code: USDC
+                      symbol: USDC
+                      issuer: GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK
+                      asset: "USDC:GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK"
+                      decimals: 7
+                      minStakeUsdc: 2
+                    paymentProtocol:
+                      protocol: x402
+                      version: 2
+                      scheme: exact
+                      network: "stellar:testnet"
+                      asset: "USDC:GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK"
+                      proofKind: stellar-payment-v1
+                      maxAgeMs: 300000
+                      headers:
+                        paymentRequired: PAYMENT-REQUIRED
+                        paymentSignature: PAYMENT-SIGNATURE
+                        paymentResponse: PAYMENT-RESPONSE
+                    rateLimits:
+                      publicRead:
+                        tier: public_read
+                        dimensions:
+                          - ip
+                          - route
+                        rules:
+                          - dimension: ip
+                            limit: 300
+                            windowMs: 60000
+                          - dimension: route
+                            limit: 600
+                            windowMs: 60000
+                      authenticatedUser:
+                        tier: authenticated_user
+                        dimensions:
+                          - ip
+                          - wallet
+                          - route
+                        rules:
+                          - dimension: ip
+                            limit: 300
+                            windowMs: 60000
+                          - dimension: wallet
+                            limit: 120
+                            windowMs: 60000
+                          - dimension: route
+                            limit: 600
+                            windowMs: 60000
+                      registeredAgent:
+                        tier: registered_agent
+                        dimensions:
+                          - agent
+                          - route
+                        rules:
+                          - dimension: agent
+                            limit: 120
+                            windowMs: 60000
+                          - dimension: route
+                            limit: 600
+                            windowMs: 60000
+                      apiKeyAgent:
+                        tier: api_key_agent
+                        dimensions:
+                          - agent
+                          - ip
+                          - route
+                        rules:
+                          - dimension: ip
+                            limit: 300
+                            windowMs: 60000
+                          - dimension: agent
+                            limit: 120
+                            windowMs: 60000
+                          - dimension: route
+                            limit: 600
+                            windowMs: 60000
+                    endpoints:
+                      - id: capabilities.get
+                        path: "/api/capabilities"
+                        methods:
+                          - GET
+                        category: discovery
+                        summary: Versioned public API capability discovery document.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/capabilities"
+                        schemaVersion: mimir.capabilities.v1
+                        cacheControl: "public, s-maxage=300, stale-while-revalidate=600"
+                      - id: vs.list
+                        path: "/api/vs"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: List public VS claims from the read index with cursor pagination.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/vs"
+                        schemaVersion: 1
+                        cacheControl: "s-maxage=15, stale-while-revalidate=60"
+                      - id: vs.get
+                        path: "/api/vs/{id}"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: "Fetch a single VS claim by ID, or unlock a private claim with an invite key."
+                        auth: none_or_invite
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/vs/[id]?invite"
+                        schemaVersion: 1
+                        cacheControl: "s-maxage=15, stale-while-revalidate=60"
+                      - id: vs.reasoning.list
+                        path: "/api/vs/{id}/reasoning"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: List the public agent reasoning timeline for a claim.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/vs/{id}/reasoning"
+                        schemaVersion: 1
+                        cacheControl: "s-maxage=15, stale-while-revalidate=60"
+                      - id: vs.council.get
+                        path: "/api/vs/{id}/council"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: Fetch the AI council staking record and event proofs for a claim.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/vs/{id}/council"
+                        schemaVersion: 1
+                        cacheControl: "public, s-maxage=20, stale-while-revalidate=60"
+                      - id: vs.events.stream
+                        path: "/api/vs/{id}/events"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: Stream claim index update events over Server-Sent Events.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/vs/{id}/events"
+                        schemaVersion: 1
+                        cacheControl: "no-cache, no-transform"
+                      - id: vs.user.list
+                        path: "/api/vs/user/{address}"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: List public VS claims where a Stellar address is creator or challenger.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/vs/user/{address}"
+                        schemaVersion: 1
+                        cacheControl: "s-maxage=15, stale-while-revalidate=60"
+                      - id: challenge_opportunities.list
+                        path: "/api/challenge-opportunities"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: List source-backed challenge and claim creation opportunities.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/challenge-opportunities"
+                        schemaVersion: 1
+                        cacheControl: "s-maxage=600, stale-while-revalidate=300"
+                      - id: performance.get
+                        path: "/api/performance/{address}"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: "Cumulative realised P&L series and settled count for a Stellar address."
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/performance/{address}"
+                        schemaVersion: 1
+                        cacheControl: "s-maxage=30, stale-while-revalidate=120"
+                      - id: baskets.list
+                        path: "/api/baskets"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: List user-composed agent baskets with active subscriber counts.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/baskets"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                      - id: baskets.mirrors.list
+                        path: "/api/baskets/mirrors"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: List pending copy-trade mirror positions for a subscriber address.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/baskets/mirrors"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                      - id: payments.revenue.get
+                        path: "/api/payments/revenue"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: Live x402 payment revenue summary across paid endpoints.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/payments/revenue"
+                        schemaVersion: 1
+                        cacheControl: "s-maxage=10, stale-while-revalidate=30"
+                      - id: research.manifest.get
+                        path: "/api/research/manifest"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: Supported public research adapters and category policies.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/research/manifest"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                      - id: share.card.get
+                        path: "/api/share/{id}"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: Render a privacy-guarded SVG share card for a claim.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/share/{id}"
+                        schemaVersion: 1
+                        cacheControl: "public, s-maxage=60, stale-while-revalidate=300"
+                      - id: health.get
+                        path: "/api/health"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: "Operational health probe reporting worker heartbeats, sync age, backlog, and alarms."
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/health"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                      - id: health.status.get
+                        path: "/api/health/status"
+                        methods:
+                          - GET
+                        category: public_read
+                        summary: Privacy-safe public operational status and deployment provenance summary.
+                        auth: none
+                        paymentRequired: false
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/health/status"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                      - id: x402.premium_price
+                        path: "/api/premium/price"
+                        methods:
+                          - GET
+                        category: paid_x402
+                        summary: Premium price oracle returning a reference price and timestamp over x402.
+                        auth: x402
+                        paymentRequired: true
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/premium/price"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                        payment:
+                          protocol: x402-v2
+                          scheme: exact
+                          network: "stellar:testnet"
+                          asset: "USDC:GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK"
+                          priceUsd: "$0.001"
+                          priceAtomic: "10000"
+                          recipientMode: platform
+                      - id: x402.oracle
+                        path: "/api/oracle"
+                        methods:
+                          - POST
+                        category: paid_x402
+                        summary: Oracle-as-a-service verdict with confidence and SHA-256 evidence commitment.
+                        auth: x402
+                        paymentRequired: true
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/oracle"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                        payment:
+                          protocol: x402-v2
+                          scheme: exact
+                          network: "stellar:testnet"
+                          asset: "USDC:GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK"
+                          priceUsd: "$0.005"
+                          priceAtomic: "50000"
+                          recipientMode: platform
+                      - id: x402.council_preflight
+                        path: "/api/council/preflight"
+                        methods:
+                          - POST
+                        category: paid_x402
+                        summary: Single-persona preflight review and quality score on a draft market.
+                        auth: x402
+                        paymentRequired: true
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/council/preflight"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                        payment:
+                          protocol: x402-v2
+                          scheme: exact
+                          network: "stellar:testnet"
+                          asset: "USDC:GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK"
+                          priceUsd: "$0.001"
+                          priceAtomic: "10000"
+                          recipientMode: persona
+                      - id: x402.council_reasoning
+                        path: "/api/council/reasoning"
+                        methods:
+                          - GET
+                        category: paid_x402
+                        summary: "Single-persona reasoning read on an open claim (x402 or council pass)."
+                        auth: x402_or_pass
+                        paymentRequired: true
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/council/reasoning"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                        payment:
+                          protocol: x402-v2
+                          scheme: exact
+                          network: "stellar:testnet"
+                          asset: "USDC:GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK"
+                          priceUsd: "$0.001"
+                          priceAtomic: "10000"
+                          recipientMode: persona
+                          passPlan: council
+                      - id: x402.council_vote
+                        path: "/api/council/vote"
+                        methods:
+                          - GET
+                        category: paid_x402
+                        summary: Single-persona structured verdict vote for settlement.
+                        auth: x402
+                        paymentRequired: true
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/council/vote"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                        payment:
+                          protocol: x402-v2
+                          scheme: exact
+                          network: "stellar:testnet"
+                          asset: "USDC:GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK"
+                          priceUsd: "$0.001"
+                          priceAtomic: "10000"
+                          recipientMode: persona
+                      - id: x402.council_subscribe
+                        path: "/api/council/subscribe"
+                        methods:
+                          - POST
+                        category: paid_x402
+                        summary: Issue a short-lived signed council pass for reasoning reads.
+                        auth: x402
+                        paymentRequired: true
+                        rateLimit:
+                          tier: public_read
+                          dimensions:
+                            - ip
+                            - route
+                          routeKey: "/api/council/subscribe"
+                        schemaVersion: 1
+                        cacheControl: no-store
+                        payment:
+                          protocol: x402-v2
+                          scheme: exact
+                          network: "stellar:testnet"
+                          asset: "USDC:GB7RICBT3KM36Z5VDUFC63BYHTVZXM6IQZMWJ3LRNSM5RM63TRTJARRK"
+                          priceUsd: "$0.01"
+                          priceAtomic: "100000"
+                          recipientMode: platform
+                      - id: agents.v1.action
+                        path: "/api/agents/v1/{action}"
+                        methods:
+                          - POST
+                        category: agent_api
+                        summary: "Signed, replay-protected, idempotent BYOA agent API actions."
+                        auth: signed_envelope_or_api_key
+                        paymentRequired: false
+                        rateLimit:
+                          tier: registered_agent
+                          dimensions:
+                            - agent
+                            - route
+                          routeKey: "/api/agents/v1/[action]"
+                        schemaVersion: v1
+                        cacheControl: no-store
+        "400":
+          description: Invalid path or query parameter.
+          x-mimir-error-codes:
+            - unsupported_version
+            - invalid_request
+          content:
+            "application/json":
+              schema:
+                type: object
+                description: "Structured error envelope from `lib/api/errors.ts`."
+                required:
+                  - error
+                additionalProperties: false
+                properties:
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                      - retryable
+                    additionalProperties: false
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - invalid_request
+                          - invalid_signature
+                          - unsupported_version
+                          - payload_too_large
+                          - idempotency_conflict
+                          - unauthenticated
+                          - nonce_reused
+                          - request_expired
+                          - forbidden
+                          - capability_missing
+                          - agent_revoked
+                          - agent_paused
+                          - not_found
+                          - conflict
+                          - rate_limited
+                          - budget_exhausted
+                          - upstream_unavailable
+                          - internal_error
+                        description: Stable machine error code.
+                      message:
+                        type: string
+                        description: Human-readable error detail.
+                      retryable:
+                        type: boolean
+                        description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      retryAfterSeconds:
+                        type: number
+                        minimum: 0
+                        description: Suggested backoff in seconds when retryable.
+                      field:
+                        type: string
+                        description: Request parameter or field that failed validation.
+                      requestId:
+                        type: string
+                        description: Optional caller correlation ID.
+                      trace_id:
+                        type: string
+                        description: Ambient server trace ID when executed inside a traced route.
+              examples:
+                unsupportedVersion:
+                  summary: Requested capability schema version is not supported.
+                  x-mimir-error-code: unsupported_version
+                  x-mimir-response-headers:
+                    Cache-Control: no-store
+                  value:
+                    error:
+                      code: unsupported_version
+                      message: "unsupported capability schemaVersion: mimir.capabilities.v2"
+                      retryable: false
+                      field: schemaVersion
+                conflictingParams:
+                  summary: Duplicate or conflicting scalar version query parameter.
+                  x-mimir-error-code: invalid_request
+                  x-mimir-response-headers:
+                    Cache-Control: no-store
+                  value:
+                    error:
+                      code: invalid_request
+                      message: "duplicate scalar query parameter 'version'"
+                      retryable: false
+                      field: version
+        "429":
+          description: "Rate limit exceeded for the `public_read` access tier."
+          x-mimir-error-codes:
+            - rate_limited
+          content:
+            "application/json":
+              schema:
+                type: object
+                description: "Structured error envelope from `lib/api/errors.ts`."
+                required:
+                  - error
+                additionalProperties: false
+                properties:
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                      - retryable
+                    additionalProperties: false
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - invalid_request
+                          - invalid_signature
+                          - unsupported_version
+                          - payload_too_large
+                          - idempotency_conflict
+                          - unauthenticated
+                          - nonce_reused
+                          - request_expired
+                          - forbidden
+                          - capability_missing
+                          - agent_revoked
+                          - agent_paused
+                          - not_found
+                          - conflict
+                          - rate_limited
+                          - budget_exhausted
+                          - upstream_unavailable
+                          - internal_error
+                        description: Stable machine error code.
+                      message:
+                        type: string
+                        description: Human-readable error detail.
+                      retryable:
+                        type: boolean
+                        description: Whether repeating the request after waiting or fixing freshness can succeed.
+                      retryAfterSeconds:
+                        type: number
+                        minimum: 0
+                        description: Suggested backoff in seconds when retryable.
+                      field:
+                        type: string
+                        description: Request parameter or field that failed validation.
+                      requestId:
+                        type: string
+                        description: Optional caller correlation ID.
+                      trace_id:
+                        type: string
+                        description: Ambient server trace ID when executed inside a traced route.
+              examples:
+                rateLimited:
+                  summary: Public read rate limit exceeded.
+                  x-mimir-error-code: rate_limited
+                  x-mimir-response-headers:
+                    retry-after: "60"
+                    Cache-Control: no-store
+                  value:
+                    error:
+                      code: rate_limited
+                      message: "ip limit exceeded; retry in 60s"
+                      retryable: true
+                      retryAfterSeconds: 60
   "/api/vs":
     get:
       operationId: listVsFeed
@@ -39,6 +1250,8 @@ paths:
       x-mimir-cache-control: "s-maxage=15, stale-while-revalidate=60"
       x-mimir-access-tier: public_read
       x-mimir-rate-limit-route: "/api/vs"
+      x-mimir-conditional-request: "If-None-Match"
+      x-mimir-etag-binding: "settlement-identity+visibility"
       parameters:
         - name: refresh
           in: query
@@ -94,19 +1307,38 @@ paths:
             maximum: 100
             default: 50
       responses:
+        "304":
+          description: "Not Modified. The supplied `If-None-Match` matches the current settlement-bound ETag; no body is returned."
+          headers:
+            ETag:
+              description: Strong validator bound to canonical settlement identity and visibility.
+              schema:
+                type: string
         "200":
           description: List public VS claims from the read index with cursor pagination.
+          headers:
+            ETag:
+              description: Strong validator bound to canonical settlement identity and visibility.
+              schema:
+                type: string
+            Vary:
+              description: "Includes the invite credential header for private-scoped responses so they never share a public cache key."
+              schema:
+                type: string
           content:
             "application/json":
               schema:
                 type: object
-                description: "Response payload for `GET /api/vs`."
+                description: "Response payload for `GET /api/vs`. Settled-market views are immutable once settled; their ETag is derived from the canonical settlement identity and visibility, and private invite-scoped responses are served with `Cache-Control: private`."
                 required:
                   - items
                   - count
                   - cache
+                  - observation
                 additionalProperties: false
                 properties:
+                  observation:
+                    $ref: "#/components/schemas/ObservationFreshness"
                   items:
                     type: array
                     items:
@@ -2761,13 +3993,42 @@ paths:
                         type: integer
                         minimum: 1
                         description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
-                  state:
-                    type: string
-                    enum:
-                      - available
-                      - unavailable
-                      - insufficient-history
-                    description: "Explicit performance state without inventing zero returns: available when settled history exists, insufficient-history when no settled samples exist, unavailable when data could not be validated."
+                  coverage:
+                    type: object
+                    description: "Observation coverage metadata (`lib/portfolio-performance.ts::PerformanceObservationCoverage`)."
+                    required:
+                      - lastTrustedLedger
+                      - missingIntervals
+                    additionalProperties: false
+                    properties:
+                      lastTrustedLedger:
+                        type:
+                          - integer
+                          - "null"
+                        minimum: 0
+                        description: "Highest ledger sequence trusted by the read index, or null when unavailable."
+                      missingIntervals:
+                        type: array
+                        description: "Unobserved intervals that must remain visually distinct from verified zero performance."
+                        items:
+                          type: object
+                          description: "An unobserved interval in a performance series (`lib/portfolio-performance.ts::PerformanceMissingInterval`)."
+                          required:
+                            - startTimestamp
+                            - endTimestamp
+                          additionalProperties: false
+                          properties:
+                            startTimestamp:
+                              type: integer
+                              minimum: 1
+                              description: "Start of the missing interval in epoch milliseconds."
+                            endTimestamp:
+                              type: integer
+                              minimum: 1
+                              description: "End of the missing interval in epoch milliseconds."
+                            reason:
+                              type: string
+                              description: "Optional human-readable reason for the observation gap."
               examples:
                 portfolioPerformance:
                   summary: "Cumulative realised P&L series computed from settled markets."
@@ -3240,6 +4501,12 @@ paths:
                       agentBalancesUsdc:
                         oracle: 125.5
                         market_creator: 84
+                      workerDetails:
+                        oracle: null
+                        market_creator: null
+                        council: null
+                        sync: null
+                        traders: null
                     operationalStatusUrl: "/api/health/status"
         "503":
           description: "One or more critical health alarms are active (or `DATABASE_URL` is unconfigured)."
@@ -3429,6 +4696,511 @@ components:
             trace_id:
               type: string
               description: Ambient server trace ID when executed inside a traced route.
+    CapabilityDocumentResponse:
+      type: object
+      description: "Response payload for `GET /api/capabilities` (`lib/api/capabilities.ts`)."
+      required:
+        - schemaVersion
+        - apiSchemaVersion
+        - supportedSchemaVersions
+        - discoveryPath
+        - service
+        - network
+        - asset
+        - paymentProtocol
+        - rateLimits
+        - endpoints
+      additionalProperties: false
+      properties:
+        schemaVersion:
+          type: string
+          enum:
+            - mimir.capabilities.v1
+        apiSchemaVersion:
+          type: integer
+          const: 1
+        supportedSchemaVersions:
+          type: array
+          items:
+            type: string
+            enum:
+              - mimir.capabilities.v1
+        discoveryPath:
+          type: string
+          const: "/api/capabilities"
+        service:
+          type: object
+          required:
+            - name
+            - domain
+            - agentApiVersion
+            - schemaVersionHeader
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              const: Mimir
+            domain:
+              type: string
+              const: prediction-market
+            agentApiVersion:
+              type: string
+              const: v1
+            schemaVersionHeader:
+              type: string
+              const: x-mimir-schema-version
+        network:
+          type: object
+          required:
+            - caip2
+            - network
+            - passphrase
+            - addressKinds
+            - nativeFeeAsset
+          additionalProperties: false
+          properties:
+            caip2:
+              type: string
+              pattern: "^stellar:[a-z0-9-]+$"
+            network:
+              type: string
+              pattern: "^[a-z0-9-]+$"
+            passphrase:
+              type: string
+              minLength: 1
+            addressKinds:
+              type: array
+              items:
+                type: string
+                enum:
+                  - G
+                  - C
+            nativeFeeAsset:
+              type: object
+              required:
+                - code
+                - decimals
+              additionalProperties: false
+              properties:
+                code:
+                  type: string
+                  const: XLM
+                decimals:
+                  type: integer
+                  const: 7
+        asset:
+          type: object
+          required:
+            - code
+            - symbol
+            - issuer
+            - asset
+            - decimals
+            - minStakeUsdc
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+              const: USDC
+            symbol:
+              type: string
+              const: USDC
+            issuer:
+              type: string
+              pattern: "^[GC][A-Z2-7]{55}$"
+            asset:
+              type: string
+              minLength: 61
+              maxLength: 61
+            decimals:
+              type: integer
+              const: 7
+            minStakeUsdc:
+              type: number
+              minimum: 1
+        paymentProtocol:
+          type: object
+          required:
+            - protocol
+            - version
+            - scheme
+            - network
+            - asset
+            - proofKind
+            - maxAgeMs
+            - headers
+          additionalProperties: false
+          properties:
+            protocol:
+              type: string
+              const: x402
+            version:
+              type: integer
+              const: 2
+            scheme:
+              type: string
+              const: exact
+            network:
+              type: string
+              pattern: "^stellar:[a-z0-9-]+$"
+            asset:
+              type: string
+              minLength: 61
+              maxLength: 61
+            proofKind:
+              type: string
+              const: stellar-payment-v1
+            maxAgeMs:
+              type: integer
+              minimum: 1
+            headers:
+              type: object
+              required:
+                - paymentRequired
+                - paymentSignature
+                - paymentResponse
+              additionalProperties: false
+              properties:
+                paymentRequired:
+                  type: string
+                  const: PAYMENT-REQUIRED
+                paymentSignature:
+                  type: string
+                  const: PAYMENT-SIGNATURE
+                paymentResponse:
+                  type: string
+                  const: PAYMENT-RESPONSE
+        rateLimits:
+          type: object
+          required:
+            - publicRead
+            - authenticatedUser
+            - registeredAgent
+            - apiKeyAgent
+          additionalProperties: false
+          properties:
+            publicRead:
+              type: object
+              required:
+                - tier
+                - dimensions
+                - rules
+              additionalProperties: false
+              properties:
+                tier:
+                  type: string
+                  enum:
+                    - public_read
+                    - authenticated_user
+                    - registered_agent
+                    - api_key_agent
+                dimensions:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - ip
+                      - wallet
+                      - agent
+                      - route
+                rules:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - dimension
+                      - limit
+                      - windowMs
+                    additionalProperties: false
+                    properties:
+                      dimension:
+                        type: string
+                        enum:
+                          - ip
+                          - wallet
+                          - agent
+                          - route
+                      limit:
+                        type: integer
+                        minimum: 1
+                      windowMs:
+                        type: integer
+                        minimum: 1
+            authenticatedUser:
+              type: object
+              required:
+                - tier
+                - dimensions
+                - rules
+              additionalProperties: false
+              properties:
+                tier:
+                  type: string
+                  enum:
+                    - public_read
+                    - authenticated_user
+                    - registered_agent
+                    - api_key_agent
+                dimensions:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - ip
+                      - wallet
+                      - agent
+                      - route
+                rules:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - dimension
+                      - limit
+                      - windowMs
+                    additionalProperties: false
+                    properties:
+                      dimension:
+                        type: string
+                        enum:
+                          - ip
+                          - wallet
+                          - agent
+                          - route
+                      limit:
+                        type: integer
+                        minimum: 1
+                      windowMs:
+                        type: integer
+                        minimum: 1
+            registeredAgent:
+              type: object
+              required:
+                - tier
+                - dimensions
+                - rules
+              additionalProperties: false
+              properties:
+                tier:
+                  type: string
+                  enum:
+                    - public_read
+                    - authenticated_user
+                    - registered_agent
+                    - api_key_agent
+                dimensions:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - ip
+                      - wallet
+                      - agent
+                      - route
+                rules:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - dimension
+                      - limit
+                      - windowMs
+                    additionalProperties: false
+                    properties:
+                      dimension:
+                        type: string
+                        enum:
+                          - ip
+                          - wallet
+                          - agent
+                          - route
+                      limit:
+                        type: integer
+                        minimum: 1
+                      windowMs:
+                        type: integer
+                        minimum: 1
+            apiKeyAgent:
+              type: object
+              required:
+                - tier
+                - dimensions
+                - rules
+              additionalProperties: false
+              properties:
+                tier:
+                  type: string
+                  enum:
+                    - public_read
+                    - authenticated_user
+                    - registered_agent
+                    - api_key_agent
+                dimensions:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - ip
+                      - wallet
+                      - agent
+                      - route
+                rules:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - dimension
+                      - limit
+                      - windowMs
+                    additionalProperties: false
+                    properties:
+                      dimension:
+                        type: string
+                        enum:
+                          - ip
+                          - wallet
+                          - agent
+                          - route
+                      limit:
+                        type: integer
+                        minimum: 1
+                      windowMs:
+                        type: integer
+                        minimum: 1
+        endpoints:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - path
+              - methods
+              - category
+              - summary
+              - auth
+              - paymentRequired
+              - rateLimit
+              - schemaVersion
+              - cacheControl
+            additionalProperties: false
+            properties:
+              id:
+                type: string
+                minLength: 1
+                maxLength: 100
+              path:
+                type: string
+                minLength: 1
+                maxLength: 200
+              methods:
+                type: array
+                items:
+                  type: string
+                  enum:
+                    - GET
+                    - POST
+                    - PATCH
+                    - DELETE
+              category:
+                type: string
+                enum:
+                  - discovery
+                  - public_read
+                  - paid_x402
+                  - agent_api
+              summary:
+                type: string
+                minLength: 1
+                maxLength: 300
+              auth:
+                type: string
+                enum:
+                  - none
+                  - none_or_invite
+                  - x402
+                  - x402_or_pass
+                  - signed_envelope_or_api_key
+              paymentRequired:
+                type: boolean
+              payment:
+                type: object
+                required:
+                  - protocol
+                  - scheme
+                  - network
+                  - asset
+                  - priceUsd
+                  - priceAtomic
+                  - recipientMode
+                additionalProperties: false
+                properties:
+                  protocol:
+                    type: string
+                    const: x402-v2
+                  scheme:
+                    type: string
+                    const: exact
+                  network:
+                    type: string
+                    pattern: "^stellar:[a-z0-9-]+$"
+                  asset:
+                    type: string
+                    minLength: 61
+                    maxLength: 61
+                  priceUsd:
+                    type: string
+                    minLength: 2
+                    maxLength: 32
+                  priceAtomic:
+                    type: string
+                    pattern: "^[1-9]\\d*$"
+                  recipientMode:
+                    type: string
+                    enum:
+                      - platform
+                      - persona
+                  passPlan:
+                    type: string
+                    enum:
+                      - council
+              rateLimit:
+                type: object
+                required:
+                  - tier
+                  - dimensions
+                  - routeKey
+                additionalProperties: false
+                properties:
+                  tier:
+                    type: string
+                    enum:
+                      - public_read
+                      - authenticated_user
+                      - registered_agent
+                      - api_key_agent
+                  dimensions:
+                    type: array
+                    items:
+                      type: string
+                      enum:
+                        - ip
+                        - wallet
+                        - agent
+                        - route
+                  routeKey:
+                    type: string
+                    minLength: 1
+                    maxLength: 200
+              schemaVersion:
+                type:
+                  - string
+                  - integer
+                minLength: 1
+                minimum: 1
+              cacheControl:
+                type: string
+                minLength: 1
+                maxLength: 120
     ReasoningInvalidClaimError:
       type: object
       description: "400 validation error returned by `/api/vs/{id}/reasoning` when `{id}` is not a positive integer."
@@ -5167,13 +6939,42 @@ components:
               type: integer
               minimum: 1
               description: "Target freshness window in milliseconds (60000 for feeds, 15000 for detail, 1 for direct contract reads)."
-        state:
-          type: string
-          enum:
-            - available
-            - unavailable
-            - insufficient-history
-          description: "Explicit performance state without inventing zero returns: available when settled history exists, insufficient-history when no settled samples exist, unavailable when data could not be validated."
+        coverage:
+          type: object
+          description: "Observation coverage metadata (`lib/portfolio-performance.ts::PerformanceObservationCoverage`)."
+          required:
+            - lastTrustedLedger
+            - missingIntervals
+          additionalProperties: false
+          properties:
+            lastTrustedLedger:
+              type:
+                - integer
+                - "null"
+              minimum: 0
+              description: "Highest ledger sequence trusted by the read index, or null when unavailable."
+            missingIntervals:
+              type: array
+              description: "Unobserved intervals that must remain visually distinct from verified zero performance."
+              items:
+                type: object
+                description: "An unobserved interval in a performance series (`lib/portfolio-performance.ts::PerformanceMissingInterval`)."
+                required:
+                  - startTimestamp
+                  - endTimestamp
+                additionalProperties: false
+                properties:
+                  startTimestamp:
+                    type: integer
+                    minimum: 1
+                    description: "Start of the missing interval in epoch milliseconds."
+                  endTimestamp:
+                    type: integer
+                    minimum: 1
+                    description: "End of the missing interval in epoch milliseconds."
+                  reason:
+                    type: string
+                    description: "Optional human-readable reason for the observation gap."
     StoredBasket:
       type: object
       description: "A user-composed agent basket (`lib/db.ts::StoredBasket`)."

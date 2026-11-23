@@ -1,29 +1,26 @@
 //! Payout arithmetic. The mirror of this lives in `lib/fees.ts`.
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Env, Symbol, Vec};
 
 use crate::events;
 use crate::storage;
-use crate::types::{Error, FeeSnapshot, BPS_DIVISOR};
-
-/// Exact fee-ledger view for one recipient, in atomic USDC units.
-///
-/// Field meanings are stable:
-/// - `accrued`: lifetime fees credited to the recipient (monotonic).
-/// - `claimed`: lifetime fees the recipient has withdrawn (monotonic).
-/// - `outstanding`: fees still owed to the recipient (`accrued - claimed`).
-///
-/// `accrued == 0` means no accrual ever happened; `accrued > 0` with
-/// `outstanding == 0` means a fully claimed balance. The two are distinct.
-pub struct FeeBalance {
-    pub accrued: i128,
-    pub claimed: i128,
-    pub outstanding: i128,
-}
+use crate::types::{
+    Claim, ClaimState, Error, FeeSnapshot, PayoutPreview, WinnerSide, BPS_DIVISOR,
+};
 
 /// `stake * bps / BPS_DIVISOR`, truncating. Checked multiplication so an
 /// absurd stake errors instead of wrapping, matching Solidity 0.8 revert-on-
 /// overflow semantics.
+/// Returns `Error::StaleFeePolicyRevision` when an approved administrative
+/// change is stale relative to the active fee-policy revision.
+/// Callers must reject such changes and leave the active policy and balances untouched.
+pub fn check_policy_revision(expected: u64, active: u64) -> Result<(), Error> {
+    if expected != active {
+        return Err(Error::StaleFeePolicyRevision);
+    }
+    Ok(())
+}
+
 pub fn gross_payout(stake: i128, bps: u32) -> Result<i128, Error> {
     stake
         .checked_mul(bps as i128)
@@ -94,6 +91,57 @@ fn bps_of(amount: i128, bps: u32) -> Result<i128, Error> {
         .ok_or(Error::Overflow)
 }
 
+#[cfg(test)]
+mod settlement_vector_tests {
+    //! Independently derived expected values for tiny atomic USDC stakes.
+    //! Expectations are computed by hand (integer floor division), not by
+    //! calling the contract's own helpers, so they cross-check the logic.
+    use super::*;
+
+    #[test]
+    fn pool_share_splits_with_indivisible_remainder() {
+        // Three challengers stake 1, 1, 1 (total 3) against a creator stake of 2.
+        // Each owes floor(1 * 2 / 3) = 0, so the whole pool remains as dust.
+        assert_eq!(pool_share(1, 2, 3).unwrap(), 0);
+        assert_eq!(pool_share(1, 2, 3).unwrap() + pool_share(1, 2, 3).unwrap() + pool_share(1, 2, 3).unwrap(), 0);
+        // Stakes 2, 3, 5 (total 10) against creator stake 7:
+        // floor(2*7/10)=1, floor(3*7/10)=2, floor(5*7/10)=3 -> sum 6, dust 1.
+        assert_eq!(pool_share(2, 7, 10).unwrap(), 1);
+        assert_eq!(pool_share(3, 7, 10).unwrap(), 2);
+        assert_eq!(pool_share(5, 7, 10).unwrap(), 3);
+    }
+
+    #[test]
+    fn pool_share_zero_total_is_zero() {
+        assert_eq!(pool_share(0, 5, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn pool_share_overflow_errors() {
+        assert_eq!(pool_share(i128::MAX, 2, 1), Err(Error::Overflow));
+    }
+
+    #[test]
+    fn gross_payout_tiny_stakes_round_down() {
+        // 1 atomic unit at 3333 bps: floor(3333 / 10000) = 0.
+        assert_eq!(gross_payout(1, 3333).unwrap(), 0);
+        // 3 atomic units at 5000 bps: floor(15000 / 10000) = 1.
+        assert_eq!(gross_payout(3, 5000).unwrap(), 1);
+    }
+
+    #[test]
+    fn quote_fees_no_profit_takes_nothing() {
+        let fees = FeeSnapshot {
+            platform_fee_bps: 1000,
+            agent_owner_fee_bps: 500,
+            platform_recipient: None,
+            agent_owner_recipient: None,
+        };
+        assert_eq!(quote_fees(10, 10, &fees).unwrap(), (10, 0));
+        assert_eq!(quote_fees(10, 7, &fees).unwrap(), (7, 0));
+    }
+}
+
 /// Split a gross payout into fees and the amount owed.
 ///
 /// Fees apply to PROFIT only, so `owed` can never fall below `principal` for a
@@ -152,48 +200,136 @@ pub fn apply_fees(
     Ok((owed, fees_taken))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// What a single claim's liability and payout preview are: `(liability, gross, fee, net)`.
+///
+/// For Open / Active claims:
+/// - Fixed-odds: liability backed by creator is `reserved_creator_liability`.
+///   Gross payout to winning challengers is `total_challenger_stake + reserved_creator_liability`.
+///   Profit is `reserved_creator_liability`. Fee is computed on profit using `quote_fees`.
+/// - Pool mode: liability backed by creator is `creator_stake`.
+///   Gross payout to winning challengers is `total_challenger_stake + creator_stake`.
+///
+/// For Resolved claims:
+/// - Challengers won: liability is `remaining_escrow`.
+/// - Creator won: liability to challengers is 0.
+/// - Cancelled / Draw / Unresolvable: refund of stakes with 0 fee.
+pub fn claim_payout_preview(env: &Env, claim: &Claim) -> Result<(i128, i128, i128, i128), Error> {
+    match claim.state {
+        ClaimState::Open | ClaimState::Active => {
+            if crate::util::is_fixed_odds(env, &claim.market.odds_mode) {
+                let liability = claim.reserved_creator_liability;
+                let gross = claim
+                    .total_challenger_stake
+                    .checked_add(claim.reserved_creator_liability)
+                    .ok_or(Error::Overflow)?;
+                let (net, fee) = quote_fees(claim.total_challenger_stake, gross, &claim.fees)?;
+                Ok((liability, gross, fee, net))
+            } else {
+                let liability = claim.creator_stake;
+                let gross = claim
+                    .total_challenger_stake
+                    .checked_add(claim.creator_stake)
+                    .ok_or(Error::Overflow)?;
+                let (net, fee) = quote_fees(claim.total_challenger_stake, gross, &claim.fees)?;
+                Ok((liability, gross, fee, net))
+            }
+        }
+        ClaimState::Resolved => {
+            match claim.winner_side {
+                WinnerSide::Challengers => {
+                    let gross = claim.remaining_escrow;
+                    let (net, fee) = quote_fees(claim.total_challenger_stake, gross, &claim.fees)?;
+                    Ok((gross, gross, fee, net))
+                }
+                WinnerSide::Creator => {
+                    Ok((0, 0, 0, 0))
+                }
+                WinnerSide::Draw | WinnerSide::Unresolvable | WinnerSide::None => {
+                    let refund = claim
+                        .creator_stake
+                        .checked_add(claim.total_challenger_stake)
+                        .ok_or(Error::Overflow)?;
+                    Ok((refund, refund, 0, refund))
+                }
+            }
+        }
+        ClaimState::Cancelled => {
+            let refund = claim
+                .creator_stake
+                .checked_add(claim.total_challenger_stake)
+                .ok_or(Error::Overflow)?;
+            Ok((refund, refund, 0, refund))
+        }
+    }
+}
 
-    // Pure-arithmetic boundary checks for the fee ledger view semantics.
-    // The FeeBalance derivation is `outstanding = accrued - claimed`; these
-    // assertions pin the three distinct states the issue requires.
+/// Aggregate payout preview across a slice of claims, tracking completeness.
+///
+/// Invariants:
+/// - Missing observations are marked explicitly (`missing_observations > 0`).
+/// - When history is truncated or claims are missing, `is_complete` is `false`.
+/// - An incomplete aggregate is NEVER presented as a verified total liability
+///   (`verified_total_liability` is `None`).
+/// - Only when all claims in history are observed without omission is
+///   `verified_total_liability` set to `Some(aggregate_liability)`.
+pub fn aggregate_payout_preview(
+    env: &Env,
+    claims: &soroban_sdk::Vec<Option<Claim>>,
+    total_claims: u32,
+    is_truncated: bool,
+) -> Result<PayoutPreview, Error> {
+    let mut aggregate_liability: i128 = 0;
+    let mut aggregate_gross: i128 = 0;
+    let mut aggregate_fees: i128 = 0;
+    let mut aggregate_net: i128 = 0;
+    let mut observed_count: u32 = 0;
+    let mut missing_in_slice: u32 = 0;
 
-    fn balance(accrued: i128, claimed: i128) -> FeeBalance {
-        FeeBalance {
-            accrued,
-            claimed,
-            outstanding: accrued - claimed,
+    for opt_claim in claims.iter() {
+        match opt_claim {
+            Some(claim) => {
+                let (liability, gross, fee, net) = claim_payout_preview(env, &claim)?;
+                aggregate_liability = aggregate_liability
+                    .checked_add(liability)
+                    .ok_or(Error::Overflow)?;
+                aggregate_gross = aggregate_gross
+                    .checked_add(gross)
+                    .ok_or(Error::Overflow)?;
+                aggregate_fees = aggregate_fees
+                    .checked_add(fee)
+                    .ok_or(Error::Overflow)?;
+                aggregate_net = aggregate_net
+                    .checked_add(net)
+                    .ok_or(Error::Overflow)?;
+                observed_count = observed_count.saturating_add(1);
+            }
+            None => {
+                missing_in_slice = missing_in_slice.saturating_add(1);
+            }
         }
     }
 
-    #[test]
-    fn no_accrual_is_distinct_from_fully_claimed() {
-        let never = balance(0, 0);
-        let fully_claimed = balance(500, 500);
-        assert_eq!(never.accrued, 0);
-        assert_eq!(never.outstanding, 0);
-        assert_eq!(fully_claimed.accrued, 500);
-        assert_eq!(fully_claimed.outstanding, 0);
-        assert_ne!(never.accrued, fully_claimed.accrued);
-    }
+    let unobserved_due_to_truncation = total_claims.saturating_sub(observed_count + missing_in_slice);
+    let missing_observations = missing_in_slice.saturating_add(unobserved_due_to_truncation);
 
-    #[test]
-    fn partial_claim_leaves_exact_outstanding() {
-        let partial = balance(1_000_000, 250_000);
-        assert_eq!(partial.outstanding, 750_000);
-    }
+    let is_complete = !is_truncated && missing_observations == 0 && observed_count == total_claims;
 
-    #[test]
-    fn quote_has_no_fees_at_or_below_principal() {
-        let fees = FeeSnapshot {
-            platform_fee_bps: 100,
-            agent_owner_fee_bps: 50,
-            platform_recipient: None,
-            agent_owner_recipient: None,
-        };
-        assert_eq!(quote_fees(100, 100, &fees).unwrap(), (100, 0));
-        assert_eq!(quote_fees(100, 90, &fees).unwrap(), (90, 0));
-    }
+    let verified_total_liability = if is_complete {
+        Some(aggregate_liability)
+    } else {
+        None
+    };
+
+    Ok(PayoutPreview {
+        aggregate_liability,
+        verified_total_liability,
+        aggregate_gross,
+        aggregate_fees,
+        aggregate_net,
+        observed_count,
+        total_claims,
+        missing_observations,
+        is_truncated,
+        is_complete,
+    })
 }

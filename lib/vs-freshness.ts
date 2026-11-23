@@ -1,5 +1,9 @@
 export type VSCacheFreshnessSource = "index" | "contract";
 export type VSCacheFreshnessStatus = "live" | "cached" | "stale";
+export type VSCacheStaleReason =
+  | "provider_lag"
+  | "projection_failure"
+  | "unknown_coverage";
 
 export interface ProjectionCompleteness {
   trustedLedger: number | null;
@@ -12,6 +16,7 @@ export const CURRENT_PROJECTION_GENERATION = 1;
 export interface VSCacheFreshness {
   source: VSCacheFreshnessSource;
   status: VSCacheFreshnessStatus;
+  staleReason?: VSCacheStaleReason | null;
   lastUpdatedAt: string | null;
   ageMs: number | null;
   freshnessWindowMs: number;
@@ -25,6 +30,7 @@ export function buildVSCacheFreshness(args: {
   freshnessWindowMs: number;
   source: VSCacheFreshnessSource;
   projection?: ProjectionCompleteness | null;
+  staleReason?: VSCacheStaleReason | null;
 }): VSCacheFreshness {
   const updatedAtMs =
     typeof args.updatedAtMs === "number" && Number.isFinite(args.updatedAtMs)
@@ -51,6 +57,14 @@ export function buildVSCacheFreshness(args: {
 
   if (args.projection !== undefined && args.projection !== null) {
     freshness.projection = args.projection;
+  }
+
+  if (args.source === "index" && status === "stale") {
+    freshness.staleReason = classifyVSCacheStaleReason({
+      updatedAtMs,
+      projection: args.projection,
+      staleReason: args.staleReason,
+    });
   }
 
   return freshness;
@@ -126,4 +140,20 @@ export function buildVsFeedEtag(args: {
 
   // Weak ETag: semantically equivalent, byte-identity not required.
   return `W/"${maxUpdatedAt}:${itemCount}"`;
+}
+
+export function classifyVSCacheStaleReason(args: {
+  updatedAtMs?: number | null;
+  projection?: ProjectionCompleteness | null;
+  staleReason?: VSCacheStaleReason | null;
+}): VSCacheStaleReason {
+  if (args.staleReason) return args.staleReason;
+  if ((args.projection?.knownGaps ?? 0) > 0) return "projection_failure";
+  if (
+    args.updatedAtMs == null ||
+    (args.projection != null && args.projection.trustedLedger == null)
+  ) {
+    return "unknown_coverage";
+  }
+  return "provider_lag";
 }

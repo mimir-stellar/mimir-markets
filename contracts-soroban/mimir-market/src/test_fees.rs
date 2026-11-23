@@ -8,7 +8,7 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::Address;
 
 use crate::test_common::{Fixture, USDC};
-use crate::types::{Error, WinnerSide, FEE_TIMELOCK_SECONDS, MAX_TOTAL_FEE_BPS, ORACLE_TIMELOCK_SECONDS};
+use crate::types::{Error, FeePolicy, WinnerSide, FEE_TIMELOCK_SECONDS, MAX_TOTAL_FEE_BPS, ORACLE_TIMELOCK_SECONDS};
 
 // ── The cap ──────────────────────────────────────────────────────────────────
 
@@ -169,6 +169,45 @@ fn a_cancelled_policy_never_takes_effect() {
     let err = f.client().try_execute_fee_policy().unwrap_err().unwrap();
     assert_eq!(err, Error::NothingQueued);
     assert_eq!(f.client().get_fee_policy().platform_fee_bps, 0);
+}
+
+#[test]
+fn a_stale_queued_policy_is_rejected_without_mutating_policy_or_balances() {
+    let f = Fixture::new(0, 0);
+    let creator = f.user(100 * USDC);
+    let challenger = f.user(100 * USDC);
+    let claim_id = f.client().create_claim(&creator, &f.params(10 * USDC));
+    f.client().challenge_claim(&challenger, &claim_id, &(10 * USDC), &None);
+
+    // This queue was approved against revision zero.
+    f.client()
+        .queue_fee_policy(&200, &0, &Some(f.platform.clone()));
+
+    // Model another already-approved transition becoming active before the
+    // old queued entry executes.
+    crate::storage::set_fee_policy(
+        &f.env,
+        &FeePolicy {
+            platform_fee_bps: 100,
+            agent_owner_fee_bps: 0,
+            platform_recipient: Some(f.platform.clone()),
+            revision: 1,
+        },
+    );
+    f.advance_by(FEE_TIMELOCK_SECONDS);
+
+    let policy_before = f.client().get_fee_policy();
+    let creator_balance_before = f.token().balance(&creator);
+    let challenger_balance_before = f.token().balance(&challenger);
+    let escrow_before = f.escrow_balance();
+
+    let err = f.client().try_execute_fee_policy().unwrap_err().unwrap();
+    assert_eq!(err, Error::StaleFeePolicyRevision);
+    assert_eq!(f.client().get_fee_policy(), policy_before);
+    assert_eq!(f.token().balance(&creator), creator_balance_before);
+    assert_eq!(f.token().balance(&challenger), challenger_balance_before);
+    assert_eq!(f.escrow_balance(), escrow_before);
+    assert!(f.client().get_pending_fee_policy().is_some());
 }
 
 // ── Snapshotting ─────────────────────────────────────────────────────────────

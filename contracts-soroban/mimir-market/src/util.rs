@@ -1,4 +1,5 @@
-//! Small helpers: string hashing, metadata bounds, and string equality.
+//! Small helpers: string hashing, statement digests, metadata bounds, and
+//! string equality.
 
 use soroban_sdk::{Bytes, BytesN, Env, String};
 
@@ -22,6 +23,44 @@ pub fn hash_string(env: &Env, s: &String) -> Result<BytesN<32>, Error> {
     s.copy_into_slice(slice);
     let bytes = Bytes::from_slice(env, slice);
     Ok(env.crypto().keccak256(&bytes).to_bytes())
+}
+
+/// Domain separator for the canonical claim-statement digest.
+///
+/// The trailing NUL terminates the domain so it cannot run into the length
+/// prefix. Bump this only together with a new digest version and a migration
+/// path for statements exported under the old encoding.
+pub const CLAIM_STATEMENT_DOMAIN_V1: &[u8] = b"mimir.claim.statement.v1\0";
+
+/// SHA-256 over the canonical claim statement (domain v1).
+///
+/// Exact preimage, in order, with no additional fields:
+///
+/// ```text
+/// CLAIM_STATEMENT_DOMAIN_V1                  // 25 bytes, NUL-terminated
+/// || u32_be(question_bytes.len())             // 4 bytes
+/// || question_bytes                           // UTF-8 bytes of the Soroban String
+/// || source_commitment                        // exactly 32 bytes (claim.context_hash)
+/// || u64_be(deadline)                         // 8 bytes
+/// ```
+///
+/// Length-prefixing the question makes the encoding unambiguous even when a
+/// question contains the commitment or deadline byte patterns. The fixed 32-byte
+/// commitment and 8-byte deadline need no prefix. Clients can recompute the
+/// digest from `ClaimStatement` using only the exported fields.
+pub fn claim_statement_digest(
+    env: &Env,
+    question: &String,
+    source_commitment: &BytesN<32>,
+    deadline: u64,
+) -> BytesN<32> {
+    let question_bytes = question.to_bytes();
+    let mut preimage = Bytes::from_slice(env, CLAIM_STATEMENT_DOMAIN_V1);
+    preimage.extend_from_slice(&question_bytes.len().to_be_bytes());
+    preimage.append(&question_bytes);
+    preimage.append(&Bytes::from(source_commitment.clone()));
+    preimage.extend_from_slice(&deadline.to_be_bytes());
+    env.crypto().sha256(&preimage).to_bytes()
 }
 
 pub fn is_fixed_odds(env: &Env, odds_mode: &String) -> bool {

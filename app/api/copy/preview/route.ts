@@ -16,23 +16,29 @@ const numbers = (value: unknown, limit: number): value is number[] =>
   Array.isArray(value) && value.length <= limit && value.every((item) => Number.isSafeInteger(item) && item >= 0);
 const amount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
-// Lifecycle reasons that are permanent for the policy (no retry will help).
-const PERMANENT_REASONS = new Set(["revoked"]);
+// Timeline entries reference identifiers only. Signing seeds, agent reasoning
+// and other private fields are never copied into the response.
+export type CopyTimelineEntry = {
+  step: "signal" | "policy" | "reservation" | "chain";
+  reference: string;
+  status: string;
+};
 
-function lifecycleResponse(
+function buildTimeline(
   permission: CopyPermission,
-  now: number,
-): { reasonCode: string; retryable: boolean; effectiveAt: number | null } | null {
-  if (permission.status === "revoked") {
-    return { reasonCode: "permission_revoked", retryable: false, effectiveAt: null };
-  }
-  if (permission.expiresAt <= now) {
-    return { reasonCode: "permission_expired", retryable: false, effectiveAt: permission.expiresAt };
-  }
-  if (permission.status === "paused") {
-    return { reasonCode: "permission_paused", retryable: true, effectiveAt: null };
-  }
-  return null;
+  signal: CopySignal,
+  result: ReturnType<typeof buildCopyExecutionDryRun>,
+): CopyTimelineEntry[] {
+  const r = result as unknown as Record<string, unknown>;
+  const reservation = typeof r.reservationId === "string" ? r.reservationId : "none";
+  const chainRef = typeof r.chainReference === "string" ? r.chainReference : "none";
+  const decision = typeof r.decision === "string" ? r.decision : "unknown";
+  return [
+    { step: "signal", reference: signal.sourcePositionId, status: "observed" },
+    { step: "policy", reference: permission.permissionId, status: decision },
+    { step: "reservation", reference: reservation, status: reservation === "none" ? "not_reserved" : "reserved" },
+    { step: "chain", reference: chainRef, status: chainRef === "none" ? "not_submitted" : "referenced" },
+  ];
 }
 
 function parsePreviewInput(value: unknown, now: number): {
@@ -52,6 +58,7 @@ function parsePreviewInput(value: unknown, now: number): {
       ![p.maxPerPositionUsdc, p.dailyCapUsdc, p.weeklyCapUsdc, p.totalOpenExposureUsdc]
         .every(amount) ||
       ![p.minConfidenceBps, p.minPayoutBps, p.expiresAt].every(Number.isSafeInteger) ||
+      (p.revision !== undefined && (!Number.isSafeInteger(p.revision) || Number(p.revision) < 0)) ||
       p.depth !== 1 || !["active", "paused", "revoked"].includes(String(p.status)) ||
       !strings(p.allowedCategories, 100) || !strings(p.allowedModes, 10)) return null;
 
@@ -64,7 +71,9 @@ function parsePreviewInput(value: unknown, now: number): {
   // paused, revoked or expired one must instead return its lifecycle reason.
   if (validateCopyPermission({ ...unsigned, status: "active", expiresAt: Math.max(now + 1, unsigned.expiresAt) }, now)) return null;
   const permission: CopyPermission = { ...unsigned, signedPolicyHash: "" };
-
+  // The evaluated policy revision is recorded so a rejected signal keeps a
+  // stable explanation after later permission edits. Only non-secret policy
+  // fields are hashed; raw model prompts are never stored.
   if (![s.sourcePositionId, s.signalAgentId, s.category, s.mode, s.sourceAttributionId]
         .every((v) => typeof v === "string" && v.length <= 128) ||
       ![s.sourceDepth, s.claimId, s.confidenceBps, s.payoutBps, s.deadline, s.remainingSlots]
@@ -119,20 +128,9 @@ export async function POST(req: Request): Promise<Response> {
   const now = Date.now();
   const parsed = parsePreviewInput(input, now);
   if (!parsed) return Response.json({ error: "invalid copy preview input" }, { status: 400 });
-
-  const lifecycle = lifecycleResponse(parsed.permission, now);
-  if (lifecycle) {
-    return Response.json(
-      {
-        allowed: false,
-        reasonCode: lifecycle.reasonCode,
-        retryable: lifecycle.retryable,
-        effectiveAt: lifecycle.effectiveAt,
-        permissionStatus: parsed.permission.status,
-      },
-      { status: 200, headers: { "cache-control": "no-store" } },
-    );
-  }
-
-  return Response.json(buildCopyExecutionDryRun(parsed), { headers: { "cache-control": "no-store" } });
+  const result = buildCopyExecutionDryRun(parsed);
+  return Response.json(
+    { ...result, timeline: buildTimeline(parsed.permission, parsed.signal, result) },
+    { headers: { "cache-control": "no-store" } },
+  );
 }

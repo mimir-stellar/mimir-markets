@@ -29,6 +29,11 @@
  *      reported content-hash does not match the SHA-256 of its body, indicates a
  *      transport or storage bug and must not settle anything.
  *
+ *   7. **Offline redirect policy diagnostics.** Bounded per-hop scheme, domain
+ *      and SSRF policy decisions are evaluated over captured redirect chains
+ *      without making new network requests, preserving privacy by redacting
+ *      URL identities (credentials, wallet strkeys, secret tokens).
+ *
  * Privacy design notes
  * ───────────────────
  * - Stellar G… strkeys are 56-character base32 strings starting with 'G'. They
@@ -158,6 +163,72 @@ export interface PrivacyFinding {
 }
 
 // ── Validation result ─────────────────────────────────────────────────────────
+
+export interface HopPolicyVerdict {
+  /** Whether this dimension satisfied policy checks. */
+  allowed: boolean;
+  /** Categorical reason on refusal. */
+  reason?: SsrfReason | "cross_domain" | "protocol_downgrade" | string;
+  /** Human-readable explanation. Does not leak unredacted identities. */
+  detail?: string;
+}
+
+export interface RedirectHopDiagnostic {
+  /** 0-based hop index in the evaluated redirect sequence (0 = initial URL). */
+  hop: number;
+  /** Redacted origin URL for this transition (undefined on hop 0). */
+  from?: string;
+  /** Redacted destination URL for this hop. */
+  to: string;
+  /** Redacted destination URL (alias for `to` to identify the hop). */
+  url: string;
+  /** Evaluated scheme policy (fetchable scheme, downgrade prevention). */
+  scheme: HopPolicyVerdict;
+  /** Evaluated domain policy (allowlist/denylist, cross-domain restrictions). */
+  domain: HopPolicyVerdict;
+  /** Evaluated SSRF policy (ports, private IPs, credentials, blocked hostnames). */
+  ssrf: HopPolicyVerdict;
+  /** Overall verdict for this hop (true only if scheme, domain, and SSRF allow). */
+  allowed: boolean;
+  /** Top-level failure reason if this hop was refused. */
+  reason?: string;
+  /** Top-level failure detail if this hop was refused. */
+  detail?: string;
+}
+
+export interface RedirectPolicyDiagnostics {
+  /** Total count of hops recorded in the captured chain. */
+  totalHops: number;
+  /** Total number of redirect transitions (max(0, totalHops - 1)). */
+  redirects: number;
+  /** Number of hops evaluated (bounded by maxRedirects / safety ceiling). */
+  evaluatedHops: number;
+  /** Whether the chain redirect count is within the permitted boundary without cycles. */
+  bounded: boolean;
+  /** Maximum redirect hops permitted by policy. */
+  maxRedirects: number;
+  /** Overall verdict: true only if all evaluated hops pass and chain is bounded and loop-free. */
+  allowed: boolean;
+  /** Per-hop verdicts with redacted URL identities. */
+  hops: RedirectHopDiagnostic[];
+  /** Failure code if policy evaluation failed (e.g. "too_many_redirects", "redirect_loop", "blocked"). */
+  failureReason?: string;
+  /** Human-readable failure explanation. */
+  failureDetail?: string;
+}
+
+export interface RedirectDiagnosticsOpts {
+  /** Domain policy to evaluate against. Defaults to domainPolicyFromEnv(). */
+  policy?: DomainPolicy;
+  /** Maximum allowed redirect hops. Defaults to policy.maxRedirects ?? 3. */
+  maxRedirects?: number;
+  /** When false, redirect hops cannot change origins/domains. */
+  allowCrossDomainRedirects?: boolean;
+  /** When true (default), redirects cannot downgrade from https to http. */
+  allowProtocolDowngrade?: boolean;
+  /** Custom URL redactor (test seam / customization). */
+  redactUrl?: (url: string) => string;
+}
 
 export interface ContentValidationResult {
   state: ResearchContentState;
@@ -316,6 +387,335 @@ export function scanPrivacyFindings(body: string): PrivacyFinding[] {
   return findings;
 }
 
+// ── Offline redirect policy diagnostics ──────────────────────────────────────
+
+const STELLAR_STRKEY_GLOBAL_RE = /\b[GSCM][A-Z2-7]{55}\b/g;
+const HEX_IDENTITY_GLOBAL_RE = /\b0x[0-9a-fA-F]{40,}\b/g;
+const TOKEN_LIKE_GLOBAL_RE = /\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/g;
+const SENSITIVE_PARAM_NAMES = new Set([
+  "token",
+  "access_token",
+  "auth",
+  "authorization",
+  "key",
+  "api_key",
+  "apikey",
+  "secret",
+  "password",
+  "signature",
+  "sig",
+  "invite",
+  "session",
+  "session_token",
+  "jwt",
+  "proof",
+  "bearer",
+  "code",
+  "refresh_token",
+]);
+
+const DEFAULT_MAX_REDIRECTS = 3;
+const ABSOLUTE_MAX_REDIRECTS = 10;
+
+function sanitizeRawString(raw: string): string {
+  return raw
+    .replace(/:\/\/[^/\s:@]+(?::[^/\s@]+)?@/g, "://[redacted]:[redacted]@")
+    .replace(STELLAR_STRKEY_GLOBAL_RE, "[redacted]")
+    .replace(HEX_IDENTITY_GLOBAL_RE, "[redacted]")
+    .replace(TOKEN_LIKE_GLOBAL_RE, "[redacted]");
+}
+
+/**
+ * Redact sensitive URL identities (credentials, tokens, API keys, wallet
+ * strkeys, hex secrets, JWTs) while preserving scheme, hostname, and safe
+ * path structure for diagnostic reporting.
+ */
+export function redactUrlIdentity(raw: string): string {
+  if (!raw || typeof raw !== "string") return "";
+  let parsed: URL;
+  let isRelative = false;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    if (raw.startsWith("/") || raw.startsWith("./") || raw.startsWith("../")) {
+      try {
+        parsed = new URL(raw, "https://placeholder.invalid");
+        isRelative = true;
+      } catch {
+        return sanitizeRawString(raw);
+      }
+    } else {
+      return sanitizeRawString(raw);
+    }
+  }
+
+  if (parsed.username || parsed.password) {
+    parsed.username = "[redacted]";
+    parsed.password = "[redacted]";
+  }
+
+  let pathname = parsed.pathname;
+  pathname = pathname.replace(STELLAR_STRKEY_GLOBAL_RE, "[redacted]");
+  pathname = pathname.replace(HEX_IDENTITY_GLOBAL_RE, "[redacted]");
+  pathname = pathname.replace(TOKEN_LIKE_GLOBAL_RE, "[redacted]");
+  parsed.pathname = pathname;
+
+  if (parsed.search) {
+    const searchParams = new URLSearchParams(parsed.search);
+    for (const [key, value] of Array.from(searchParams.entries())) {
+      const lowerKey = key.toLowerCase();
+      if (
+        SENSITIVE_PARAM_NAMES.has(lowerKey) ||
+        STELLAR_STRKEY_GLOBAL_RE.test(value) ||
+        HEX_IDENTITY_GLOBAL_RE.test(value) ||
+        TOKEN_LIKE_GLOBAL_RE.test(value)
+      ) {
+        searchParams.set(key, "[redacted]");
+      }
+    }
+    const query = searchParams.toString();
+    parsed.search = query ? `?${query}` : "";
+  }
+
+  if (parsed.hash) {
+    parsed.hash = parsed.hash
+      .replace(STELLAR_STRKEY_GLOBAL_RE, "[redacted]")
+      .replace(HEX_IDENTITY_GLOBAL_RE, "[redacted]")
+      .replace(TOKEN_LIKE_GLOBAL_RE, "[redacted]");
+  }
+
+  const rendered = parsed.toString().replace(/%5Bredacted%5D/gi, "[redacted]");
+  if (isRelative) {
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`.replace(/%5Bredacted%5D/gi, "[redacted]");
+  }
+  return rendered;
+}
+
+function normalizeUrlForLoopCheck(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host.toLowerCase()}${u.pathname}${u.search}`;
+  } catch {
+    return raw.trim().toLowerCase();
+  }
+}
+
+/**
+ * Offline evaluation of redirect policy decisions over a captured redirect chain.
+ *
+ * Runs without making network requests (no DNS, no live fetch). Returns bounded per-hop
+ * scheme, domain, and SSRF verdicts with redacted URL identities.
+ */
+export function diagnoseRedirectPolicy(
+  chainOrSuccess: string[] | string | FetchSuccess,
+  opts: RedirectDiagnosticsOpts = {},
+): RedirectPolicyDiagnostics {
+  const redactor = opts.redactUrl ?? redactUrlIdentity;
+  let chain: string[];
+  if (typeof chainOrSuccess === "string") {
+    chain = [chainOrSuccess];
+  } else if (Array.isArray(chainOrSuccess)) {
+    chain = [...chainOrSuccess];
+  } else if (chainOrSuccess && typeof chainOrSuccess === "object") {
+    chain = chainOrSuccess.redirectChain && chainOrSuccess.redirectChain.length > 0
+      ? [...chainOrSuccess.redirectChain]
+      : [chainOrSuccess.url];
+  } else {
+    chain = [];
+  }
+
+  const basePolicy = opts.policy ?? domainPolicyFromEnv();
+  const policy: DomainPolicy = {
+    ...basePolicy,
+    ...(opts.allowCrossDomainRedirects !== undefined
+      ? { allowCrossDomainRedirects: (basePolicy.allowCrossDomainRedirects ?? true) && opts.allowCrossDomainRedirects }
+      : {}),
+    ...(opts.allowProtocolDowngrade !== undefined
+      ? { disallowProtocolDowngrade: (basePolicy.disallowProtocolDowngrade ?? true) || opts.allowProtocolDowngrade === false }
+      : {}),
+  };
+
+  const requestedMax = [opts.maxRedirects, policy.maxRedirects].filter(
+    (value): value is number => typeof value === "number",
+  );
+  const effectiveMaxRedirects = Math.max(
+    0,
+    Math.min(
+      requestedMax.length > 0 ? Math.min(...requestedMax) : DEFAULT_MAX_REDIRECTS,
+      ABSOLUTE_MAX_REDIRECTS,
+    ),
+  );
+
+  const totalHops = chain.length;
+  const redirects = Math.max(0, chain.length - 1);
+
+  if (chain.length === 0) {
+    return {
+      totalHops: 0,
+      redirects: 0,
+      evaluatedHops: 0,
+      bounded: true,
+      maxRedirects: effectiveMaxRedirects,
+      allowed: true,
+      hops: [],
+    };
+  }
+
+  const hops: RedirectHopDiagnostic[] = [];
+  const visited = new Set<string>();
+  let bounded = true;
+  let failureReason: string | undefined;
+  let failureDetail: string | undefined;
+
+  if (redirects > effectiveMaxRedirects) {
+    bounded = false;
+    failureReason = "too_many_redirects";
+    failureDetail = `more than ${effectiveMaxRedirects} redirects (recorded ${redirects})`;
+  }
+
+  // Bound the maximum number of hops inspected to prevent unbounded allocations or loops
+  const evalLimit = Math.min(chain.length, effectiveMaxRedirects + 1);
+
+  for (let i = 0; i < evalLimit; i++) {
+    const currentUrl = chain[i]!;
+    const normCurrent = normalizeUrlForLoopCheck(currentUrl);
+
+    if (visited.has(normCurrent)) {
+      bounded = false;
+      if (!failureReason) {
+        failureReason = "redirect_loop";
+        failureDetail = `redirect cycle or duplicate target detected for '${redactor(currentUrl)}'`;
+      }
+      hops.push({
+        hop: i,
+        from: i > 0 ? redactor(chain[i - 1]!) : undefined,
+        to: redactor(currentUrl),
+        url: redactor(currentUrl),
+        scheme: { allowed: true },
+        domain: { allowed: true },
+        ssrf: { allowed: false, reason: "malformed", detail: "redirect loop" },
+        allowed: false,
+        reason: "redirect_loop",
+        detail: failureDetail,
+      });
+      break;
+    }
+    visited.add(normCurrent);
+
+    if (i === 0) {
+      // Hop 0: Initial target URL static checks and domain policy
+      const staticVerdict = checkUrl(currentUrl);
+      const domainVerdict = checkDomainPolicy(currentUrl, policy);
+
+      const schemeVerdict: HopPolicyVerdict = !staticVerdict.allowed && staticVerdict.reason === "protocol"
+        ? { allowed: false, reason: staticVerdict.reason, detail: staticVerdict.detail }
+        : { allowed: true };
+
+      const ssrfVerdict: HopPolicyVerdict = !staticVerdict.allowed && staticVerdict.reason !== "protocol"
+        ? { allowed: false, reason: staticVerdict.reason, detail: staticVerdict.detail }
+        : { allowed: true };
+
+      const domainResult: HopPolicyVerdict = !domainVerdict.allowed
+        ? { allowed: false, reason: domainVerdict.reason, detail: domainVerdict.detail }
+        : { allowed: true };
+
+      const hopAllowed = schemeVerdict.allowed && domainResult.allowed && ssrfVerdict.allowed;
+      const hopReason = !ssrfVerdict.allowed
+        ? ssrfVerdict.reason
+        : (!schemeVerdict.allowed ? schemeVerdict.reason : (!domainResult.allowed ? domainResult.reason : undefined));
+      const hopDetail = !ssrfVerdict.allowed
+        ? ssrfVerdict.detail
+        : (!schemeVerdict.allowed ? schemeVerdict.detail : (!domainResult.allowed ? domainResult.detail : undefined));
+
+      if (!hopAllowed && !failureReason) {
+        failureReason = hopReason;
+        failureDetail = hopDetail;
+      }
+
+      hops.push({
+        hop: 0,
+        to: redactor(currentUrl),
+        url: redactor(currentUrl),
+        scheme: schemeVerdict,
+        domain: domainResult,
+        ssrf: ssrfVerdict,
+        allowed: hopAllowed,
+        reason: hopReason,
+        detail: hopDetail,
+      });
+    } else {
+      // Hop i >= 1: Transition from chain[i - 1] to currentUrl
+      const prevUrl = chain[i - 1]!;
+      const staticVerdict = checkUrl(currentUrl);
+      const hopVerdict = checkRedirectHopPolicy(prevUrl, currentUrl, policy);
+
+      let schemeVerdict: HopPolicyVerdict;
+      if (!staticVerdict.allowed && staticVerdict.reason === "protocol") {
+        schemeVerdict = { allowed: false, reason: staticVerdict.reason, detail: staticVerdict.detail };
+      } else if (!hopVerdict.allowed && hopVerdict.reason === "protocol_downgrade") {
+        schemeVerdict = { allowed: false, reason: "protocol_downgrade", detail: hopVerdict.detail };
+      } else {
+        schemeVerdict = { allowed: true };
+      }
+
+      let ssrfVerdict: HopPolicyVerdict;
+      if (!staticVerdict.allowed && staticVerdict.reason !== "protocol") {
+        ssrfVerdict = { allowed: false, reason: staticVerdict.reason, detail: staticVerdict.detail };
+      } else {
+        ssrfVerdict = { allowed: true };
+      }
+
+      let domainResult: HopPolicyVerdict;
+      if (!hopVerdict.allowed && hopVerdict.reason === "cross_domain") {
+        domainResult = { allowed: false, reason: "cross_domain", detail: hopVerdict.detail };
+      } else if (!hopVerdict.allowed && (hopVerdict.reason === "not_allowlisted" || (hopVerdict.reason === "hostname" && !staticVerdict.reason))) {
+        domainResult = { allowed: false, reason: hopVerdict.reason, detail: hopVerdict.detail };
+      } else {
+        domainResult = { allowed: true };
+      }
+
+      const hopAllowed = schemeVerdict.allowed && domainResult.allowed && ssrfVerdict.allowed;
+      const hopReason = !ssrfVerdict.allowed
+        ? ssrfVerdict.reason
+        : (!schemeVerdict.allowed ? schemeVerdict.reason : (!domainResult.allowed ? domainResult.reason : undefined));
+      const hopDetail = !ssrfVerdict.allowed
+        ? ssrfVerdict.detail
+        : (!schemeVerdict.allowed ? schemeVerdict.detail : (!domainResult.allowed ? domainResult.detail : undefined));
+
+      if (!hopAllowed && !failureReason) {
+        failureReason = hopReason;
+        failureDetail = hopDetail;
+      }
+
+      hops.push({
+        hop: i,
+        from: redactor(prevUrl),
+        to: redactor(currentUrl),
+        url: redactor(currentUrl),
+        scheme: schemeVerdict,
+        domain: domainResult,
+        ssrf: ssrfVerdict,
+        allowed: hopAllowed,
+        reason: hopReason,
+        detail: hopDetail,
+      });
+    }
+  }
+
+  const overallAllowed = bounded && hops.every((h) => h.allowed);
+
+  return {
+    totalHops,
+    redirects,
+    evaluatedHops: hops.length,
+    bounded,
+    maxRedirects: effectiveMaxRedirects,
+    allowed: overallAllowed,
+    hops,
+    ...(failureReason ? { failureReason, failureDetail } : {}),
+  };
+}
+
 // ── Main validator ────────────────────────────────────────────────────────────
 
 /**
@@ -378,6 +778,7 @@ export function validateResearchContent(
         `content hash mismatch: recorded ${success.contentHash} but body hashes to ${computedHash}`,
         [],
         false,
+        redirectDiagnostics,
       );
     }
 
@@ -389,6 +790,7 @@ export function validateResearchContent(
         "the requesting agent or market was cancelled; this content must not be used for settlement",
         [],
         false,
+        redirectDiagnostics,
       );
     }
 
@@ -415,6 +817,7 @@ export function validateResearchContent(
           "dependency failure and privacy findings block use",
           findings,
           false,
+          redirectDiagnostics,
         );
       }
       return toResult(
@@ -422,6 +825,7 @@ export function validateResearchContent(
         "a sibling fetch in the same context pack failed; this result is degraded",
         findings,
         false,
+        redirectDiagnostics,
       );
     }
 
@@ -436,6 +840,7 @@ export function validateResearchContent(
         `content is ${Math.round(ageSeconds)}s old; limit is ${maxAgeSeconds}s`,
         [],
         false,
+        redirectDiagnostics,
       );
     }
 
@@ -447,6 +852,7 @@ export function validateResearchContent(
         `content hash ${success.contentHash} already seen in this cycle; treating as duplicate`,
         [],
         false,
+        redirectDiagnostics,
       );
     }
 
@@ -467,6 +873,7 @@ export function validateResearchContent(
         `privacy-sensitive content detected: ${kinds}`,
         privacyFindings,
         false,
+        redirectDiagnostics,
       );
     }
 
@@ -478,6 +885,7 @@ export function validateResearchContent(
         : "",
       privacyFindings,
       true,
+      redirectDiagnostics,
     );
   } catch (err) {
     // Any unexpected error inside the validator is surfaced as invalid, so a

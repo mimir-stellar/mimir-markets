@@ -296,13 +296,4 @@ async function poll(): Promise<void> {
               `(${paidUsdc.toFixed(6)} USDC)`,
             );
           }
-        }
-        // TODO: restore remaining persona-runner call from the original file.
-      } catch (err) {
-        console.warn(`[council:${persona.slug}] claim #${claim.id} failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  }
-
-  console.log(`[council] Cycle complete. Stakes this cycle: ${stakesThisCycle}`);
-}
+        co

@@ -6,9 +6,12 @@
  * here can move funds, and requiring a signature to read your own queue would buy
  * privacy that the chain does not offer anyway.
  *
- * Monetary fields (`memberStakeAtomic`, `mirrorAmountAtomic`) are returned as
- * exact 7-decimal atomic USDC base-10 integer strings; consumers apply display
- * formatting at the UI boundary.
+ * Response shape:
+ *  - `mirrors`        — pending mirrors computed from available sources
+ *  - `following`      — basket IDs the subscriber follows (empty if unavailable)
+ *  - `status`         — `"no_subscriptions" | "complete" | "incomplete"`
+ *  - `complete`       — `true` when every required source succeeded
+ *  - `failureSummary` — bounded failure summary when `complete === false`, else `null`
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -16,8 +19,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { apiError } from "@/lib/api/errors";
 import { clientIpFrom } from "@/lib/api/origin";
 import { authorizeRequest } from "@/lib/api/policy";
-import { listBasketSubscriptions } from "@/lib/db";
-import { pendingMirrorsFor, previewFollowerMirror, previewFollowerMirrors } from "@/lib/server/mirror-queue";
+import { pendingMirrorQueueFor } from "@/lib/server/mirror-queue";
 import { parseAddressParam } from "@/lib/server/api-validation";
 
 export const dynamic = "force-dynamic";
@@ -33,30 +35,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }
 
-  // Stellar strkey, checked with StrKey and used verbatim.
+  // Stellar strkey, checked with StrKey and used verbatim. The
+  // `/^0x[0-9a-fA-F]{40}$/` this used to carry did not just skip normalisation —
+  // it rejected every real Stellar address, so this endpoint 400'd for all callers.
   const subscriber = parseAddressParam(rawSubscriber);
   if (!subscriber) {
     const err = apiError("invalid_request", "subscriber must be a Stellar address");
     return NextResponse.json(err.body, { status: err.status });
   }
 
-  if (rawClaimId) {
-    const claimId = Number.parseInt(rawClaimId, 10);
-    if (!Number.isFinite(claimId)) {
-      const err = apiError("invalid_request", "claimId must be a valid integer");
-      return NextResponse.json(err.body, { status: err.status });
-    }
-    const preview = await previewFollowerMirror({ subscriber, claimId }).catch(() => null);
-    return NextResponse.json(
-      { preview },
-      { headers: { "cache-control": "no-store" } },
-    );
-  }
-
-  const [mirrors, subscriptions] = await Promise.all([
-    pendingMirrorsFor(subscriber).catch(() => []),
-    listBasketSubscriptions(subscriber).catch(() => []),
-  ]);
+  const result = await pendingMirrorQueueFor(subscriber);
 
   if (includePreviews) {
     const previews = await previewFollowerMirrors({ subscriber }).catch(() => []);
@@ -67,7 +55,13 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json(
-    { mirrors, following: subscriptions },
+    {
+      mirrors: result.mirrors,
+      following: result.following,
+      status: result.status,
+      complete: result.complete,
+      failureSummary: result.failureSummary,
+    },
     { headers: { "cache-control": "no-store" } },
   );
 }

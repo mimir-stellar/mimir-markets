@@ -1,6 +1,6 @@
 /// Typed contract events, mirroring the `event` declarations in MimirSquad.sol.
 
-use soroban_sdk::{contractevent, Address, BytesN, String};
+use soroban_sdk::{contractevent, Address, String};
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +25,8 @@ pub struct Deposited {
     pub participant: Address,
     pub amount: i128,
     pub shares: i128,
+    /// Squad market revision after this deposit was applied.
+    pub revision: u64,
 }
 
 #[contractevent]
@@ -37,6 +39,8 @@ pub struct Withdrawn {
     #[topic]
     pub participant: Address,
     pub amount: i128,
+    /// Squad market revision after this withdrawal was applied.
+    pub revision: u64,
 }
 
 #[contractevent]
@@ -47,6 +51,8 @@ pub struct Resolved {
     pub result: u32,
     pub pool_a: i128,
     pub pool_b: i128,
+    /// Squad market revision after resolution was applied.
+    pub revision: u64,
 }
 
 #[contractevent]
@@ -59,6 +65,8 @@ pub struct Claimed {
     pub gross: i128,
     pub fee: i128,
     pub net: i128,
+    /// Squad market revision after this claim was applied.
+    pub revision: u64,
 }
 
 #[contractevent]
@@ -79,6 +87,8 @@ pub struct MarketStateTransitioned {
     pub from_state: u32,
     pub to_state: u32,
     pub timestamp: u64,
+    /// Squad market revision after the transition was applied.
+    pub revision: u64,
 }
 
 /// Emitted when a pool market's deadline passes and it becomes eligible for resolution.
@@ -90,6 +100,8 @@ pub struct MarketDeadlineReached {
     pub deadline: u64,
     pub pool_a_total: i128,
     pub pool_b_total: i128,
+    /// Squad market revision at the moment the deadline was observed.
+    pub revision: u64,
 }
 
 /// Emitted when liquidity is added to a pool market.
@@ -104,6 +116,8 @@ pub struct LiquidityAdded {
     pub amount: i128,
     pub new_pool_total: i128,
     pub shares_issued: i128,
+    /// Squad market revision after this liquidity addition was applied.
+    pub revision: u64,
 }
 
 /// Emitted when liquidity is removed from a pool market before resolution.
@@ -118,6 +132,8 @@ pub struct LiquidityRemoved {
     pub amount: i128,
     pub new_pool_total: i128,
     pub shares_burned: i128,
+    /// Squad market revision after this liquidity removal was applied.
+    pub revision: u64,
 }
 
 /// A captain cancelled a market before its deadline. Every depositor can pull
@@ -131,6 +147,8 @@ pub struct MarketCancelled {
     pub captain: Address,
     pub pool_a: i128,
     pub pool_b: i128,
+    /// Squad market revision after cancellation was applied.
+    pub revision: u64,
 }
 
 /// A payout could not be delivered (frozen or deauthorized trustline) and was
@@ -145,6 +163,8 @@ pub struct PayoutParked {
     #[topic]
     pub participant: Address,
     pub amount: i128,
+    /// Squad market revision after the payout was parked.
+    pub revision: u64,
 }
 
 /// An oracle rotation was queued by the current oracle.
@@ -213,6 +233,8 @@ pub struct SquadFull {
     #[topic]
     pub market_id: u64,
     pub total_members: u32,
+    /// Squad market revision after the cap-filling deposit was applied.
+    pub revision: u64,
 }
 
 /// Emitted when a squad settlement manifest is committed for a resolved market.

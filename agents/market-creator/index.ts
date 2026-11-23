@@ -56,7 +56,18 @@ import { INJECTION_GUARD, fenceUntrusted } from "../../lib/prompt-safety";
 import { fetchLaunchEvents, fetchWeatherEvents, type LaunchEvent, type WeatherEvent } from "./sources";
 import { fetchCryptoEvents, fetchSportsEvents, fetchStockEvents, type CryptoEvent, type SportEvent, type StockEvent } from "./sources";
 import { extractUsdThresholds, cryptoThresholdReason, formatUsd } from "./thresholds";
-import { filterDuplicateCandidates, buildCandidateSignature, normalizeComparableText, normalizeResolutionUrl, type ExistingClaimSignature } from "./dedupe";
+import {
+  filterDuplicateCandidates,
+  buildCandidateSignature,
+  buildDeduplicationIdentity,
+  computeStatementDigest,
+  DurableIntentStore,
+  normalizeComparableText,
+  normalizeResolutionUrl,
+  reconcileSubmission,
+  type ExistingClaimSignature,
+  type MarketCreationIntent,
+} from "./dedupe";
 import { draftClaimCandidates } from "./drafting";
 import {
   cancelClaim,
@@ -234,8 +245,33 @@ requireEnv(["CREATOR_SECRET"]);
 requireAnyLLMKey();
 
 const CREATOR_PAYER  = payingWalletFor(CREATOR);
+const INTENT_STORE   = new DurableIntentStore({
+  stateDir: process.env.MARKET_CREATOR_STATE_DIR,
+});
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+export function cryptoThresholdReason(candidate: ClaimCandidate, event: CryptoEvent): string | null {
+  if (!Number.isFinite(event.priceUsd) || event.priceUsd <= 0) {
+    return `missing live CoinGecko price for ${event.symbol}`;
+  }
+
+  const text = [
+    candidate.question,
+    candidate.settlementRule,
+  ].join("\n");
+  const thresholds = extractUsdThresholds(text);
+  if (thresholds.length === 0) return "no explicit USD price threshold found";
+
+  const low = event.priceUsd * CRYPTO_MIN_THRESHOLD_RATIO;
+  const high = event.priceUsd * CRYPTO_MAX_THRESHOLD_RATIO;
+  const realistic = thresholds.some((threshold) => threshold >= low && threshold <= high);
+  if (!realistic) {
+    const rendered = thresholds.map((threshold) => `$${formatUsd(threshold)}`).join(", ");
+    return `${rendered} outside live ${event.symbol} guard ($${formatUsd(low)}-$${formatUsd(high)}, current=$${formatUsd(event.priceUsd)})`;
+  }
+
+  return null;
+}
 
 
 // ── Source fetchers ───────────────────────────────────────────────────────────
@@ -478,10 +514,36 @@ function fetchStockEvents(): { text: string; events: StockEvent[] } {
  * mode was first enabled because shadow mode never reached the call — is now a
  * compile error instead of a runtime rejection.
  */
-async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
+async function createClaim(
+  candidate: ClaimCandidate,
+  statementDigest?: string,
+): Promise<string | null> {
   // Floor the WHOLE expression: sports candidates get kickoff-pinned
   // fractional deadlineHours, and the contract takes whole seconds.
-  const deadline = Math.floor(Date.now() / 1000 + candidate.deadlineHours * 3600);
+  const deadline =
+    typeof candidate.deadlineSeconds === "number" && Number.isFinite(candidate.deadlineSeconds)
+      ? candidate.deadlineSeconds
+      : Math.floor(Date.now() / 1000 + candidate.deadlineHours * 3600);
+
+  const reviewCheck = verifyStatementForSigning(
+    {
+      ...candidate,
+      deadline: candidate.deadline ?? deadline,
+    },
+    candidate.revisionReview,
+  );
+  if (!reviewCheck.ok) {
+    console.warn(
+      `[market-creator] Reject signing — statement revision verification failed (${reviewCheck.reason}): ${reviewCheck.error ?? "reviewed statement changed"}`,
+    );
+    return null;
+  }
+
+  const id = buildDeduplicationIdentity(candidate);
+  const digest = statementDigest ?? computeStatementDigest(candidate);
+
+  // Ensure reviewed statement digest is persisted before signing
+  INTENT_STORE.prepareForSigning(id, digest);
 
   const params: CreateClaimParams = {
     question:              candidate.question,
@@ -538,6 +600,7 @@ async function createClaim(candidate: ClaimCandidate): Promise<string | null> {
     const result = rawResult as { claimId: number; txHash: string; explorerUrl?: string } | undefined;
     if (!result) return null;
     console.log(`[market-creator]   claim id #${result.claimId}`);
+    INTENT_STORE.markCreated(id, result.claimId, result.txHash);
     return result.explorerUrl ?? result.txHash;
   } catch (err) {
     if (err instanceof BackoffError) {
@@ -681,20 +744,19 @@ async function sweepAndCount(): Promise<{ cancelled: number; joinable: number; j
 async function recordProposal(
   candidate: ClaimCandidate,
   disposition: "create" | "shadow",
+  statementDigest?: string,
 ): Promise<string | null> {
-  const deadline = Math.floor(Date.now() / 1000) + Math.round(candidate.deadlineHours * 3600);
+  const deadline =
+    typeof candidate.deadlineSeconds === "number" && Number.isFinite(candidate.deadlineSeconds)
+      ? candidate.deadlineSeconds
+      : Math.floor(Date.now() / 1000) + Math.round(candidate.deadlineHours * 3600);
   const mode = toCanonicalMode({
     marketType: candidate.marketType,
     oddsMode: "pool",
     maxChallengers: DEFAULT_MAX_CHALLENGERS,
   });
-  // Deterministic id from the market's identity, so a retried run inserts nothing
-  // new — shadow precision must not be measured against duplicates.
-  const proposalId = sha256Hex(
-    [candidate.question, candidate.resolutionUrl, String(deadline), candidate.category].join(
-      UNIT_SEPARATOR,
-    ),
-  );
+  // Deterministic deduplication identity from canonical statement terms
+  const proposalId = buildDeduplicationIdentity(candidate);
 
   try {
     await insertMarketProposal({
@@ -716,7 +778,7 @@ async function recordProposal(
         maxChallengers: DEFAULT_MAX_CHALLENGERS,
         challengerPayoutBps: 0,
       },
-      context_pack_hash: null,
+      context_pack_hash: statementDigest ?? computeStatementDigest(candidate),
       resolution_url: candidate.resolutionUrl,
       settlement_rule: candidate.settlementRule,
       deadline,
@@ -865,10 +927,35 @@ async function run(): Promise<void> {
     return;
   }
 
-  const approvedCandidates = await applyCouncilPreflight(candidates);
+  const preflightCandidates = await applyCouncilPreflight(candidates);
+
+  if (preflightCandidates.length === 0) {
+    console.log("[market-creator] No candidates passed council preflight this run.");
+    return;
+  }
+
+  const approvedCandidates: ClaimCandidate[] = [];
+  for (const candidate of preflightCandidates) {
+    const deadlineSeconds = Math.floor(Date.now() / 1000 + candidate.deadlineHours * 3600);
+    try {
+      const review = reviewStatementRevision({
+        ...candidate,
+        deadline: deadlineSeconds,
+      });
+      approvedCandidates.push({
+        ...review.candidate,
+        deadlineSeconds,
+        revisionReview: review,
+      });
+    } catch (err) {
+      console.warn(
+        `[market-creator] Drop candidate failing statement revision review: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   if (approvedCandidates.length === 0) {
-    console.log("[market-creator] No candidates passed council preflight this run.");
+    console.log("[market-creator] No candidates passed statement revision review this run.");
     return;
   }
 
@@ -889,7 +976,7 @@ async function run(): Promise<void> {
     });
     if (!exposureGate.allowed) {
       console.log(
-        `[market-creator] Exposure cap blocks further creates — ${exposureGate.blockedBy} ` +
+        `[market-creator] Exposure cap blocks further creates [decision_code: global_exposure_exceeded] — ${exposureGate.blockedBy} ` +
           `(policy max ${CREATOR_POLICY.maxOpenExposureUsdc} USDC).`,
       );
       break;
@@ -917,13 +1004,31 @@ async function run(): Promise<void> {
       categoryEnabled: isCategoryEnabled(candidate.category),
     });
     if (!categoryGate.allowed) {
-      console.log(`[market-creator] Per-category cap blocks this candidate — ${categoryGate.blockedBy}`);
+      const decisionCode =
+        categoryGate.reason === "category_disabled"
+          ? "category_disabled"
+          : "category_budget_exhausted";
+      console.log(`[market-creator] Per-category cap blocks this candidate [decision_code: ${decisionCode}] — ${categoryGate.blockedBy}`);
       continue;
     }
 
+    // Reconcile ambiguous submissions before proceeding to create
+    const reconciliation = INTENT_STORE.reconcile(candidate, joinableClaims);
+    if (reconciliation.action === "reconcile" || reconciliation.action === "duplicate") {
+      console.log(
+        `[market-creator] Reconciled ambiguous submission (${reconciliation.matchedBy ?? "duplicate"}): ` +
+          `"${candidate.question.slice(0, 60)}..." -> intent ${reconciliation.intentId}`,
+      );
+      continue;
+    }
+
+    // Persist the reviewed statement digest before signing
+    const statementDigest = computeStatementDigest(candidate);
+    const intent = INTENT_STORE.persistReviewedDigest(candidate, statementDigest);
+
     // Record the decision in the canonical schema BEFORE acting on it (§10.4), so
     // a run that dies mid-create still leaves the proposal it was acting on.
-    const proposalId = await recordProposal(candidate, SHADOW_MODE ? "shadow" : "create");
+    const proposalId = await recordProposal(candidate, SHADOW_MODE ? "shadow" : "create", statementDigest);
 
     if (SHADOW_MODE) {
       // The roadmap's gate: proposal-only until shadow precision is measured
@@ -936,7 +1041,7 @@ async function run(): Promise<void> {
     }
 
     console.log(`\n[market-creator] Creating: "${candidate.question.slice(0, 60)}..."`);
-    const link = await createClaim(candidate);
+    const link = await createClaim(candidate, statementDigest);
     if (link) {
       console.log(`[market-creator] ✓ Created — ${link}`);
       created++;

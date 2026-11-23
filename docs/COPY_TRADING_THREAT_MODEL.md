@@ -25,6 +25,21 @@
   with an expiry, which does not refresh. The rolling-period budget the follower
   actually signed for is Mimir's own accounting on top; both must pass, so
   exceeding either is a skip.
+- Simultaneous signals: `tests/node/copy-permission-fixtures.ts` models a batch as
+  one shared preview snapshot followed by a stable claim-id-ordered execution pass.
+  Every execution re-reads usage, claim ids, allowance and revocation from a
+  temporary state directory, so a preview can never be replayed as approval and two
+  signals cannot both spend the same signed budget.
+- Revocation between preview and execution: the fixture applies an owner-signed
+  `copyRevokeMessage` before the execution pass (or from an `afterExecution` hook)
+  and expects `permission_revoked`, not a stale preview verdict. A revocation is a
+  separate signed lifecycle action; it does not re-sign the economic policy, so the
+  fixture checks the policy hash with `status` normalised to `active`.
+- Policy integrity: before each execution the fixture recomputes the active-form
+  `signedPolicyHash`. A mutated cap, allowance or allowlist fails closed with
+  `policy_hash_mismatch` before any stake is reserved. Every executed row records
+  that hash, and the fixture's invariant check re-derives atomic 7-decimal USDC
+  caps from the signed policy and the decreasing on-chain allowance.
 
 - Pre-signature review digest: before owner signing, `POST /api/copy/permissions/review`
   (backed by `buildCopyPermissionReviewDigest` in `lib/copy-trading.ts`) exposes a
@@ -37,6 +52,25 @@
 
 Every decision writes source position, permission, simulation ledger, attribution,
 stake, fee lines, tx hash and status/skip reason to the audit ledger.
+
+## Copy execution timeline (owner-readable)
+
+The owner-readable timeline is a projection of the audit ledger for a single
+copy execution. Each entry references, and never embeds secrets:
+
+- signal reference (source position and signal ID),
+- policy reference (permission ID and the policy decision outcome),
+- reservation reference (budget/allowance reservation ID),
+- chain outcome reference (simulation ledger, transaction hash and status, or skip reason).
+
+The timeline must not expose signing seeds, private keys, or private agent
+reasoning. Soroban contract state remains authoritative; the timeline is a read
+view derived from Postgres and is not a source of truth. Amounts are integer
+USDC; XLM appears only for fees and reserve.
+
+Verification: focused tests cover a complete timeline, a skipped execution
+(expired deadline / over-allowance), and confirmation that secret fields are
+redacted from the response.
 
 - Allowance reconciliation: `lib/copy-allowance-reconciliation.ts` compares the
   owner-signed copy policy, the authoritative Soroban SAC allowance (and

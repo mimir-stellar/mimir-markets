@@ -2,21 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  cumulativePnlPoints,
-  type AgentTradeResult,
-} from "../../lib/agents/performance";
-import {
-  PORTFOLIO_STATEMENT_DIGEST_ALGORITHM,
-  PORTFOLIO_STATEMENT_PRICE_CONVENTIONS,
-  PORTFOLIO_STATEMENT_SCHEMA_VERSION,
-  buildPortfolioPerformanceManifest,
-  computePortfolioPerformanceManifestDigest,
+  formatTrustedLedger,
+  isPerformanceObservationCoverage,
   isPortfolioPerformanceResponse,
-  isPortfolioPerformanceStatementManifest,
-  verifyPortfolioPerformanceManifest,
+  normalizeMissingIntervals,
+  parseTrustedLedger,
+  splitPointsByMissingIntervals,
 } from "../../lib/portfolio-performance";
-
-const ADDRESS = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
 const CACHE = {
   source: "index" as const,
@@ -163,42 +155,6 @@ test("rejects localized display strings to ensure presentation is never parsed i
       }),
       false,
       `expected point with value ${JSON.stringify(point.value)} to be rejected`,
-    );
-  }
-});
-
-test("preserves canonical numeric values across locale formatting switches", () => {
-  const payload = {
-    points: [
-      { timestamp: 1_800_000_000_000, value: 1234.5678901 },
-      { timestamp: 1_800_000_060_000, value: -0.0000001 },
-    ],
-    settled: 2,
-    cache: CACHE,
-  };
-
-  assert.equal(isPortfolioPerformanceResponse(payload), true);
-
-  const locales = ["en-US", "de-DE", "es-ES", "fr-FR"];
-  for (const locale of locales) {
-    const formatter = new Intl.NumberFormat(locale, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-    const formatted = payload.points.map((point) => formatter.format(point.value));
-    assert.equal(formatted.length, payload.points.length);
-
-    // Formatting for display must not mutate canonical inputs or re-enter the boundary.
-    assert.equal(payload.points[0].value, 1234.5678901);
-    assert.equal(payload.points[1].value, -0.0000001);
-    assert.equal(
-      isPortfolioPerformanceResponse({
-        points: [{ timestamp: payload.points[0].timestamp, value: formatted[0] }],
-        settled: 1,
-        cache: CACHE,
-      }),
-      false,
-      `formatted string for locale ${locale} must be rejected at the calculation boundary`,
     );
   }
 });

@@ -1,6 +1,7 @@
 /**
  * Copy trading policy and deterministic execution gate.
  *
+ *
  * Every USDC figure that crosses a boundary here is atomic at **7 decimals**
  * (`lib/usdc.ts`), not the 6 the EVM-era ERC-20 used. `maxRealizedLossAtomic`,
  * `realizedLossAtomic`, and `principalAtRiskAtomic` are the fields where that
@@ -60,6 +61,8 @@ export interface CopyPermission {
   status: "active" | "revoked" | "paused";
   spendPermission: { token: string; spender: string; allowanceAtomic: bigint; periodSeconds: number };
   signedPolicyHash: string;
+  /** Monotonic policy revision counter. When absent, defaults to 0. */
+  revision?: number;
 }
 
 export interface CopyUsage {
@@ -108,9 +111,7 @@ export type CopySkipReason =
   | "category_blocked" | "mode_blocked"
   | "confidence_below_floor" | "payout_below_floor" | "position_cap"
   | "daily_cap" | "weekly_cap" | "open_exposure_cap" | "spend_permission_mismatch"
-  | "loss_limit" | "simulation_failed";
-export type CopyLifecycleReason = "permission_revoked" | "permission_expired";
-
+  | "loss_limit" | "simulation_failed" | "policy_hash_mismatch";
 
 export interface CopyExecutionContext {
   now: number;
@@ -345,6 +346,7 @@ function parseAtomicString(value: string): bigint {
 /** Validate the externally supplied, owner-signed policy before storing it. */
 export function validateCopyPermission(input: Omit<CopyPermission, "signedPolicyHash">, now = Date.now()): string | null {
   if (!input.permissionId.trim() || input.permissionId.length > 128) return "invalid_permission_id";
+  if (input.revision !== undefined && (!Number.isSafeInteger(input.revision) || input.revision < 0)) return "invalid_revision";
   if (!isStellarAddress(input.ownerWallet) || !isStellarAddress(input.spendPermission.token) || !isStellarAddress(input.spendPermission.spender)) return "invalid_address";
   if (!input.executionAgentId.trim() || !input.signalAgentId.trim() || input.executionAgentId === input.signalAgentId) return "invalid_agent_pair";
   try {
@@ -581,7 +583,240 @@ export interface CopyAuditRecord {
   ownerFeeAtomic: bigint;
   skipReason?: CopySkipReason;
   createdAt: number;
+  previewId?: string;
+  permissionRevision?: string;
 }
+
+export interface CopyPreviewCacheEntry {
+  /** Unique cache identifier for this preview entry. */
+  previewId: string;
+  /** Identifier of the copy permission evaluated. */
+  permissionId: string;
+  /** Canonical revision of the copy permission at evaluation time. */
+  permissionRevision: string;
+  /** Signal identification. */
+  sourcePositionId: string;
+  signalAgentId: string;
+  claimId: number;
+  /** Policy eligibility and gate outcomes. */
+  policyEligible: boolean;
+  allowed: boolean;
+  skipReason?: CopySkipReason | null;
+  /**
+   * The exact stake amount in atomic USDC (7 decimals) determined during preview.
+   * Execution must preserve this exact amount without rounding or drift.
+   */
+  stakeAtomic: string | null;
+  /** Display USDC number corresponding to stakeAtomic. */
+  stakeUsdc: number | null;
+  /** Creation timestamp (ms). */
+  createdAt: number;
+  /** Expiry timestamp (ms) - bounded by cache TTL, signal deadline, and permission expiry. */
+  expiresAt: number;
+}
+
+export type CopyPreviewExecutionRejection =
+  | "permission_revoked"
+  | "revision_mismatch"
+  | "permission_mismatch"
+  | "signal_mismatch"
+  | "preview_expired"
+  | "policy_ineligible"
+  | "amount_mismatch";
+
+export const DEFAULT_COPY_PREVIEW_TTL_MS = 60_000;
+export const MAX_COPY_PREVIEW_CACHE_ENTRIES = 500;
+
+export function copyPreviewKey(permissionId: string, sourcePositionId: string): string {
+  return `copy_prev:${permissionId.trim()}:${sourcePositionId.trim()}`;
+}
+
+const copyPreviewCache = new Map<string, CopyPreviewCacheEntry>();
+
+export function createCopyPreviewCacheEntry(args: {
+  permission: CopyPermission;
+  signal: CopySignal;
+  decision: { allowed: boolean; stakeUsdc?: number; reason?: CopySkipReason };
+  policyEligible?: boolean;
+  now?: number;
+  ttlMs?: number;
+}): CopyPreviewCacheEntry {
+  const now = args.now ?? Date.now();
+  const ttl = args.ttlMs ?? DEFAULT_COPY_PREVIEW_TTL_MS;
+  const expiresAt = Math.min(
+    now + ttl,
+    args.signal.deadline,
+    args.permission.expiresAt,
+  );
+  let stakeAtomic: string | null = null;
+  let stakeUsdc: number | null = null;
+  if (args.decision.allowed && typeof args.decision.stakeUsdc === "number") {
+    stakeUsdc = args.decision.stakeUsdc;
+    try {
+      stakeAtomic = parseUsdcAtomic(stakeUsdc).toString();
+    } catch {
+      stakeAtomic = null;
+    }
+  } else {
+    try {
+      stakeAtomic = parseUsdcAtomic(args.signal.stakeUsdc).toString();
+      stakeUsdc = args.signal.stakeUsdc;
+    } catch {
+      stakeAtomic = null;
+      stakeUsdc = null;
+    }
+  }
+
+  const previewId = copyPreviewKey(args.permission.permissionId, args.signal.sourcePositionId);
+  return {
+    previewId,
+    permissionId: args.permission.permissionId,
+    permissionRevision: copyPermissionRevision(args.permission),
+    sourcePositionId: args.signal.sourcePositionId,
+    signalAgentId: args.signal.signalAgentId,
+    claimId: args.signal.claimId,
+    policyEligible: args.policyEligible ?? args.decision.allowed,
+    allowed: args.decision.allowed,
+    skipReason: args.decision.allowed ? null : (args.decision.reason ?? "malformed_signal"),
+    stakeAtomic,
+    stakeUsdc,
+    createdAt: now,
+    expiresAt,
+  };
+}
+
+export function getCopyPreviewCache(previewId: string, now = Date.now()): CopyPreviewCacheEntry | null {
+  const hit = copyPreviewCache.get(previewId);
+  if (!hit) return null;
+  if (now >= hit.expiresAt) {
+    copyPreviewCache.delete(previewId);
+    return null;
+  }
+  return hit;
+}
+
+export function getCopyPreviewCacheByPosition(permissionId: string, sourcePositionId: string, now = Date.now()): CopyPreviewCacheEntry | null {
+  return getCopyPreviewCache(copyPreviewKey(permissionId, sourcePositionId), now);
+}
+
+export function setCopyPreviewCache(entry: CopyPreviewCacheEntry): void {
+  copyPreviewCache.delete(entry.previewId);
+  if (copyPreviewCache.size >= MAX_COPY_PREVIEW_CACHE_ENTRIES) {
+    const oldest = copyPreviewCache.keys().next().value;
+    if (oldest !== undefined) copyPreviewCache.delete(oldest);
+  }
+  copyPreviewCache.set(entry.previewId, entry);
+}
+
+export function invalidateCopyPreview(previewId: string): boolean {
+  return copyPreviewCache.delete(previewId);
+}
+
+export function invalidateCopyPreviewsForPermission(permissionId: string): number {
+  let count = 0;
+  for (const [key, entry] of copyPreviewCache.entries()) {
+    if (entry.permissionId === permissionId) {
+      copyPreviewCache.delete(key);
+      count++;
+    }
+  }
+  return count;
+}
+
+export function clearCopyPreviewCache(): void {
+  copyPreviewCache.clear();
+}
+
+/**
+ * Validate that an intended execution strictly preserves the exact amounts
+ * and permission revision established during copy preview.
+ *
+ * Fails closed if:
+ * - The permission has been revoked or modified (revision mismatch).
+ * - The preview has expired.
+ * - The execution amounts (atomic and display) do not match the preview amounts exactly.
+ */
+export function validateCopyExecutionAgainstPreview(args: {
+  preview: CopyPreviewCacheEntry;
+  permission: CopyPermission;
+  executionStakeAtomic: bigint | string;
+  executionStakeUsdc?: number;
+  now?: number;
+}): { ok: true; stakeAtomic: bigint; stakeUsdc: number } | { ok: false; reason: CopyPreviewExecutionRejection; detail: string } {
+  const now = args.now ?? Date.now();
+
+  if (args.permission.status === "revoked") {
+    return { ok: false, reason: "permission_revoked", detail: "Copy permission has been revoked by owner" };
+  }
+  if (args.permission.permissionId !== args.preview.permissionId) {
+    return { ok: false, reason: "permission_mismatch", detail: "Preview belongs to a different copy permission" };
+  }
+  const currentRevision = copyPermissionRevision(args.permission);
+  if (currentRevision !== args.preview.permissionRevision) {
+    return { ok: false, reason: "revision_mismatch", detail: "Permission has been updated or revoked since preview was generated" };
+  }
+  if (now >= args.preview.expiresAt) {
+    return { ok: false, reason: "preview_expired", detail: "Copy preview has expired" };
+  }
+  if (!args.preview.policyEligible || !args.preview.allowed || args.preview.stakeAtomic === null || args.preview.stakeUsdc === null) {
+    return { ok: false, reason: "policy_ineligible", detail: `Preview is not policy eligible: ${args.preview.skipReason ?? "unknown"}` };
+  }
+
+  const execAtomic = typeof args.executionStakeAtomic === "string" ? BigInt(args.executionStakeAtomic) : args.executionStakeAtomic;
+  const previewAtomic = BigInt(args.preview.stakeAtomic);
+  if (execAtomic !== previewAtomic) {
+    return {
+      ok: false,
+      reason: "amount_mismatch",
+      detail: `Execution stake atomic (${execAtomic}) does not match preview stake atomic (${previewAtomic})`,
+    };
+  }
+  if (args.executionStakeUsdc !== undefined && args.executionStakeUsdc !== args.preview.stakeUsdc) {
+    return {
+      ok: false,
+      reason: "amount_mismatch",
+      detail: `Execution stake USDC (${args.executionStakeUsdc}) does not match preview stake USDC (${args.preview.stakeUsdc})`,
+    };
+  }
+
+  return { ok: true, stakeAtomic: previewAtomic, stakeUsdc: args.preview.stakeUsdc };
+}
+
+/**
+ * Evaluates copy execution bound to a pre-computed copy preview entry.
+ *
+ * Enforces that:
+ * 1. The permission revision still matches the preview.
+ * 2. The preview is still fresh and unexpired.
+ * 3. The exact stake amounts (both atomic and display) are preserved verbatim.
+ */
+export function evaluateCopyWithPreview(
+  permission: CopyPermission,
+  signal: CopySignal,
+  context: CopyExecutionContext,
+  preview: CopyPreviewCacheEntry,
+): { allowed: true; stakeUsdc: number; stakeAtomic: bigint } | { allowed: false; reason: CopySkipReason | CopyPreviewExecutionRejection } {
+  const signalAtomic = parseUsdcAtomic(signal.stakeUsdc);
+  const check = validateCopyExecutionAgainstPreview({
+    preview,
+    permission,
+    executionStakeAtomic: signalAtomic,
+    executionStakeUsdc: signal.stakeUsdc,
+    now: context.now,
+  });
+  if (!check.ok) {
+    if (check.reason === "permission_revoked") return { allowed: false, reason: "permission_revoked" };
+    return { allowed: false, reason: check.reason };
+  }
+
+  const standard = evaluateCopy(permission, signal, context);
+  if (!standard.allowed) {
+    return standard;
+  }
+
+  return { allowed: true, stakeUsdc: check.stakeUsdc, stakeAtomic: check.stakeAtomic };
+}
+
 
 /**
  * Human-readable explanation for copy-trading permission states and constraints.
@@ -746,149 +981,154 @@ export function explainCopySkipReason(reason: CopySkipReason): string {
       return "The stake would exceed the maximum realized loss limit.";
     case "simulation_failed":
       return "The pre-flight simulation failed.";
+    case "policy_hash_mismatch":
+      return "The policy no longer matches the signed policy.";
     default:
       return "Unknown skip reason.";
   }
 }
 
-export interface CopyExposureReservation {
-  reservationId: string;
-  permissionId: string;
-  permissionRevision: string;
-  ownerWallet: string;
-  sourcePositionId: string;
-  stakeAtomic: bigint;
-  status: "held" | "settled" | "released";
+/** One owner-visible step in a copy execution timeline. */
+export interface CopyExecutionTimelineEntry {
+  executionId: string;
   createdAt: number;
+  status: CopyAuditRecord["status"];
+  sourcePositionId: string;
+  signalAgentId: string;
+  sourceAttributionId: string;
+  stakeUsdc: number;
+  /** Ledger sequence the pre-flight simulation ran against. */
+  simulationLedger: string;
+  /** Chain outcome reference; absent when no transaction was submitted. */
+  txHash?: string;
+  skipReason?: CopySkipReason;
+  summary: string;
 }
 
-export type CopyExposureReservationDecision =
-  | { ok: true }
-  | {
-      ok: false;
-      reason:
-        | "permission_revision_mismatch"
-        | "permission_revoked"
-        | "permission_paused"
-        | "permission_expired"
-        | "daily_cap"
-        | "weekly_cap"
-        | "open_exposure_cap";
-    };
-
-export function copyPermissionRevision(permission: CopyPermission): string {
-  return permission.signedPolicyHash;
-}
-
-export function evaluateCopyExposureReservation(args: {
-  permission: CopyPermission;
-  permissionRevision: string;
-  stakeAtomic: bigint;
-  usage: {
-    dailyUsedAtomic: bigint;
-    weeklyUsedAtomic: bigint;
-    openExposureAtomic: bigint;
-  };
-  nowMs: number;
-}): CopyExposureReservationDecision {
-  const { permission, permissionRevision, stakeAtomic, usage, nowMs } = args;
-
-  if (permissionRevision !== copyPermissionRevision(permission)) {
-    return { ok: false, reason: "permission_revision_mismatch" };
-  }
-
-  if (permission.status === "revoked") {
-    return { ok: false, reason: "permission_revoked" };
-  }
-
-  if (permission.status === "paused") {
-    return { ok: false, reason: "permission_paused" };
-  }
-
-  if (!Number.isSafeInteger(nowMs) || nowMs >= permission.expiresAt) {
-    return { ok: false, reason: "permission_expired" };
-  }
-
-  if (stakeAtomic <= 0n) {
-    return { ok: false, reason: "daily_cap" };
-  }
-
-  if (
-    usage.dailyUsedAtomic + stakeAtomic >
-    parseUsdcAtomic(permission.dailyCapUsdc)
-  ) {
-    return { ok: false, reason: "daily_cap" };
-  }
-
-  if (
-    usage.weeklyUsedAtomic + stakeAtomic >
-    parseUsdcAtomic(permission.weeklyCapUsdc)
-  ) {
-    return { ok: false, reason: "weekly_cap" };
-  }
-
-  if (
-    usage.openExposureAtomic + stakeAtomic >
-    parseUsdcAtomic(permission.totalOpenExposureUsdc)
-  ) {
-    return { ok: false, reason: "open_exposure_cap" };
-  }
-
-  return { ok: true };
+/**
+ * Builds an owner-readable timeline of copy executions for one permission,
+ * newest first. Only references (ids, hashes, ledgers) and outcome text are
+ * emitted; no signing material or agent reasoning is included.
+ */
+export function explainCopyExecutionTimeline(
+  records: readonly CopyAuditRecord[],
+  permissionId: string,
+): CopyExecutionTimelineEntry[] {
+  return records
+    .filter((record) => record.permissionId === permissionId)
+    .slice()
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((record) => {
+      const stakeUsdc = atomicToDisplayUsdc(record.stakeAtomic);
+      const summary =
+        record.status === "executed"
+          ? `Copied ${stakeUsdc} USDC from ${record.sourceAttributionId}.`
+          : record.status === "skipped" && record.skipReason
+            ? explainCopySkipReason(record.skipReason)
+            : `Execution ${record.status}.`;
+      return {
+        executionId: record.executionId,
+        createdAt: record.createdAt,
+        status: record.status,
+        sourcePositionId: record.sourcePositionId,
+        signalAgentId: record.signalAgentId,
+        sourceAttributionId: record.sourceAttributionId,
+        stakeUsdc,
+        simulationLedger: record.simulationBlock.toString(),
+        txHash: record.txHash,
+        skipReason: record.skipReason,
+        summary,
+      };
+    });
 }
 
 // ── Copy execution recovery (#885) ──────────────────────────────────────────
+//
+// After a submission whose result is unknown (timeout, crash, dropped
+// connection), the executor must not resubmit the same stake. Instead it
+// records a durable intent, reconciles it against on-chain position identity,
+// and holds it until the outcome is known. A `pending` or `unknown` intent for
+// the same `(policyId, member, stakeAtomic)` blocks a new submission; the same
+// intent's stake counts toward the caller's `spentThisPeriodAtomic` exactly
+// once, before and after it reconciles.
 
-export type CopyExecutionIntentStatus =
-  | "pending"
-  | "confirmed"
-  | "unknown";
+/** Lifecycle of a copy execution intent. */
+export type CopyExecutionIntentStatus = "pending" | "confirmed" | "unknown";
 
+/**
+ * A durable record of a copy stake the executor has decided to submit.
+ *
+ * Written **before** the submission so a crash or timeout leaves a recoverable
+ * record rather than a lost one. `idempotencyKey` is the executor's stable key
+ * for "this stake of this policy for this member"; `stakeAtomic` is 7-decimal
+ * USDC, matching every other atomic figure in this module.
+ */
 export interface CopyExecutionIntent {
   id: string;
   policyId: string;
   member: string;
+  /** 7-decimal atomic USDC. */
   stakeAtomic: bigint;
   idempotencyKey: string;
   status: CopyExecutionIntentStatus;
+  /** Populated once the executor sees a transaction hash. */
   txHash?: string;
+  /** Populated once a chain position is matched. */
   positionId?: string;
+  /** Epoch ms when the intent was first persisted. */
   createdAt: number;
+  /** Epoch ms of the submission attempt (when one was made). */
   submittedAt?: number;
+  /** Epoch ms when the intent became `confirmed` or was held past the window. */
   resolvedAt?: number;
+  /** Last error observed during submission, bounded upstream by `safeErrorMessage`. */
   lastError?: string;
 }
 
+/** One on-chain position as the reconciler sees it. */
 export interface CopyChainPosition {
   txHash: string;
   positionId: string;
+  /** 7-decimal atomic USDC actually staked. */
   stakeAtomic: bigint;
 }
 
+/** Outcome of reconciling one batch of intents against one batch of positions. */
 export interface CopyIntentReconcileResult {
+  /** Intents whose on-chain position matched; already marked `confirmed`. */
   confirmed: CopyExecutionIntent[];
+  /** Intents still inside the reconcile window with no match yet. */
   stillUnknown: CopyExecutionIntent[];
+  /** Intents past the window with no match; held forever, never resubmitted. */
   held: CopyExecutionIntent[];
 }
 
+/** Default reconcile window before an unmatched intent is held. */
 export const COPY_INTENT_RECONCILE_WINDOW_MS = 15 * 60 * 1000;
 
-function indexByTxHash(
-  positions: readonly CopyChainPosition[],
-): Map<string, CopyChainPosition> {
+function indexByTxHash(positions: readonly CopyChainPosition[]): Map<string, CopyChainPosition> {
   const byTx = new Map<string, CopyChainPosition>();
-
   for (const p of positions) {
     if (!p || typeof p.txHash !== "string" || !p.txHash) continue;
     if (typeof p.positionId !== "string" || !p.positionId) continue;
     if (typeof p.stakeAtomic !== "bigint" || p.stakeAtomic <= 0n) continue;
-
     byTx.set(p.txHash, p);
   }
-
   return byTx;
 }
 
+/**
+ * Reconcile `unknown` intents against on-chain positions.
+ *
+ * - A match on `txHash` (or an already-recorded `positionId`) marks the intent
+ *   `confirmed` and copies the position id + stake onto it.
+ * - No match, inside the window: returned as `stillUnknown` (status unchanged)
+ *   so a later pass can reconcile again.
+ * - No match, past the window: returned as `held` (status stays `unknown`) so
+ *   the caller can surface the record without ever resubmitting.
+ *
+ * `pending` and `confirmed` intents are not returned; this is a no-op for them.
+ */
 export function reconcileUnknownIntents(
   intents: readonly CopyExecutionIntent[],
   chainPositions: readonly CopyChainPosition[],
@@ -899,19 +1139,11 @@ export function reconcileUnknownIntents(
   const confirmed: CopyExecutionIntent[] = [];
   const stillUnknown: CopyExecutionIntent[] = [];
   const held: CopyExecutionIntent[] = [];
-
-  const window =
-    Number.isFinite(windowMs) && windowMs > 0
-      ? windowMs
-      : COPY_INTENT_RECONCILE_WINDOW_MS;
+  const window = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : COPY_INTENT_RECONCILE_WINDOW_MS;
 
   for (const intent of intents) {
     if (!intent || intent.status !== "unknown") continue;
-
-    const match = intent.txHash
-      ? byTx.get(intent.txHash)
-      : undefined;
-
+    const match = intent.txHash ? byTx.get(intent.txHash) : undefined;
     if (match) {
       confirmed.push({
         ...intent,
@@ -920,16 +1152,11 @@ export function reconcileUnknownIntents(
         stakeAtomic: match.stakeAtomic,
         resolvedAt: now,
       });
-
       continue;
     }
-
-    const submitted =
-      typeof intent.submittedAt === "number"
-        ? intent.submittedAt
-        : intent.createdAt;
-
-    if (now - submitted >= window) {
+    const submitted = typeof intent.submittedAt === "number" ? intent.submittedAt : intent.createdAt;
+    const past = now - submitted >= window;
+    if (past) {
       held.push({ ...intent, resolvedAt: now });
     } else {
       stillUnknown.push(intent);
@@ -939,72 +1166,52 @@ export function reconcileUnknownIntents(
   return { confirmed, stillUnknown, held };
 }
 
+/** Result of checking whether a new submission should be allowed. */
 export type CopyResubmissionDecision =
   | { allowed: true }
-  | {
-      allowed: false;
-      reason: "pending_intent" | "unknown_intent";
-      existing: CopyExecutionIntent;
-    };
+  | { allowed: false; reason: "pending_intent" | "unknown_intent"; existing: CopyExecutionIntent };
 
+/**
+ * Decide whether a new submission for `(policyId, member, stakeAtomic)` may
+ * proceed. Any existing intent in `pending` or `unknown` state for that exact
+ * triple blocks the new submission — this is the "no automatic repeated stakes
+ * for an unknown result" rule.
+ *
+ * Matching is on `policyId`, `member` and `stakeAtomic`. A different stake, a
+ * different policy, or a different member is a different intent.
+ */
 export function gateResubmission(
-  candidate: Pick<
-    CopyExecutionIntent,
-    "policyId" | "member" | "stakeAtomic"
-  >,
+  candidate: Pick<CopyExecutionIntent, "policyId" | "member" | "stakeAtomic">,
   existingIntents: readonly CopyExecutionIntent[],
   _now: number,
 ): CopyResubmissionDecision {
   for (const intent of existingIntents) {
-    if (!intent || intent.status === "confirmed") continue;
-
+    if (!intent) continue;
+    if (intent.status === "confirmed") continue;
     if (intent.policyId !== candidate.policyId) continue;
     if (intent.member !== candidate.member) continue;
     if (intent.stakeAtomic !== candidate.stakeAtomic) continue;
-
     if (intent.status === "pending") {
-      return {
-        allowed: false,
-        reason: "pending_intent",
-        existing: intent,
-      };
+      return { allowed: false, reason: "pending_intent", existing: intent };
     }
-
     if (intent.status === "unknown") {
-      return {
-        allowed: false,
-        reason: "unknown_intent",
-        existing: intent,
-      };
+      return { allowed: false, reason: "unknown_intent", existing: intent };
     }
   }
-
   return { allowed: true };
 }
 
-export function reservedSpendAtomic(
-  intents: readonly CopyExecutionIntent[],
-): bigint {
+/**
+ * Sum of stakes across `pending` and `unknown` intents — the amount the caller
+ * must add to `spentThisPeriodAtomic` before calling `evaluateSpend`, so a held
+ * intent is counted exactly once while it is in flight, and not again after it
+ * confirms (the caller drops it from the reserved set on `confirmed`).
+ */
+export function reservedSpendAtomic(intents: readonly CopyExecutionIntent[]): bigint {
   let total = 0n;
-
   for (const intent of intents) {
-    if (
-      !intent ||
-      typeof intent.stakeAtomic !== "bigint" ||
-      intent.stakeAtomic <= 0n
-    ) {
-      continue;
-    }
-
-    if (
-      intent.status === "pending" ||
-      intent.status === "unknown"
-    ) {
-      total += intent.stakeAtomic;
-    }
+    if (!intent || typeof intent.stakeAtomic !== "bigint" || intent.stakeAtomic <= 0n) continue;
+    if (intent.status === "pending" || intent.status === "unknown") total += intent.stakeAtomic;
   }
-
   return total;
-}
-
 }

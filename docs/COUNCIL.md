@@ -16,10 +16,13 @@ The point isn't to find a single "best" trader. It's the opposite: by giving ten
 - [Decision pipeline](#decision-pipeline)
 - [Self-resolving settlement](#self-resolving-settlement)
 - [Rate-limit strategy](#rate-limit-strategy)
+- [Quorum, equivocation, and outage resilience](#quorum-equivocation-and-outage-resilience)
 - [Local setup](#local-setup)
 - [Production deploy](#production-deploy)
 - [Configuration reference](#configuration-reference)
 - [Where the council shows up in the UI](#where-the-council-shows-up-in-the-ui)
+- [Council independence assumptions & operator report](#council-independence-assumptions--operator-report)
+- [A note on bias](#a-note-on-bias)
 
 ---
 
@@ -172,7 +175,7 @@ The mechanism lives in `agents/oracle/council-vote.ts` (pure scoring math is uni
 | Variable | Default | Effect |
 |---|---|---|
 | `COUNCIL_SELF_RESOLVING` | off | `1` enables the mechanism (requires `COUNCIL_SETTLEMENT=1`) |
-| `COUNCIL_QUORUM` | `3` | Min decisive votes before council settles; invalid values normalize to 3 (see `lib/council/quorum.ts`) |
+| `COUNCIL_QUORUM` | `3` | Min decisive votes before council settles; invalid values normalize to 3 (see `lib/council/quorum.ts`). Deduplication preserves the original vote's `arrivalId`: identical retries are idempotent, while conflicting duplicates are surfaced in `conflicts`. |
 | `COUNCIL_ALPHA` | `0.25` | Per-vote stop probability after quorum |
 | `COUNCIL_BONUS_USDC` | `0.01` | Total cross-entropy bonus pool per settlement; `0` pauses bonuses, maximum `1`, exact 7-decimal USDC |
 
@@ -221,6 +224,14 @@ quorum/confidence policies and reports which settlement decisions would change.
 It evaluates both policies on identical fixtures, makes no model-provider calls,
 and writes results only to a temporary state directory.
 
+---
+
+### Versioned council ballot commitment
+
+Before evaluating quorum or peer-reasoning outcomes, council ballots can be sealed with a versioned SHA-256 commitment (`COUNCIL_BALLOT_COMMITMENT_VERSION = 1` in `lib/council/quorum.ts` and `PEER_REASONING_COMMITMENT_VERSION = 1` in `agents/council/shared/peer-reasoning.ts`):
+
+- **Bound fields:** Canonical participant identities (persona slugs, optional case-sensitive wallet addresses, and jury track), `claimId`, `claimRevision`, the canonical `eligibleVoteSet`, the approved `votingBoundaryMs`, and the folded ballot snapshot.
+- **Boundary enforcement:** `createBallotCommitment`, `verifyBallotCommitment`, `evaluateQuorum`, and `buyPeerReasoning` reject any ballot or peer-reasoning read that is recorded or altered after `votingBoundaryMs`, comes from a persona outside `eligibleVoteSet`, mismatches a bound participant identity or `claimRevision`, or fails version/digest verification (`action: "abort_invalid_commitment"`).
 
 ---
 
@@ -260,6 +271,26 @@ Behaviour summary:
 - A persona that times out counts as abstaining, not as agreeing with the majority.
 - Abstentions do not lower the quorum threshold; `COUNCIL_QUORUM` still applies to substantive opinions only.
 - Existing configurations are unaffected unless `COUNCIL_DELIBERATION_DEADLINE_MS` is set to a non-zero value below the observed round duration.
+
+---
+
+## Quorum, equivocation, and outage resilience
+
+The settlement policy in `lib/council/quorum.ts` and peer reasoning in `agents/council/shared/peer-reasoning.ts` enforce conservative aggregation under Byzantine or degraded conditions:
+
+1. **Equivocation and conflicting votes:**
+   - If a persona attempts to submit conflicting votes (differing verdicts) for the same claim, `rejectEquivocation` treats this as Byzantine equivocation.
+   - Under conservative policy (`disqualify_all`), any persona that equivocates is disqualified: its prior vote is evicted from the ballot, decisive count is reduced, and both attempts are marked with disposition `equivocation`.
+   - Benign duplicate attempts with identical verdicts remain deduplicated (`duplicated`).
+
+2. **Expired ballots and delayed votes:**
+   - Individual vote attempts arriving past `ballotDeadlineMs` or exceeding `maxAgeMs` are classified as `expired` or `stale` and cannot pad quorum.
+   - If the ballot deadline elapses or `claimState === "expired"`, `evaluateQuorum` aborts with `abort_expired`. The oracle refuses to invent a stale consensus.
+
+3. **Partial provider outages:**
+   - If upstream LLM or HTTP provider failures (5xx, timeouts, connection drops) affect some personas, their votes are recorded as `dependency_failure` abstentions.
+   - If fewer than `COUNCIL_QUORUM` decisive votes remain, the council degrades conservatively to `fallback_solo` (oracle settles solo from independent evidence).
+   - In peer reasoning (`buyPeerReasoning`), provider outages are captured in `outages` and skipped cleanly so remaining available peers can still be consulted without hanging.
 
 ---
 
@@ -328,6 +359,45 @@ LLM credentials (`GEMINI_API_KEY` / `ANTHROPIC_API_KEY` / etc.) are shared with 
 | `/vs/[id]` | A `Council verdict` card under the settlement explanation. Data from `/api/vs/[id]/council` (pure on-chain read). |
 
 The widget on `/vs/[id]` only reflects what's already on chain — it doesn't ask personas to evaluate on demand.
+
+---
+
+## Council independence assumptions & operator report
+
+While council quorum voting aggregates agent viewpoints to inform settlement, **council personas are correlated internal agents, NOT independently verified institutions or decentralized third-party oracles**.
+
+### Correlation and shared dependencies
+
+1. **Shared Foundation Model Provider:** All LLM-biased personas (and philosophers) query the same underlying model provider (e.g., Gemini). Upstream provider outages, safety filters, or prompt biases affect all LLM jurors simultaneously.
+2. **Shared Evidence Cache:** Personas evaluate the identical per-cycle cached HTTP text from the claim's resolution URL. They do not corroborate from independent primary web sources.
+3. **Peer-Reasoning Cascades:** When `COUNCIL_PEER_READS=1`, buyer personas purchase public takes from seller personas prior to voting, creating information dependencies and cascade risk.
+4. **Operational Custody:** All persona keypairs (`COUNCIL_<SLUG>_SECRET`) run within the same local Node worker process on Stellar.
+
+> **CRITICAL OPERATOR NOTICE:** Operators, UIs, and external protocols must **never** present or advertise council quorum or majority tally as an independently verified consortium or decentralized institutional consensus.
+
+### Generating the operator report
+
+Operators can audit the public configuration, provider groupings, evidence-source groupings, and correlation clusters using the operator CLI tool:
+
+```bash
+# Print formatted operator audit report to terminal
+npm run report:council-independence
+
+# Output raw JSON for automated monitoring or pipeline gates
+npm run report:council-independence -- --json
+
+# Generate Markdown report for pull requests or release notes
+npm run report:council-independence -- --markdown
+
+# Strict verification gate: exit code 1 if high correlation risk detected
+npm run report:council-independence -- --strict
+```
+
+### Module and API interfaces
+
+- **Core Module (`lib/council/independence.ts`):** Exports `buildCouncilIndependenceReport`, `evaluateQuorumIndependence`, and `formatCouncilIndependenceReport`.
+- **Quorum Gate (`lib/council/quorum.ts`):** `evaluateQuorum(ballot, quorum, { checkIndependence: true })` attaches independence evaluations to settlement ballots.
+- **Peer Reasoning (`agents/council/shared/peer-reasoning.ts`):** Exports `getPeerReasoningGroupings` and `describePeerReasoningCorrelation`.
 
 ---
 

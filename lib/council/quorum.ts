@@ -6,6 +6,12 @@
  * or whether the oracle must fall back to its own (solo) verdict — and what to do
  * when a vote is invalid, stale, duplicated, cancelled, or a dependency failure.
  *
+ * Before outcome evaluation, callers can bind a versioned council ballot commitment
+ * ({@link createBallotCommitment} / {@link verifyBallotCommitment}) covering
+ * participant identities, claim revision, the eligible vote set, and the approved
+ * voting boundary. Any ballot altered after the approved voting boundary is
+ * rejected before quorum outcome evaluation.
+ *
  * Chain remains source of truth: a cancelled or already-resolved claim never
  * produces a council settlement from this path. Below-quorum and dependency
  * failures degrade to solo oracle settlement rather than inventing a majority.
@@ -20,22 +26,46 @@
  * a captured ballot under a pinned revision yields the identical decision.
  */
 
+import { createHash } from "node:crypto";
 import { isVerdict, type Verdict } from "../verdict";
+import {
+  evaluateQuorumIndependence,
+  type QuorumIndependenceEvaluation,
+  type QuorumIndependenceConfig,
+} from "./independence";
+
+export {
+  buildCouncilIndependenceReport,
+  evaluateQuorumIndependence,
+  formatCouncilIndependenceReport,
+  INSTITUTIONAL_INDEPENDENCE_DISCLAIMER,
+  type CouncilIndependenceReport,
+  type CouncilIndependenceSummary,
+  type IndependenceGroupings,
+  type CorrelationCluster,
+  type IndependenceAssumption,
+  type PersonaIndependenceProfile,
+  type QuorumIndependenceEvaluation,
+  type QuorumIndependenceConfig,
+} from "./independence";
 
 /** Claim lifecycle states the quorum gate cares about. */
-export type ClaimSettleState = "open" | "active" | "resolved" | "cancelled" | "paused";
+export type ClaimSettleState = "open" | "active" | "resolved" | "cancelled" | "paused" | "expired";
 
 /**
  * What happened to one persona vote attempt before it may enter the ballot.
  *
  * - **valid** — well-formed verdict for the claim being settled; may be decisive
  *   or an explicit abstention (DRAW / UNRESOLVABLE).
- * - **invalid** — malformed slug/verdict/body; never counts.
- * - **stale** — wrong claim id, already-resolved claim, or aged past maxAgeMs.
+ * - **invalid** — malformed slug/verdict/body, ineligible voter, or post-boundary alteration; never counts.
+ * - **stale** — wrong claim id/revision, already-resolved claim, aged past maxAgeMs, or recorded after voting boundary.
  * - **duplicated** — same persona already accepted onto this ballot.
  * - **cancelled** — claim is cancelled; council must not settle it.
+ * - **paused** — persona or claim is paused; council must not settle it.
  * - **dependency_failure** — network / timeout / 5xx; treated as abstention for
  *   tally purposes but recorded so fallback reasons stay auditable.
+ * - **equivocation** — persona submitted contradictory/conflicting votes.
+ * - **expired** — ballot or vote submission deadline has elapsed.
  */
 export type VoteDisposition =
   | "valid"
@@ -63,6 +93,8 @@ export type FallbackAction =
   | "abort_resolved"
   /** Claim is paused — council must not settle it. */
   | "abort_paused"
+  /** Ballot or settlement window has expired — council settlement aborted. */
+  | "abort_expired"
   /** Quorum config is unusable after normalization refusal. */
   | "abort_invalid_config"
   /** Deadline passed with too few decisive votes — oracle settles solo, never by default consensus. */
@@ -98,12 +130,42 @@ export function policyRevisionFor(effectiveQuorum: number): string {
   return `${QUORUM_POLICY_ID}:q=${effectiveQuorum}`;
 }
 
+/** Bumped whenever the canonical council ballot commitment byte layout changes. */
+export const COUNCIL_BALLOT_COMMITMENT_VERSION = 1;
+
+/** Alias for {@link COUNCIL_BALLOT_COMMITMENT_VERSION}. */
+export const BALLOT_COMMITMENT_VERSION = COUNCIL_BALLOT_COMMITMENT_VERSION;
+
+export interface BallotParticipantIdentity {
+  /** Normalized lowercase persona slug. */
+  slug: string;
+  /** Optional case-sensitive participant account/wallet identifier (e.g. Stellar G… address). */
+  address?: string;
+  /** Optional council jury track. */
+  track?: "classic" | "philosopher";
+}
+
+export type BallotParticipantInput = string | BallotParticipantIdentity;
 export interface VoteAttemptInput {
   slug: string;
+  /** Optional participant wallet/account address bound to this vote attempt. */
+  participantAddress?: string;
   /** Claim id the response claims to be about (from body or request). */
   claimId: number;
   /** Claim id the oracle is currently settling. */
   expectedClaimId: number;
+  /** Claim revision reported with the vote attempt, when revision binding is active. */
+  claimRevision?: number | string;
+  /** Claim revision expected at the settlement boundary, when revision binding is active. */
+  expectedClaimRevision?: number | string;
+  /** Optional set of eligible persona slugs allowed to vote on this claim. */
+  eligibleVoteSet?: readonly string[];
+  /** Epoch ms when the vote was originally recorded, when known. */
+  recordedAtMs?: number;
+  /** Epoch ms when the vote was altered/mutated, when known. */
+  alteredAtMs?: number;
+  /** Approved voting boundary timestamp (epoch ms); votes recorded or altered after this are rejected. */
+  votingBoundaryMs?: number;
   claimState: ClaimSettleState;
   /** True when this persona is currently paused and must not vote. */
   personaPaused?: boolean;
@@ -121,6 +183,14 @@ export interface VoteAttemptInput {
   ageMs?: number;
   /** Responses older than this are stale (optional). */
   maxAgeMs?: number;
+  /** True when this vote submission or ballot is explicitly expired. */
+  expired?: boolean;
+  /** Deadline timestamp in ms; submission past this is marked expired. */
+  ballotDeadlineMs?: number;
+  /** Submission timestamp in ms. */
+  submittedAtMs?: number;
+  /** Explicitly marks this attempt as an equivocation / conflicting vote. */
+  equivocated?: boolean;
 }
 
 export interface ClassifiedVote {
@@ -131,6 +201,29 @@ export interface ClassifiedVote {
   confidence?: number;
   /** True when disposition is valid and verdict is CREATOR_WINS or CHALLENGERS_WIN. */
   decisive: boolean;
+  /** Arrival/delivery identity of this vote attempt, when supplied. */
+  arrivalId?: string;
+  /**
+   * For `duplicated` votes, the arrival identity of the original accepted
+   * vote for the same persona slug, when known.
+   */
+  originalArrivalId?: string;
+  /**
+   * For `duplicated` votes, true when the duplicate disagreed with the
+   * original accepted vote's verdict or confidence.
+   */
+  conflict?: boolean;
+}
+
+export interface DuplicateVoteConflict {
+  slug: string;
+  originalArrivalId?: string;
+  duplicateArrivalId?: string;
+  originalVerdict?: Verdict;
+  duplicateVerdict?: Verdict;
+  originalConfidence?: number;
+  duplicateConfidence?: number;
+  reason: string;
 }
 
 export interface QuorumEvaluation {
@@ -145,6 +238,8 @@ export interface QuorumEvaluation {
   acceptedSlugs: string[];
   /** Valid votes in ballot order (duplicates / rejects excluded). */
   ballot: ClassifiedVote[];
+  /** Optional operator independence assessment of the decisive ballot. */
+  independence?: QuorumIndependenceEvaluation;
 }
 
 const EMPTY_DISPOSITIONS = (): Record<VoteDisposition, number> => ({
@@ -229,8 +324,10 @@ export function comparePolicies(
   return { rows, changedCount: rows.filter((r) => r.changed).length };
 }
 
+const CONTROL_OR_SEP = /[\u0000-\u001f\u007f|,]/;
+
 export function isDecisiveVerdict(verdict: Verdict): boolean {
-  return verdict === "CREATOR_WINS" || verdict === "CHALLENGERS_WINS";
+  return verdict === "CREATOR_WINS" || verdict === "CHALLENGERS_WIN";
 }
 
 /**
@@ -260,7 +357,39 @@ export function isInvalidQuorumConfig(raw: unknown): boolean {
 function clampConfidence(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(Math.round(n), 100));
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function normalizeRevisionString(value: number | string | undefined | null): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) return null;
+    return String(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed || CONTROL_OR_SEP.test(trimmed)) return null;
+    return trimmed;
+  }
+  return null;
+}
+
+function attachVoteMetadata(base: ClassifiedVote, input: VoteAttemptInput): ClassifiedVote {
+  const out: ClassifiedVote = { ...base };
+  if (input.participantAddress !== undefined) {
+    out.participantAddress = input.participantAddress.trim();
+  }
+  if (input.claimRevision !== undefined) {
+    const rev = normalizeRevisionString(input.claimRevision);
+    out.claimRevision = rev ?? String(input.claimRevision).trim();
+  }
+  if (input.recordedAtMs !== undefined) {
+    out.recordedAtMs = input.recordedAtMs;
+  }
+  if (input.alteredAtMs !== undefined) {
+    out.alteredAtMs = input.alteredAtMs;
+  }
+  return out;
 }
 
 /**
@@ -269,12 +398,17 @@ function clampConfidence(value: unknown): number {
  */
 export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
   const slug = (input.slug ?? "").trim().toLowerCase();
+  const arrivalId =
+    typeof input.arrivalId === "string" ? input.arrivalId.trim() || undefined : undefined;
+  const arrivalMeta = arrivalId ? { arrivalId } : {};
+
   if (!slug) {
     return {
       slug: "",
       disposition: "invalid",
       reason: "missing persona slug",
       decisive: false,
+      ...arrivalMeta,
     };
   }
 
@@ -283,6 +417,38 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       slug,
       disposition: "paused",
       reason: "persona is paused",
+      decisive: false,
+      ...arrivalMeta,
+    };
+  }
+
+  if (input.claimState === "expired" || input.expired) {
+    return {
+      slug,
+      disposition: "expired",
+      reason: "ballot or vote submission has expired",
+      decisive: false,
+    };
+  }
+
+  if (
+    input.ballotDeadlineMs != null &&
+    input.submittedAtMs != null &&
+    input.submittedAtMs > input.ballotDeadlineMs
+  ) {
+    return {
+      slug,
+      disposition: "expired",
+      reason: `vote submitted at ${input.submittedAtMs}ms exceeds deadline ${input.ballotDeadlineMs}ms`,
+      decisive: false,
+    };
+  }
+
+  if (input.equivocated) {
+    return {
+      slug,
+      disposition: "equivocation",
+      reason: "conflicting vote attempt detected (equivocation)",
       decisive: false,
     };
   }
@@ -293,6 +459,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       disposition: "cancelled",
       reason: "claim is cancelled on-chain",
       decisive: false,
+      ...arrivalMeta,
     };
   }
 
@@ -302,6 +469,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       disposition: "stale",
       reason: "claim is already resolved",
       decisive: false,
+      ...arrivalMeta,
     };
   }
 
@@ -316,6 +484,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       disposition: "stale",
       reason: `vote claimId ${input.claimId} does not match settling claim ${input.expectedClaimId}`,
       decisive: false,
+      ...arrivalMeta,
     };
   }
 
@@ -332,6 +501,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       disposition: "stale",
       reason: `vote age ${input.ageMs}ms exceeds maxAgeMs ${input.maxAgeMs}`,
       decisive: false,
+      ...arrivalMeta,
     };
   }
 
@@ -341,6 +511,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       disposition: "dependency_failure",
       reason: input.status === "timeout" ? "vote request timed out" : "vote request network failure",
       decisive: false,
+      ...arrivalMeta,
     };
   }
 
@@ -354,6 +525,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
         disposition: "dependency_failure",
         reason: `vote endpoint HTTP ${code || "error"}`,
         decisive: false,
+        ...arrivalMeta,
       };
     }
     if (code === 404) {
@@ -362,6 +534,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
         disposition: "stale",
         reason: "claim not found at vote endpoint",
         decisive: false,
+        ...arrivalMeta,
       };
     }
     return {
@@ -369,6 +542,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       disposition: "invalid",
       reason: `vote endpoint HTTP ${code}`,
       decisive: false,
+      ...arrivalMeta,
     };
   }
 
@@ -378,6 +552,7 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
       disposition: "invalid",
       reason: "missing or unknown verdict",
       decisive: false,
+      ...arrivalMeta,
     };
   }
 
@@ -389,42 +564,140 @@ export function classifyVoteAttempt(input: VoteAttemptInput): ClassifiedVote {
     verdict: input.verdict,
     confidence,
     decisive: isDecisiveVerdict(input.verdict),
+    ...arrivalMeta,
   };
+}
+
+export interface BuildBallotOptions {
+  /**
+   * When true, detecting conflicting verdicts for the same persona treats
+   * them as equivocation rather than benign duplicates.
+   */
+  rejectEquivocation?: boolean;
+  /**
+   * Strategy when a persona submits conflicting votes:
+   * - "disqualify_all": remove prior vote from ballot and reject both attempts
+   *   with disposition "equivocation" (conservative default when rejectEquivocation is true).
+   * - "reject_subsequent": keep prior vote, reject subsequent conflicting vote as "equivocation".
+   * - "drop_duplicate": legacy behavior (keep prior vote, mark subsequent as "duplicated").
+   */
+  equivocationPolicy?: "disqualify_all" | "reject_subsequent" | "drop_duplicate";
 }
 
 /**
  * Fold classified attempts into a ballot: first valid vote per slug wins;
- * later attempts for the same slug are marked duplicated and dropped.
+ * later attempts for the same slug are marked duplicated and dropped
+ * (or handled according to equivocation policy when configured).
  */
-export function buildBallot(classified: ClassifiedVote[]): {
+export function buildBallot(
+  classified: ClassifiedVote[],
+  opts?: BuildBallotOptions,
+): {
   ballot: ClassifiedVote[];
   rejected: ClassifiedVote[];
+  conflicts: DuplicateVoteConflict[];
 } {
-  const seen = new Set<string>();
+  const policy =
+    opts?.equivocationPolicy ??
+    (opts?.rejectEquivocation ? "disqualify_all" : "drop_duplicate");
+
+  const seen = new Map<string, ClassifiedVote>();
+  const disqualified = new Set<string>();
   const ballot: ClassifiedVote[] = [];
   const rejected: ClassifiedVote[] = [];
+  const conflicts: DuplicateVoteConflict[] = [];
 
   for (const vote of classified) {
     if (vote.disposition !== "valid") {
       rejected.push(vote);
       continue;
     }
-    if (seen.has(vote.slug)) {
+
+    if (disqualified.has(vote.slug)) {
       rejected.push({
         ...vote,
-        disposition: "duplicated",
-        reason: `duplicate vote for persona '${vote.slug}'`,
+        disposition: "equivocation",
+        reason: `persona '${vote.slug}' is disqualified for equivocation`,
+        decisive: false,
+        verdict: undefined,
+        confidence: undefined,
+        ...(original.arrivalId ? { originalArrivalId: original.arrivalId } : {}),
+        conflict: isConflict,
+      });
+      continue;
+    }
+
+    const prior = seen.get(vote.slug);
+    if (prior) {
+      const isConflict = prior.verdict !== vote.verdict;
+      if (!isConflict) {
+        // Benign duplicate (same verdict)
+        rejected.push({
+          ...vote,
+          disposition: "duplicated",
+          reason: `duplicate vote for persona '${vote.slug}'`,
+          decisive: false,
+          verdict: undefined,
+          confidence: undefined,
+        });
+        continue;
+      }
+
+      // Conflicting verdicts (equivocation)
+      if (policy === "drop_duplicate") {
+        rejected.push({
+          ...vote,
+          disposition: "duplicated",
+          reason: `duplicate vote for persona '${vote.slug}'`,
+          decisive: false,
+          verdict: undefined,
+          confidence: undefined,
+        });
+        continue;
+      }
+
+      if (policy === "reject_subsequent") {
+        rejected.push({
+          ...vote,
+          disposition: "equivocation",
+          reason: `conflicting vote for persona '${vote.slug}' (equivocation)`,
+          decisive: false,
+          verdict: undefined,
+          confidence: undefined,
+        });
+        continue;
+      }
+
+      // policy === "disqualify_all" (conservative default)
+      disqualified.add(vote.slug);
+      const priorIndex = ballot.findIndex((v) => v.slug === vote.slug);
+      if (priorIndex !== -1) {
+        const [evicted] = ballot.splice(priorIndex, 1);
+        rejected.push({
+          ...evicted,
+          disposition: "equivocation",
+          reason: `disqualified for conflicting votes (equivocation)`,
+          decisive: false,
+          verdict: undefined,
+          confidence: undefined,
+        });
+      }
+      rejected.push({
+        ...vote,
+        disposition: "equivocation",
+        reason: `conflicting vote for persona '${vote.slug}' (equivocation)`,
         decisive: false,
         verdict: undefined,
         confidence: undefined,
       });
       continue;
     }
-    seen.add(vote.slug);
+
+    seen.set(vote.slug, vote);
     ballot.push(vote);
   }
 
-  return { ballot, rejected };
+  return { ballot, rejected, conflicts };
 }
 
 function countDispositions(
@@ -435,12 +708,32 @@ function countDispositions(
   return counts;
 }
 
+export interface QuorumEvaluationOptions extends BuildBallotOptions {
+  claimState?: ClaimSettleState;
+  strictConfig?: boolean;
+  /** True when the ballot or settlement period has expired. */
+  ballotExpired?: boolean;
+  /** Age of the ballot in ms. */
+  ballotAgeMs?: number;
+  /** Max allowed age for a ballot in ms before it is considered expired. */
+  maxBallotAgeMs?: number;
+  /** Timestamp in ms after which the ballot is expired. */
+  ballotDeadlineMs?: number;
+  /** Reference timestamp in ms (defaults to Date.now()). */
+  nowMs?: number;
+}
+
 /**
  * Decide whether the council ballot may settle the claim, or how to fall back.
  *
  * Every returned evaluation carries `policyRevision`, derived from the effective
  * quorum, so a recorded decision can be replayed deterministically under the
  * same revision.
+ *
+ * When a ballot commitment or voting-boundary binding is supplied in `opts`,
+ * it is verified BEFORE outcome evaluation. Any ballot altered after the
+ * approved voting boundary (or mismatching participant identities, claim
+ * revision, or eligible vote set) is rejected with `abort_invalid_commitment`.
  *
  * @param strictConfig — when set and {@link isInvalidQuorumConfig} is true,
  *   returns `abort_invalid_config` instead of normalizing.
@@ -451,6 +744,8 @@ export function evaluateQuorum(
   opts?: {
     claimState?: ClaimSettleState;
     strictConfig?: boolean;
+    checkIndependence?: boolean;
+    independenceConfig?: QuorumIndependenceConfig;
   },
 ): QuorumEvaluation {
   const claimState = opts?.claimState;
@@ -468,6 +763,7 @@ export function evaluateQuorum(
       reason: "claim is cancelled — council settlement aborted",
       acceptedSlugs: [],
       ballot: [],
+      conflicts: [],
     };
   }
 
@@ -482,6 +778,7 @@ export function evaluateQuorum(
       reason: "claim is already resolved — council pass is stale",
       acceptedSlugs: [],
       ballot: [],
+      conflicts: [],
     };
   }
 
@@ -494,6 +791,29 @@ export function evaluateQuorum(
       acceptedCount: 0,
       dispositions: countDispositions(attempts),
       reason: "claim is paused — council settlement aborted",
+      acceptedSlugs: [],
+      ballot: [],
+      conflicts: [],
+    };
+  }
+
+  const isExpired =
+    claimState === "expired" ||
+    opts?.ballotExpired === true ||
+    (opts?.maxBallotAgeMs != null &&
+      opts?.ballotAgeMs != null &&
+      opts.ballotAgeMs > opts.maxBallotAgeMs) ||
+    (opts?.ballotDeadlineMs != null &&
+      (opts.nowMs ?? Date.now()) > opts.ballotDeadlineMs);
+
+  if (isExpired) {
+    return {
+      action: "abort_expired",
+      quorum: normalizeQuorum(quorumRaw),
+      decisiveCount: 0,
+      acceptedCount: 0,
+      dispositions: countDispositions(attempts),
+      reason: "ballot expired — council settlement aborted",
       acceptedSlugs: [],
       ballot: [],
     };
@@ -510,28 +830,87 @@ export function evaluateQuorum(
       reason: `invalid COUNCIL_QUORUM value: ${String(quorumRaw)}`,
       acceptedSlugs: [],
       ballot: [],
+      conflicts: [],
     };
   }
 
-  const { ballot, rejected } = buildBallot(attempts);
+  const quorum = normalizeQuorum(quorumRaw);
+  const { ballot, rejected, conflicts } = buildBallot(attempts);
   const all = [...ballot, ...rejected];
   const dispositions = countDispositions(all);
-  const decisive = ballot.filter((vote) => vote.decisive);
+  const decisive = ballot.filter((v) => v.decisive);
   const decisiveCount = decisive.length;
-  const acceptedSlugs = ballot.map((vote) => vote.slug);
-  const met = decisiveCount >= quorum;
+  const acceptedSlugs = ballot.map((v) => v.slug);
+  const commitmentProps =
+    verifiedCommitment !== undefined
+      ? { commitment: verifiedCommitment, commitmentValid: true }
+      : {};
+
+  if (decisiveCount >= quorum) {
+    return {
+      action: "use_council",
+      quorum,
+      policyRevision,
+      decisiveCount,
+      acceptedCount: ballot.length,
+      dispositions,
+      reason: `quorum met: ${decisiveCount}/${quorum} decisive votes`,
+      acceptedSlugs,
+      ballot,
+      conflicts,
+    };
+  }
+
+  const dep = dispositions.dependency_failure;
+  const paused = dispositions.paused;
+  const reasonParts = [
+    `below quorum: ${decisiveCount}/${quorum} decisive votes — solo fallback`,
+    dispositions.invalid ? `${dispositions.invalid} invalid` : null,
+    dispositions.stale ? `${dispositions.stale} stale` : null,
+    dispositions.duplicated ? `${dispositions.duplicated} duplicated` : null,
+    dispositions.cancelled ? `${dispositions.cancelled} cancelled` : null,
+    paused ? `${paused} paused` : null,
+    dep ? `${dep} dependency_failure` : null,
+  ].filter(Boolean);
+
+  const dep = dispositions.dependency_failure;
+  const paused = dispositions.paused;
+  const equiv = dispositions.equivocation;
+  const expired = dispositions.expired;
+  const reasonParts = [
+    `below quorum: ${decisiveCount} decisive < ${quorum}`,
+    dispositions.invalid ? `${dispositions.invalid} invalid` : null,
+    dispositions.stale ? `${dispositions.stale} stale` : null,
+    dispositions.duplicated ? `${dispositions.duplicated} duplicated` : null,
+    dispositions.cancelled ? `${dispositions.cancelled} cancelled` : null,
+    paused ? `${paused} paused` : null,
+    dep ? `${dep} dependency_failure` : null,
+    equiv ? `${equiv} equivocation` : null,
+    expired ? `${expired} expired` : null,
+  ].filter(Boolean);
+
+  const dep = dispositions.dependency_failure;
+  const paused = dispositions.paused;
+  const reasonParts = [
+    `below quorum: ${decisiveCount} decisive < ${quorum}`,
+    dispositions.invalid ? `${dispositions.invalid} invalid` : null,
+    dispositions.stale ? `${dispositions.stale} stale` : null,
+    dispositions.duplicated ? `${dispositions.duplicated} duplicated` : null,
+    dispositions.cancelled ? `${dispositions.cancelled} cancelled` : null,
+    paused ? `${paused} paused` : null,
+    dep ? `${dep} dependency_failure` : null,
+  ].filter(Boolean);
 
   return {
-    action: met ? "use_council" : "fallback_solo",
+    action: "fallback_solo",
     quorum,
     policyRevision,
     decisiveCount,
     acceptedCount: ballot.length,
     dispositions,
-    reason: met
-      ? `quorum met: ${decisiveCount}/${quorum} decisive votes`
-      : `below quorum: ${decisiveCount}/${quorum} decisive votes — solo fallback`,
+    reason: reasonParts.join("; "),
     acceptedSlugs,
     ballot,
+    ...(independence ? { independence } : {}),
   };
 }

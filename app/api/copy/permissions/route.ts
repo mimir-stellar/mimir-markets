@@ -226,6 +226,7 @@ export async function POST(req: Request): Promise<Response> {
 
   const record: CopyPermission = { ...permission, signedPolicyHash };
   await saveCopyPermission(record);
+  invalidateCopyPreviewsForPermission(record.permissionId);
 
   const feedback = await evaluateCopyPermissionOnchain(record);
   return jsonResponse({
@@ -284,6 +285,7 @@ export async function DELETE(req: Request): Promise<Response> {
 
   const revoked: CopyPermission = { ...permission, status: "revoked" };
   await saveCopyPermission(revoked);
+  invalidateCopyPreviewsForPermission(revoked.permissionId);
 
   const feedback = await evaluateCopyPermissionOnchain(revoked);
   return jsonResponse({

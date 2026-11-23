@@ -73,30 +73,38 @@ pub fn push(env: &Env, usdc: &Address, to: &Address, amount: i128) {
     client.transfer(&env.current_contract_address(), to, &amount);
 }
 
-/// Snapshot of a fee account in exact atomic USDC units.
+/// Split `total` atomic USDC across `shares` (basis points summing to 10_000).
 ///
-/// Field meanings are stable:
-/// - `accrued`: total fees ever credited to the account.
-/// - `claimed`: total fees already withdrawn by the account owner.
-/// - `outstanding`: `accrued - claimed`, the amount still claimable.
-///
-/// `accrued == 0` means no accrual ever happened; `accrued > 0` with
-/// `outstanding == 0` means the balance is fully claimed. These two states are
-/// therefore distinguishable from the values alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FeeBalance {
-    pub accrued: i128,
-    pub claimed: i128,
-    pub outstanding: i128,
-}
-
-/// Build a [`FeeBalance`] from accrued and claimed atomic amounts.
-pub fn fee_balance(accrued: i128, claimed: i128) -> FeeBalance {
-    FeeBalance {
-        accrued,
-        claimed,
-        outstanding: accrued - claimed,
+/// Each recipient receives `floor(total * share / 10_000)`. Any indivisible
+/// remainder is assigned to the final recipient so the allocations always sum
+/// exactly to `total`, preserving escrow conservation for tiny stakes.
+pub fn allocate_exact(total: i128, shares: &[u32]) -> Result<soroban_sdk::Vec<i128>, Error> {
+    if total < 0 || shares.is_empty() {
+        return Err(Error::ZeroStake);
     }
+    let mut sum: u32 = 0;
+    for s in shares {
+        sum = sum.checked_add(*s).ok_or(Error::ZeroStake)?;
+    }
+    if sum != 10_000 {
+        return Err(Error::ZeroStake);
+    }
+    let mut out = soroban_sdk::Vec::new(&soroban_sdk::Env::default());
+    let mut allocated: i128 = 0;
+    let last = shares.len() - 1;
+    for (i, s) in shares.iter().enumerate() {
+        let amt = if i == last {
+            total - allocated
+        } else {
+            total
+                .checked_mul(*s as i128)
+                .ok_or(Error::ZeroStake)?
+                / 10_000
+        };
+        allocated += amt;
+        out.push_back(amt);
+    }
+    Ok(out)
 }
 
 pub fn balance(env: &Env, usdc: &Address) -> i128 {

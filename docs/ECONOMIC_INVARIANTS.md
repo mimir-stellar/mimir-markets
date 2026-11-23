@@ -49,6 +49,17 @@ Source: `contracts-soroban/mimir-market/src/fees.rs`, mirrored off-chain in
 - Exact-balance intake (`escrow::pull`) rejects fee-on-transfer and rebasing
   behaviour: the contract asserts escrow moved by exactly the requested amount and
   errors with `UnsupportedToken` otherwise.
+- Generated clients can inspect the bounded fee-policy compatibility descriptor via
+  `get_fee_policy_compatibility`, which returns `FeePolicyCompatibility` in O(1)
+  instance storage reads: `schema_version`, bounded `supported_fields`
+  (`platform_fee_bps`, `agent_owner_fee_bps`, `platform_recipient`,
+  `agent_owner_recipient`, `revision`), hard caps (`max_total_fee_bps`,
+  `bps_divisor`, `fee_timelock_seconds`, `usdc_decimals`, `min_stake`),
+  `rounding_mode` (`FeeRoundingMode::FloorPerLegParticipantRemainder`),
+  `profit_only`, `pull_based_payouts`, `exact_usdc_escrow`, and live
+  `current_revision`, `current_total_fee_bps`, and `has_pending_policy`. Uninitialized
+  contracts fail closed with `Error::NotInitialized`. Tests:
+  `src/test_fee_policy_compat.rs`.
 
 ### Principal-safe payout preview
 
@@ -79,24 +90,24 @@ established gross meaning for `total_return_multiple` and gains a `fee_adjusted`
 marker, so the fee-adjusted and fee-unknown cases stay distinguishable without
 renaming an event or an envelope field.
 
-### Settlement explanation
+### Payout preview completeness under truncated history
 
-The settlement explanation shown to a participant breaks a payout into its
-components — principal, gain, fees and claimable amount — each as a separate
-labelled integer atomic value. The four figures are derived from the same
-principal-safe split above, so they reconcile exactly:
+When aggregating payout preview and liability across claim history (`preview_creator_payouts`
+and `preview_claims_batch` in `contracts-soroban/mimir-market/src/fees.rs` and `contract.rs`),
+the aggregate explicitly reports completeness:
 
-- `principal + gain = gross`, where `gain = max(gross - principal, 0)`.
-- `fees` is the profit-only fee taken from `gain` using the claim's snapshot,
-  and `claimable = gross - fees`, which is the `netPayout` preview.
-- All values are exact integers at 7 decimals; no floating-point rounding is
-  applied, and the explanation never recomputes fees from live policy.
-- A figure whose underlying observation is unresolved (snapshot `loading`,
-  `unavailable` or `invalid`) is labelled as unresolved rather than shown as a
-  definitive amount, and the claimable figure is then presented as a ceiling.
-- Tests: `tests/node/settlement-explanation.test.ts` covers the component split,
-  the sum identity, the zero-gain (break-even) boundary, and an unresolved
-  snapshot being labelled rather than asserted.
+- **Explicit missing observations:** If claim history is truncated by pagination
+  (`limit < total_claims` or `offset > 0`) or if any claim in a requested batch cannot be
+  observed, `missing_observations` is marked explicitly and `is_complete` is `false`.
+- **Incomplete aggregates are never presented as verified total liability:**
+  `verified_total_liability` is `Option::Some(aggregate_liability)` ONLY when
+  `is_complete` is `true` (`missing_observations == 0` and `is_truncated == false`).
+  Whenever history is truncated or incomplete, `verified_total_liability` is `None`,
+  preventing any caller or keeper from presenting an incomplete aggregate as a verified
+  total liability.
+- Tests: `src/test_payout_preview_completeness.rs`. Covers complete history, limit-truncated
+  slices, offset-truncated slices, missing observations, boundary limits, and fixed-odds
+  reserved liability accounting.
 
 ### Settlement conservation
 

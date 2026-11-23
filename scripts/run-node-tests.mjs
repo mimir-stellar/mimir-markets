@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import satisfies from "semver/functions/satisfies.js";
 
 export const RUNNER_VERSION = 1;
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -301,6 +302,10 @@ export function buildTestEnvironment({ sourceEnvironment = process.env, cacheDir
     if (key in sourceEnvironment) env[key] = sourceEnvironment[key];
   }
 
+  if (!env.PATH && sourceEnvironment.Path) {
+    env.PATH = sourceEnvironment.Path;
+  }
+
   if (includeDatabase) {
     for (const key of DATABASE_ENV_KEYS) {
       if (key in sourceEnvironment) env[key] = sourceEnvironment[key];
@@ -322,10 +327,10 @@ export function buildTestEnvironment({ sourceEnvironment = process.env, cacheDir
  * the identity inputs. The manifest lets the cache be invalidated when inputs
  * (Node version, lockfile, tsx version) change.
  */
-export function prepareCompileCache(cacheDirectory, root = ROOT) {
+export function prepareCompileCache(cacheDirectory, root = ROOT, nodeVersion = process.versions.node) {
   mkdirSync(cacheDirectory, { recursive: true, mode: 0o700 });
   assertDirectory(cacheDirectory);
-  const identity = cacheIdentity(root);
+  const identity = cacheIdentity(root, nodeVersion);
   const manifestPath = path.join(cacheDirectory, "manifest.json");
   writeFileSync(manifestPath, JSON.stringify(identity, null, 2), "utf8");
 }
@@ -354,11 +359,17 @@ export function runNodeTests({
   root = ROOT,
   sourceEnvironment = process.env,
   spawn = spawnSync,
+  nodeVersion = process.versions.node,
 } = {}) {
   const options = typeof argv === "string" ? parseArgs(argv.split(" "), root) : parseArgs(argv, root);
   if (options.help || options.helpJson) {
     console.log(options.helpJson ? JSON.stringify({ flags: FLAGS }, null, 2) : usage());
     return 0;
+  }
+
+  const { engines } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  if (!satisfies(nodeVersion, engines.node)) {
+    fail(`Detected Node.js ${nodeVersion}. This project requires ${engines.node}. Run nvm use in the repository root and retry.`);
   }
 
   const allFiles = discoverTestFiles(root);
@@ -374,14 +385,14 @@ export function runNodeTests({
   }
 
   const cacheRoot = options.cacheDir ?? sourceEnvironment.MIMIR_NODE_TEST_CACHE_DIR ?? DEFAULT_CACHE_ROOT;
-  const cacheEnabled = options.cache && supportsCompileCache();
+  const cacheEnabled = options.cache && supportsCompileCache(nodeVersion);
   let cacheDirectory;
   if (cacheEnabled || options.clearCache) {
-    cacheDirectory = compileCacheDirectory({ root, cacheRoot });
+    cacheDirectory = compileCacheDirectory({ root, cacheRoot, nodeVersion });
     if (options.clearCache) removeDirectory(cacheDirectory);
     if (cacheEnabled) {
       try {
-        prepareCompileCache(cacheDirectory, root);
+        prepareCompileCache(cacheDirectory, root, nodeVersion);
       } catch (error) {
         console.error(`Node compile cache unavailable; continuing without it. ${error instanceof Error ? error.message : "Cache setup failed."}`);
         cacheDirectory = undefined;
@@ -401,6 +412,7 @@ export function runNodeTests({
 
   const args = buildChildArgs({
     files,
+    nodeVersion,
     coverage: Boolean(coverage),
     coveragePath,
   });

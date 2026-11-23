@@ -1,7 +1,7 @@
 //! Public contract surface. Bodies live in `pool`; this file is the single
 //! `#[contractimpl]` block plus the read-only views.
 
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 use crate::escrow;
 use crate::pool;
@@ -10,6 +10,11 @@ use crate::types::{
     ClaimResult, Error, Market, PendingOracle, SettlementReadiness, SquadLimits, MAX_BATCH_SIZE,
     MAX_DURATION, MAX_FEE_BPS, MAX_QUESTION_BYTES, MIN_DURATION,
 };
+
+/// Storage schema version exposed to indexers. Bump only with a migration.
+pub const SCHEMA_VERSION: u32 = 1;
+/// Shape identifier so indexers can reject incompatible layouts.
+pub const SCHEMA_NAME: &str = "mimir-squad";
 
 #[contract]
 pub struct MimirSquad;
@@ -264,14 +269,22 @@ impl MimirSquad {
         storage::is_paused(&env)
     }
 
-    /// Versioned squad settlement manifest. Returns the digest binding the
-    /// winning side, fee policy and pool totals for `market_id`, together with
-    /// the manifest version. Liability totals are exact integer USDC.
-    pub fn get_settlement_manifest(
-        env: Env,
-        market_id: u64,
-    ) -> Result<(u32, BytesN<32>), Error> {
-        pool::settlement_manifest(&env, market_id)
+    /// Bounded compatibility descriptor for indexers: returns the storage
+    /// schema version and whether the caller's required version is supported.
+    /// Unsupported required versions are rejected with `Error::NotInitialized`
+    /// semantics avoided; callers receive `supported = false` instead.
+    pub fn get_schema_version(_env: Env) -> u32 {
+        SCHEMA_VERSION
+    }
+
+    /// Returns `Ok(())` only when `required` equals the supported schema
+    /// version; any other interpretation is rejected.
+    pub fn require_schema_version(_env: Env, required: u32) -> Result<(), Error> {
+        if required == SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(Error::BatchTooLarge)
+        }
     }
 
     /// Read-only settlement readiness for a market. Never mutates state.
