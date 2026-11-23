@@ -18,7 +18,21 @@
  *    dropping a field is how a caller believes it set a cap that never applied.
  *  - **Every response carries its version**, so a cached body can be identified
  *    later rather than guessed at from its keys.
+ *  - **Repeated scalar query parameters with differing values are refused.**
+ *    Taking the first or last value silently would let a caller believe a filter
+ *    applied when another one was actually used.
+ *
+ * Observation freshness (feed, detail and performance endpoints) shares one
+ * meaning via `ObservationFreshness` / `observationFreshness()` below: trusted
+ * ledger, observation time and known gaps are always reported under the same keys.
+ *
+ * Pagination cursors are bound to the normalized query they were issued for
+ * (see `bindCursor` / `verifyCursor`): a cursor minted under one sort or filter
+ * selection is refused under any other, so a client cannot silently splice pages
+ * from two different result sets together.
  */
+
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const API_SCHEMA_VERSION = 1;
 
@@ -70,6 +84,202 @@ export function resolveRequestVersion(
   return { ok: true, version };
 }
 
+// ── Observation freshness ─────────────────────────────────────────────────────
+
+/**
+ * Freshness metadata attached to every market observation payload (feed, detail
+ * and performance endpoints). The same keys and meaning apply everywhere.
+ *
+ *  - `trustedLedger`: the ledger sequence the observation was read from. Soroban
+ *    contract state is authoritative; this is the ledger the Postgres read index
+ *    was verified against. `null` when no trusted ledger is known.
+ *  - `observedAt`: ISO-8601 UTC time the observation was taken.
+ *  - `knownGaps`: ledger ranges or sources known to be missing from the index.
+ *    Empty when the observation is complete.
+ */
+export interface ObservationFreshness {
+  trustedLedger: number | null;
+  observedAt: string;
+  knownGaps: string[];
+}
+
+export interface ObservationFreshnessInput {
+  trustedLedger?: number | null;
+  observedAt: Date | string;
+  knownGaps?: readonly string[];
+}
+
+/**
+ * Build the shared freshness block. Normalises the observation time to ISO UTC,
+ * rejects an invalid time or a non-integer ledger rather than emitting them, and
+ * copies `knownGaps` so callers cannot mutate a returned payload.
+ */
+export function observationFreshness(input: ObservationFreshnessInput): ObservationFreshness {
+  const observed = input.observedAt instanceof Date ? input.observedAt : new Date(input.observedAt);
+  if (Number.isNaN(observed.getTime())) {
+    throw new RangeError("observedAt must be a valid date");
+  }
+  const ledger = input.trustedLedger ?? null;
+  if (ledger !== null && (!Number.isInteger(ledger) || ledger < 0)) {
+    throw new RangeError("trustedLedger must be a non-negative integer or null");
+  }
+  return {
+    trustedLedger: ledger,
+    observedAt: observed.toISOString(),
+    knownGaps: [...(input.knownGaps ?? [])],
+  };
+}
+
+// ── Query parameters ──────────────────────────────────────────────────────────
+
+export interface ScalarParamVerdict {
+  ok: boolean;
+  /** The single agreed value for the parameter. Present when ok and the key was supplied. */
+  value?: string;
+  reason?: "conflicting_values";
+  /** Stable field-level error message. Present when not ok. */
+  error?: string;
+  /** The distinct values that were sent. Present when not ok. */
+  values?: string[];
+}
+
+/**
+ * Resolve a scalar query parameter that may be repeated.
+ *
+ * Accepts the raw values as they come from the request (`string | string[] | undefined`).
+ * A single occurrence, or repeated occurrences that all carry the same value, resolve
+ * to that value. Repeated occurrences with differing values are refused with a stable
+ * field-level error rather than silently trusting the first or last value.
+ */
+export function resolveScalarParam(
+  name: string,
+  raw: string | readonly string[] | null | undefined,
+): ScalarParamVerdict {
+  if (raw === undefined || raw === null) return { ok: true };
+  const list = typeof raw === "string" ? [raw] : [...raw];
+  if (list.length === 0) return { ok: true };
+  const distinct = Array.from(new Set(list));
+  if (distinct.length > 1) {
+    return {
+      ok: false,
+      reason: "conflicting_values",
+      error: `${name} was supplied more than once with conflicting values`,
+      values: distinct,
+    };
+  }
+  return { ok: true, value: distinct[0] };
+}
+
+// ── Pagination cursors ────────────────────────────────────────────────────────
+
+/**
+ * Query parameters that determine which records a cursor walks through and in
+ * what order. Anything that changes the result set or its ordering belongs here.
+ */
+export interface CursorQuery {
+  sort?: string;
+  order?: "asc" | "desc";
+  filters?: Record<string, string | number | boolean | null | undefined>;
+}
+
+/**
+ * Canonical string form of a query: keys sorted, empty/undefined filters dropped,
+ * values stringified. Two requests that mean the same selection normalize to the
+ * same string regardless of parameter order or casing of the sort direction.
+ */
+export function normalizeCursorQuery(query: CursorQuery): string {
+  const filters: Record<string, string> = {};
+  for (const key of Object.keys(query.filters ?? {}).sort()) {
+    const value = query.filters![key];
+    if (value === undefined || value === null || value === "") continue;
+    filters[key] = String(value);
+  }
+  return JSON.stringify({
+    sort: query.sort ?? "",
+    order: (query.order ?? "asc").toLowerCase(),
+    filters,
+  });
+}
+
+/** Payload carried inside a cursor. `b` binds it to a normalized query. */
+export interface CursorPayload {
+  /** Position: the last sort key and record id seen on the previous page. */
+  k: string | number;
+  i: string;
+  /** Query binding: a digest of the normalized query the cursor was issued for. */
+  b: string;
+}
+
+export type CursorVerdict =
+  | { ok: true; payload: CursorPayload }
+  | { ok: false; reason: "malformed_cursor" | "cursor_query_mismatch" };
+
+function queryDigest(query: CursorQuery, secret: string): string {
+  return createHmac("sha256", secret).update(normalizeCursorQuery(query)).digest("base64url").slice(0, 22);
+}
+
+/**
+ * Mint an opaque cursor for the next page, bound to the query it was issued for.
+ * `secret` is the server-side key; clients never learn the digest's preimage.
+ */
+export function bindCursor(
+  position: { key: string | number; id: string },
+  query: CursorQuery,
+  secret: string,
+): string {
+  const payload: CursorPayload = { k: position.key, i: position.id, b: queryDigest(query, secret) };
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+/**
+ * Decode a cursor and check it was issued for `query`. A cursor minted under a
+ * different sort or filter selection is refused rather than applied, since its
+ * position is meaningless against the new result set.
+ */
+export function verifyCursor(cursor: string, query: CursorQuery, secret: string): CursorVerdict {
+  let payload: CursorPayload;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      typeof (parsed as CursorPayload).b !== "string" ||
+      typeof (parsed as CursorPayload).i !== "string" ||
+      (typeof (parsed as CursorPayload).k !== "string" && typeof (parsed as CursorPayload).k !== "number")
+    ) {
+      return { ok: false, reason: "malformed_cursor" };
+    }
+    payload = parsed as CursorPayload;
+  } catch {
+    return { ok: false, reason: "malformed_cursor" };
+  }
+
+  const expected = Buffer.from(queryDigest(query, secret));
+  const actual = Buffer.from(payload.b);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    return { ok: false, reason: "cursor_query_mismatch" };
+  }
+  return { ok: true, payload };
+}
+
+/**
+ * Deterministic ordering comparator for equal-ranked records: sort key first,
+ * then record id as a stable tiebreak. Pages never skip or repeat records that
+ * share a sort key, because the position is (key, id), not key alone.
+ */
+export function compareWithTiebreak(
+  a: { key: string | number; id: string },
+  b: { key: string | number; id: string },
+  order: "asc" | "desc" = "asc",
+): number {
+  const sign = order === "desc" ? -1 : 1;
+  if (a.key < b.key) return -1 * sign;
+  if (a.key > b.key) return 1 * sign;
+  if (a.id < b.id) return -1;
+  if (a.id > b.id) return 1;
+  return 0;
+}
+
 // ── Minimal shape checking ────────────────────────────────────────────────────
 
 export type FieldType = "string" | "number" | "integer" | "boolean" | "array" | "object";
@@ -83,6 +293,10 @@ export interface FieldSpec {
   min?: number;
   /** Strings: allowed values. */
   oneOf?: readonly string[];
+  /** Arrays: maximum number of items. */
+  maxItems?: number;
+  /** Arrays: maximum total UTF-8 bytes across string items. */
+  maxTotalBytes?: number;
 }
 
 export type ShapeSpec = Record<string, FieldSpec>;
@@ -130,6 +344,22 @@ export function checkShape(payload: unknown, spec: ShapeSpec): ShapeResult {
       errors.push(`${field} must be a ${rule.type}`);
       continue;
     }
+    if (Array.isArray(value)) {
+      if (rule.maxItems !== undefined && value.length > rule.maxItems) {
+        errors.push(`${field} must have at most ${rule.maxItems} items`);
+      }
+      if (rule.maxTotalBytes !== undefined) {
+        let totalBytes = 0;
+        for (const item of value) {
+          if (typeof item === "string") {
+            totalBytes += new TextEncoder().encode(item).length;
+          }
+        }
+        if (totalBytes > rule.maxTotalBytes) {
+          errors.push(`${field} must total at most ${rule.maxTotalBytes} bytes`);
+        }
+      }
+    }
     if (typeof value === "string") {
       if (rule.min !== undefined && value.length < rule.min) {
         errors.push(`${field} must be at least ${rule.min} characters`);
@@ -172,6 +402,49 @@ export function schemaVersionHeaders(): Record<string, string> {
   return { [SCHEMA_VERSION_HEADER]: String(API_SCHEMA_VERSION) };
 }
 
+// ── Conditional read responses ────────────────────────────────────────────────
+
+/**
+ * Visibility of a market read view. Private (invite-scoped) views must never
+ * share a cache key with public ones, so visibility is part of the key input.
+ */
+export type ReadVisibility = "public" | "invite";
+
+export interface SettlementIdentity {
+  marketId: string;
+  settlementId: string;
+  visibility: ReadVisibility;
+  /** Invite scope identifier. Required when visibility is "invite". */
+  inviteScope?: string;
+}
+
+/**
+ * Build the cache-key material for a settled-market read. Visibility and invite
+ * scope are bound into the identity so a private response cannot be served to,
+ * or collide with, a public one.
+ */
+export function settlementCacheKey(id: SettlementIdentity): string {
+  if (id.visibility === "invite" && !id.inviteScope) {
+    throw new Error("invite-scoped settlement identity requires inviteScope");
+  }
+  const scope = id.visibility === "invite" ? `invite:${id.inviteScope}` : "public";
+  return `v${API_SCHEMA_VERSION}|${id.marketId}|${id.settlementId}|${scope}`;
+}
+
+/**
+ * Headers for a conditional response. Private views are marked `private` so
+ * shared caches never store them, and the ETag is derived from the cache key.
+ */
+export function conditionalReadHeaders(id: SettlementIdentity, etag: string): Record<string, string> {
+  const cacheControl = id.visibility === "invite" ? "private, no-cache" : "public, max-age=0, must-revalidate";
+  return {
+    ...schemaVersionHeaders(),
+    ETag: `"${etag}"`,
+    "Cache-Control": cacheControl,
+    Vary: "Accept-Encoding",
+  };
+}
+
 // ── Agent API Drift Check ─────────────────────────────────────────────────────
 
 /**
@@ -184,12 +457,7 @@ export function schemaVersionHeaders(): Record<string, string> {
 export const AGENT_API_REQUEST_SPEC: ShapeSpec = {
   version: { type: "string", required: true, oneOf: ["v1"] },
   agentId: { type: "string", required: true, min: 3, max: 64 },
-  action: { type: "string", required: true, oneOf: ["register", "heartbeat", "proposeMarket", "createMarket", "publishReasoning", "vote", "stake", "listPositions", "listEarnings", "revoke", "dryRun"] },
-  idempotencyKey: { type: "string", required: true, min: 1, max: 128 },
-  nonce: { type: "string", required: true, min: 1, max: 128 },
-  signedAt: { type: "integer", required: true },
-  body: { type: "object", required: true },
-  signature: { type: "string", required: true, min: 16, max: 256 },
+  action: { type: "string", required: true }
 };
 
 /**

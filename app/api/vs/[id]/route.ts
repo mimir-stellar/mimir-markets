@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHash } from "crypto";
 
 import {
   parseInviteKey,
@@ -10,6 +11,36 @@ import { makeContractFreshness } from "@/lib/vs-freshness";
 import { VS_CACHE_HEADERS } from "@/lib/server/vs-cache";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Strong ETag bound to the canonical settlement identity and visibility of a
+ * VS item. The tag changes whenever the item's settlement state changes, and a
+ * private (invite-scoped) response is tagged differently from the public one so
+ * the two can never be confused by an intermediary cache.
+ */
+function vsEtag(
+  vsId: number,
+  item: unknown,
+  visibility: "public" | "private",
+): string {
+  const canonical = JSON.stringify({
+    id: vsId,
+    visibility,
+    item,
+  });
+  const digest = createHash("sha256").update(canonical).digest("base64url");
+  return `"vs-${vsId}-${visibility}-${digest.slice(0, 32)}"`;
+}
+
+/** True when the client's If-None-Match matches the current tag. */
+function etagMatches(ifNoneMatch: string | null, etag: string): boolean {
+  if (!ifNoneMatch) return false;
+  if (ifNoneMatch.trim() === "*") return true;
+  return ifNoneMatch
+    .split(",")
+    .map((t) => t.trim().replace(/^W\//, ""))
+    .includes(etag);
+}
 
 export async function GET(
   request: NextRequest,
@@ -31,6 +62,8 @@ export async function GET(
       return NextResponse.json(err.body, { status: err.status, headers: err.headers });
     }
 
+    const ifNoneMatch = request.headers.get("if-none-match");
+
     if (inviteKey) {
       // Invite keys are guessable by brute force only if guesses are free.
       const { authorizeRequest } = await import("@/lib/api/policy");
@@ -45,16 +78,22 @@ export async function GET(
         return NextResponse.json(err.body, { status: err.status, headers: err.headers });
       }
 
+      const etag = vsEtag(vsId, privateItem, "private");
+      const privateHeaders = {
+        "Cache-Control": "private, no-store",
+        ETag: etag,
+        Vary: "Accept-Encoding",
+      };
+      if (etagMatches(ifNoneMatch, etag)) {
+        return new NextResponse(null, { status: 304, headers: privateHeaders });
+      }
+
       return NextResponse.json(
         {
           item: privateItem,
           cache: makeContractFreshness(),
         },
-        {
-          headers: {
-            "Cache-Control": "private, no-store",
-          },
-        }
+        { headers: privateHeaders }
       );
     }
 
@@ -64,13 +103,19 @@ export async function GET(
       return NextResponse.json(err.body, { status: err.status, headers: err.headers });
     }
 
+    const etag = vsEtag(vsId, item, "public");
+    const publicHeaders = { ...VS_CACHE_HEADERS, ETag: etag, Vary: "Accept-Encoding" };
+    if (etagMatches(ifNoneMatch, etag)) {
+      return new NextResponse(null, { status: 304, headers: publicHeaders });
+    }
+
     return NextResponse.json(
       {
         item,
         cache,
       },
       {
-        headers: VS_CACHE_HEADERS,
+        headers: publicHeaders,
       }
     );
   } catch {

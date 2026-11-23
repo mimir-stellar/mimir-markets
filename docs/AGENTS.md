@@ -16,6 +16,7 @@ lib/usdc.ts	Circle Testnet USDC: Stellar Asset Contract id, issuer, 7-decimal he
 lib/contract.ts	TypeScript contract client (reads + writes through the generated bindings)
 lib/wallet.tsx	Wallet context (Stellar Wallets Kit: Freighter, xBull, Albedo, Lobstr, Hana)
 lib/wallet-connectors.ts	Connector list and per-wallet capability matrix
+lib/wallet-signing-coordinator.ts	Cross-tab wallet signing lease & uncertain-recovery coordinator
 lib/stellar-message.ts	SEP-43 signMessage verification (Ed25519, base64)
 lib/content-hash.ts	SHA-256 content hashing — the hash Soroban's host exposes
 lib/agent-wallets.ts	Local Stellar keypairs for oracle / creator / council
@@ -27,6 +28,8 @@ lib/x402/server.ts	x402 v2 seller paywall (@x402/next) + settlement recording
 lib/x402/buyer.ts	x402 v2 buyer with a hard USDC budget cap (@x402/fetch)
 agents/oracle/index.ts	Off-chain AI oracle agent (LLM + local keypair)
 agents/market-creator/index.ts	Autonomous market creator (LLM + local keypair)
+agents/market-creator/drafting.ts	LLM candidate drafting, statement revision review digest binding, and pre-signing verification
+agents/market-creator/dedupe.ts	Candidate signature normalization and post-revision duplicate filtering
 agents/council/	Ten AI personas that stake as economic actors
 fixtures/ledger/	Versioned public-chain captures for deterministic offline replay
 deploy/deploy.ts	Soroban build/deploy/initialize script
@@ -34,9 +37,11 @@ deploy/contract-artifacts.manifest.json	Pinned Wasm digests for fail-closed prov
 lib/ops/artifact-provenance.ts	Offline SHA-256 artifact provenance verifier
 lib/ops/cache-backup.ts	Offline read-index cache-backup verifier (checksum + privacy, no network)
 lib/ops/dependency-audit.ts	Fail-closed npm audit triage (production high/critical, privacy-safe)
+lib/ops/proposal-triage.ts	Operator proposal backlog triage export (grouped by age & blocking reason, privacy-safe)
 lib/server/read-index-backup.ts	DB-backed read-index dump / verified restore (restore fingerprint check)
 scripts/verify-artifact-provenance.ts	CLI: verify or --write-pins contract artifacts
 scripts/verify-cache-backup.ts	CLI: offline cache-backup verification (npm run verify:cache-backup)
+scripts/verify-package-scripts.ts	CLI: verify package.json script contract against disk targets and CI/CONTRIBUTING docs (npm run verify:package-scripts)
 scripts/check-npm-audit.ts	CLI: triage npm audit --json (npm run audit:deps, no production secrets)
 scripts/backup-read-index.ts	CLI: dump the Neon read-index to a self-verified archive
 scripts/restore-read-index.ts	CLI: restore a verified archive and fingerprint-check the cache
@@ -64,7 +69,10 @@ environment behavior.
 | `lib/contract.ts` | TypeScript contract client (reads + writes through the generated bindings) |
 | `lib/wallet.tsx` | Wallet context (Stellar Wallets Kit: Freighter, xBull, Albedo, Lobstr, Hana) |
 | `lib/wallet-connectors.ts` | Connector list and per-wallet capability matrix |
+| `lib/wallet-signing-coordinator.ts` | Cross-tab wallet signing lease & uncertain-recovery coordinator |
 | `lib/stellar-message.ts` | SEP-43 `signMessage` verification (Ed25519, base64) |
+| `lib/api/schema.ts` | Request/response schema versioning and read-index source freshness/availability metadata (`live`, `cached`, `stale`, `unavailable`) |
+| `lib/api/errors.ts` | Machine-readable API errors and read-index feed boundary resolution (`resolveReadIndexFeed`, `upstreamUnavailableError`) |
 | `lib/content-hash.ts` | SHA-256 content hashing — the hash Soroban's host exposes |
 | `lib/agent-wallets.ts` | Local Stellar keypairs for oracle / creator / council |
 | `lib/agents/wallet-adapter.ts` | Vendor-neutral wallet boundary + budget policy for BYOA |
@@ -75,15 +83,19 @@ environment behavior.
 | `lib/x402/buyer.ts` | x402 v2 buyer with a hard USDC budget cap (`@x402/fetch`) |
 | `agents/oracle/index.ts` | Off-chain AI oracle agent (LLM + local keypair) |
 | `agents/market-creator/index.ts` | Autonomous market creator (LLM + local keypair) |
+| `agents/market-creator/drafting.ts` | LLM candidate drafting, statement revision review digest binding, and pre-signing verification |
+| `agents/market-creator/dedupe.ts` | Candidate signature normalization and post-revision duplicate filtering |
 | `agents/council/` | Ten AI personas that stake as economic actors |
 | `fixtures/ledger/` | Versioned public-chain captures for deterministic offline replay |
 | `deploy/deploy.ts` | Soroban build/deploy/initialize script |
 | `deploy/contract-artifacts.manifest.json` | Pinned Wasm digests for fail-closed provenance checks |
 | `lib/ops/artifact-provenance.ts` | Offline SHA-256 artifact provenance verifier |
 | `lib/ops/cache-backup.ts` | Offline read-index cache-backup verifier (checksum + privacy, no network) |
+| `lib/ops/package-script-contract.ts` | Offline `package.json` script contract verifier against disk targets, argument forwarding, and CI/CONTRIBUTING refs |
 | `lib/server/read-index-backup.ts` | DB-backed read-index dump / verified restore (restore fingerprint check) |
 | `scripts/verify-artifact-provenance.ts` | CLI: verify or `--write-pins` contract artifacts |
 | `scripts/verify-cache-backup.ts` | CLI: offline cache-backup verification (`npm run verify:cache-backup`) |
+| `scripts/verify-package-scripts.ts` | CLI: offline `package.json` script contract verification (`npm run verify:package-scripts`) |
 | `scripts/backup-read-index.ts` | CLI: dump the Neon read-index to a self-verified archive |
 | `scripts/restore-read-index.ts` | CLI: restore a verified archive and fingerprint-check the cache |
 | `scripts/stellar-keys.ts` | Keypairs + Friendbot funding + USDC trustline |
@@ -241,6 +253,13 @@ Bash
 
 ## Node test workflow (must stay green on release)
 
+Run `npm run test:node -- --help` for text help. For tools, use
+`npm run --silent test:node -- --help-json` to get a JSON object with a
+`flags` array. Each entry describes the flag name, option key and default.
+Optional fields list aliases, negated forms, a path argument, or an option
+enabled by that flag. Path defaults are repository-relative. A null cache
+directory uses `MIMIR_NODE_TEST_CACHE_DIR` or the built-in cache root.
+
 The release entry point is `npm run test:node`; `test:smoke` remains an alias
 for callers that already use it. The runner discovers all
 `tests/node/*.test.ts` files in deterministic order and explicitly preserves
@@ -255,6 +274,10 @@ a dependency, runtime, or runner change therefore misses the cache. Use
 `--no-cache` for a forced cold run and `--clear-cache` before diagnosing a
 cache problem. CI caches the same directory, but the manifest and versioned
 path prevent stale entries from being trusted.
+
+Before discovering tests or creating a cache, the runner checks the Node version
+against the `engines.node` range in `package.json`. If the version is unsupported,
+run `nvm install` and `nvm use` in the repository root, then retry.
 
 The runner uses a strict child-environment allowlist. It does not load
 `.env.local` and does not pass production seeds, Stellar credentials, LLM keys,
@@ -323,6 +346,28 @@ Explorer: https://stellar.expert/explorer/testnet
 Public endpoints (rate-limited): https://soroban-testnet.stellar.org and
 https://horizon-testnet.stellar.org
 
+## Market-creator statement revision review
+
+Before the market-creator signs `create_claim` on chain, drafted and deduplicated
+candidates pass through the statement revision review step in
+`agents/market-creator/drafting.ts` and `agents/market-creator/dedupe.ts`:
+
+- **Digest binding** (`reviewStatementRevision`, `computeStatementRevisionDigest`,
+  `buildSourceCommitment`): binds the approved statement wording (`question` and
+  any present `settlementRule`, `creatorPosition`, `counterPosition`), canonical
+  ISO-8601 `deadline`, and resolution `sourceCommitment` (derived from the
+  canonical `resolutionUrl` and optional `sourceText`, or validated when supplied
+  explicitly) into a length-framed SHA-256 digest (`statementDigest`).
+- **Post-revision deduplication** (`reviewDraftedCandidates`,
+  `filterDuplicateCandidates`, `buildCandidateSignature`): drops any candidate whose revised statement
+  collides with an earlier candidate in the batch or an active on-chain claim.
+- **Pre-signing verification** (`verifyStatementForSigning`,
+  `assertStatementApprovedForSigning`, `signApprovedCandidate`): recomputes the
+  statement digest and compares every reviewed field against the approved
+  snapshot before signing. Signing is rejected if any reviewed statement field
+  changed, if the review was not approved, or if the digest is missing or
+  mismatched.
+
 ## Traders
 
 Mimir includes three demo BYOA (Bring Your Own Agent) traders in [`agents/traders/`](../agents/traders) that stake their own USDC against open claims:
@@ -350,6 +395,7 @@ npm run workers
 | `TRADER_MAX_STAKES_PER_CYCLE` | `1` | Maximum number of open claims each trader persona will challenge per cycle. |
 | `TRADER_MAX_PAID_READS_PER_CYCLE` | `3` | Maximum number of paid oracle second opinions bought per trader per cycle. Set to `0` to disable paid reads entirely. |
 | `TRADER_DRY_RUN` | `""` (disabled) | When set to `"1"`, logs decisions and planned stakes without broadcasting on-chain transactions or spending USDC. |
+| `TRADER_STATE_DIR` | `.mimir/traders` | Directory for durable trader state (`consumed-signals.json`). Consumed `(agentId, claimId)` signal identities are checked before x402 oracle quote purchase so repeat polling does not re-spend on already-completed decisions. |
 | `MIMIR_URL` | `""` | Base URL of the Mimir app instance (e.g. `http://localhost:3000`) used to buy x402 oracle second opinions via `POST /api/oracle`. Second-opinion purchase is skipped when unset or empty. |
 | `TRADER_BUY_ORACLE` | `"1"` (enabled) | Set to `"0"` to disable purchasing oracle second opinions over x402, evaluating claims using only persona reasoning. Any other value or unset enables oracle purchases. |
 | `TRADER_MOMENTUM_SECRET` | _(none)_ | Stellar secret seed (`S…`) for the Momentum Forecaster persona (`momentum-forecaster`). Trader is skipped if unset or invalid. |
@@ -359,6 +405,28 @@ npm run workers
 | `TRADER_CONTRA_PUBLIC` | _(derived)_ | Stellar public key (`G…`) for the Contrarian Fader persona. Derived from secret key by wallet tooling. |
 | `TRADER_QUANT_PUBLIC` | _(derived)_ | Stellar public key (`G…`) for the Quant Thresholder persona. Derived from secret key by wallet tooling. |
 | `GROQ_API_KEY` | _(none)_ | Groq API key used for trader LLM inference (`agents/traders/index.ts` sets `LLM_PROVIDER = "groq"`). |
+
+## Market Creator
+
+The autonomous market-creator agent ([`agents/market-creator/`](../agents/market-creator)) continuously drafts verifiable questions from trusted sources (CoinGecko, ESPN, StockAnalysis, Open-Meteo, Launch Library) and publishes them on-chain.
+
+### Durable Creation Intents & Deduplication
+
+- **Deterministic Deduplication Identity**: Every market candidate is assigned a deterministic 32-byte hex identity computed from canonical normalized statement fields (`questionKey`, `resolutionUrlKey`, `deadlineKey`, `categoryKey`).
+- **Reviewed Statement Digest**: Before signing any transaction with the creator's local Stellar keypair, the agent persists a cryptographic content digest of the reviewed statement (`computeStatementDigest`).
+- **Durable Intent Store**: Intents are persisted across cycles using a local state directory (`MARKET_CREATOR_STATE_DIR`), defaulting to `.cache/market-creator`.
+- **Ambiguous Submission Reconciliation**: Near-duplicate or ambiguous candidate submissions (such as capitalization, diacritics, stop-word differences, currency notation variations, or matching on-chain active claims) are reconciled into the canonical intent rather than generating duplicate markets.
+
+### Environment variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `MARKET_CREATOR_STATE_DIR` | `.cache/market-creator` | Directory where durable market creation intents and statement digests are persisted across worker cycles. |
+| `MARKET_CREATOR_AUTONOMOUS` | `""` (disabled) | When set to `"1"`, enables autonomous on-chain market publication. Defaults to proposal-only shadow mode. |
+| `CREATOR_STAKE_USDC` | `2` | Initial USDC stake pledged by the creator per opened market. |
+| `MAX_CLAIMS_PER_RUN` | `5` | Maximum number of candidate markets created per execution cycle. |
+| `MAX_ACTIVE_CLAIMS` | `30` | Maximum unresolved joinable claims allowed before skipping new market creation. |
+| `MARKET_CREATE_DELAY_MS` | `600000` (10m) | Pacing cooldown between consecutive market creation transactions. |
 
 ## Demo seed claims
 
@@ -398,10 +466,12 @@ property testable on a clean checkout and in CI.
   `BACKUP_MISSING_TABLE`, `BACKUP_UNKNOWN_TABLE`, `BACKUP_EMPTY`,
   `BACKUP_CHECKSUM_MISMATCH`, `BACKUP_PRIVATE_CONTENT_LEAK`. A private claim's
   scrubbed content fields must stay `null` in the archive.
-- **Restore** (`npm run restore:read-index -- <file> [--dry-run]`) requires
+- **Restore** (`npm run restore:read-index -- <file> [--dry-run] [--batch-size <n>]`) requires
   `DATABASE_URL`. An unverified archive is refused before any write; writes run
-  in one transaction so a failure rolls back; afterwards the cache is re-read
-  and its fingerprint is compared against the archive's checksum.
+  in checkpointed transactions (or a single transaction when `--batch-size` is unset);
+  afterwards the cache is re-read and its fingerprint is compared against the
+  archive's checksum. Replay after interrupted batches is idempotent and does not
+  double-apply settlement or fee events.
 - **Rollback**: restore any verified archive, or — because contract state is
   the source of truth — re-warm from chain (`npm run warm:vs-index` / `npm run
   sync`). Restoring never writes to the chain.
@@ -435,3 +505,12 @@ that change reviewable:
 - Every new table or index must ship with a `schema_migrations` registration; a
   schema with no registered migration fails `MIGRATION_UNREGISTERED`.
 - Policy: [`docs/SCHEMA_SNAPSHOTS.md`](./SCHEMA_SNAPSHOTS.md).
+
+## Cross-tab wallet signing coordinator (`lib/wallet-signing-coordinator.ts`)
+
+`lib/wallet-signing-coordinator.ts` coordinates wallet signing ownership across open browser tabs and within the same tab for `signTransaction`, `signAuthEntry`, `signMessage` (`lib/wallet.tsx`), and `ensureUsdcTrustline` (`lib/stellar-trustline.ts`).
+
+- **Nonsecret operation identity**: Persisted storage (`mimir:wallet-signing-coordinator:v1`) and cross-tab `BroadcastChannel` payloads store only public metadata: `operationId`, normalized public `account`, `tabId`, `operationKind` (`"sign_transaction" | "sign_auth_entry" | "sign_message" | "enable_trustline"`), `status` (`"active" | "uncertain_recovery"`), `acquiredAt`, `heartbeatAt`, `expiresAt`, and optional recovery metadata (`uncertainAt`, `recoveryReason`). Unsigned/signed XDR, secret seeds, auth tokens, messages, and private notes are never stored.
+- **Same-account mutual exclusion**: Only one active signing operation is allowed per normalized Stellar account at a time across tabs (`active_in_other_tab` / `active_in_same_tab`), while independent accounts can sign concurrently and sequential prompts proceed immediately after `release()`.
+- **Heartbeat & bounded `uncertain_recovery`**: Active leases refresh via heartbeat (`heartbeat()` / 5 s interval, 30 s default TTL). If an owning tab unloads (`pagehide` / `beforeunload`) without releasing or its lease expires (`now > expiresAt`), the record transitions to bounded `status: "uncertain_recovery"` (capped by `maxRecords` and `recoveryRetentionMs`) instead of silently stealing ownership. Subsequent prompts for that account remain blocked until the user explicitly acknowledges recovery via `acknowledgeUncertainRecovery` / `dismissSigningRecovery` or opts into retry (`acknowledgeUncertainRecovery: true`).
+- **Injectable test boundary & React integration**: `createWalletSigningCoordinator({ storage, channel, events, now, ... })` injects storage, channels, lifecycle events, and clock deterministically for Node tests without browser globals. `WalletProvider` (`lib/wallet.tsx`) wraps `signTransaction`, `signAuthEntry`, and `signMessage` and exposes non-breaking optional fields on `WalletContextValue` (`signingOwnership`, `signingBlockedByOtherTab`, `signingRecovery`, `acknowledgeSigningRecovery`, `dismissSigningRecovery`, `retryAfterSigningRecovery`). `ensureUsdcTrustline` (`lib/stellar-trustline.ts`) acquires an `"enable_trustline"` lease and unwraps the underlying signer via `resolveUncoordinatedSignTransaction` so it never self-deadlocks against `WalletProvider.signTransaction`.

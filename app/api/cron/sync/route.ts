@@ -53,6 +53,7 @@ export async function GET(request: Request) {
 
   try {
     const summary = await reconcileVsIndex();
+    const observedAt = new Date().toISOString();
     await beat("sync", { intervalSec: SYNC_INTERVAL_SEC });
 
     return NextResponse.json(
@@ -62,6 +63,11 @@ export async function GET(request: Request) {
         stateChanges: summary.stateChanges,
         corrected: summary.corrected,
         inconsistencies: summary.inconsistencies,
+        freshness: {
+          trustedLedger: summary.trustedLedger ?? null,
+          observedAt,
+          knownGaps: summary.knownGaps ?? [],
+        },
       },
       {
         headers: {

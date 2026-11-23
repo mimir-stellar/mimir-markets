@@ -72,6 +72,27 @@ export {
   type WalletSigningMethod,
 };
 import { walletRowLabel } from "./wallet-aria";
+import {
+  canResubmitPayment,
+  createUncertainSubmission,
+  reconcileUncertainSubmission as reconcileUncertainSubmissionState,
+  type CreateUncertainSubmissionParams,
+  type ReconcileUncertainSubmissionOptions,
+  type ReconciliationProbeResult,
+  type UncertainSubmissionState,
+  type UncertainSubmissionStatus,
+} from "./wallet-submission-recovery";
+
+export {
+  canResubmitPayment,
+  createUncertainSubmission,
+  reconcileUncertainSubmissionState as reconcileUncertainSubmission,
+  type CreateUncertainSubmissionParams,
+  type ReconcileUncertainSubmissionOptions,
+  type ReconciliationProbeResult,
+  type UncertainSubmissionState,
+  type UncertainSubmissionStatus,
+};
 
 /** Remembering the last wallet turns a five-row decision into one tap on return. */
 const RECENT_WALLET_KEY = "mimir-recent-wallet";
@@ -165,23 +186,49 @@ async function loadKit(): Promise<Kit> {
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /**
+ * Redact Stellar secret seeds (S… 56 base32 chars) and sensitive key patterns
+ * from diagnostic/error strings to avoid leaking credentials.
+ */
+export function sanitizeWalletMessage(message: string): string {
+  if (!message) return "";
+  return message
+    .replace(/(api[_-]?key|authorization|bearer|private[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+    .replace(/(^|[^A-Z0-9])S[A-Z2-7]{55}(?![A-Z0-9])/g, "$1[redacted-seed]");
+}
+
+/**
  * The kit rejects with plain `{ code, message }` objects, not `Error`s, so a
  * `catch (e) { e.message }` at a call site reads `undefined`. Everything crossing
  * out of this module becomes a real `Error` with a message worth showing.
+ *
+ * Private connector payloads (such as `ext` or `payload` details) are kept out
+ * of public diagnostics and error messages, and secret seeds are redacted.
  */
-function toWalletError(cause: unknown, action: string): Error {
-  if (cause instanceof Error) return cause;
+export function toWalletError(cause: unknown, action: string): Error {
+  let message: string | undefined;
 
-  if (cause && typeof cause === "object") {
+  if (cause instanceof Error) {
+    message = cause.message;
+  } else if (cause && typeof cause === "object") {
     const kitError = cause as {
       code?: number;
       message?: string;
-      ext?: string;
+      ext?: unknown;
+      payload?: unknown;
+      data?: unknown;
     };
 
-    if (typeof kitError.message === "string" && kitError.message) {
-      return new Error(kitError.message);
+    if (typeof kitError.message === "string" && kitError.message.trim()) {
+      message = kitError.message.trim();
     }
+    // Private connector payloads (kitError.ext, kitError.payload) are intentionally
+    // omitted from public diagnostics and error messages.
+  } else if (typeof cause === "string" && cause.trim()) {
+    message = cause.trim();
+  }
+
+  if (message) {
+    return new Error(sanitizeWalletMessage(message));
   }
 
   return new Error(`Could not ${action}.`);
@@ -189,6 +236,117 @@ function toWalletError(cause: unknown, action: string): Error {
 
 function isRejection(message: string): boolean {
   return /reject|denied|cancel|closed the modal|user declined/i.test(message);
+}
+
+// ── Intent Generation and Obsolete Result Guarding ───────────────────────────
+
+/**
+ * Thrown when an asynchronous wallet signing result arrives after the active
+ * signing intent has been superseded or the active wallet account has changed.
+ */
+export class ObsoleteSigningIntentError extends Error {
+  readonly generation: number;
+  readonly activeGeneration: number;
+  readonly expectedAddress: string;
+  readonly currentAddress: string | null;
+
+  constructor(details: {
+    generation: number;
+    activeGeneration: number;
+    expectedAddress: string;
+    currentAddress: string | null;
+    message?: string;
+  }) {
+    super(
+      details.message ??
+        `Wallet signing result ignored: signing intent generation ${details.generation} is obsolete (active generation is ${details.activeGeneration}${
+          details.expectedAddress !== details.currentAddress
+            ? `, account switched from ${details.expectedAddress} to ${details.currentAddress ?? "disconnected"}`
+            : ""
+        }).`,
+    );
+    this.name = "ObsoleteSigningIntentError";
+    this.generation = details.generation;
+    this.activeGeneration = details.activeGeneration;
+    this.expectedAddress = details.expectedAddress;
+    this.currentAddress = details.currentAddress;
+  }
+}
+
+/** Check if an unknown error represents an obsolete signing intent. */
+export function isObsoleteSigningIntentError(
+  error: unknown,
+): error is ObsoleteSigningIntentError {
+  return (
+    error instanceof ObsoleteSigningIntentError ||
+    (error instanceof Error &&
+      (error.name === "ObsoleteSigningIntentError" ||
+        /obsolete.*intent|stale.*intent|intent.*obsolete/i.test(error.message)))
+  );
+}
+
+export interface SigningIntent {
+  generation: number;
+  address: string;
+}
+
+/**
+ * Returns true if the given intent matches the active session generation and address.
+ */
+export function isIntentActive(
+  intent: SigningIntent,
+  active: { generation: number; address: string | null },
+): boolean {
+  return intent.generation === active.generation && intent.address === active.address;
+}
+
+/**
+ * Asserts that the intent matches the active session generation and address.
+ * Throws ObsoleteSigningIntentError if mismatched or obsolete.
+ */
+export function assertActiveIntent(
+  intent: SigningIntent,
+  active: { generation: number; address: string | null },
+): void {
+  if (!isIntentActive(intent, active)) {
+    throw new ObsoleteSigningIntentError({
+      generation: intent.generation,
+      activeGeneration: active.generation,
+      expectedAddress: intent.address,
+      currentAddress: active.address,
+    });
+  }
+}
+
+/**
+ * Bind an existing StellarSigner to an active intent generation.
+ * Any signing call that completes after the active generation or address has changed
+ * will reject with ObsoleteSigningIntentError instead of returning a stale signature.
+ */
+export function bindIntentToSigner(
+  signer: StellarSigner,
+  intent: SigningIntent,
+  getActive: () => { generation: number; address: string | null },
+): StellarSigner {
+  return {
+    publicKey: signer.publicKey,
+    signTransaction: async (xdr, opts) => {
+      assertActiveIntent(intent, getActive());
+      const result = await signer.signTransaction(xdr, opts);
+      assertActiveIntent(intent, getActive());
+      return result;
+    },
+    ...(signer.signAuthEntry
+      ? {
+          signAuthEntry: async (entry, opts) => {
+            assertActiveIntent(intent, getActive());
+            const result = await signer.signAuthEntry!(entry, opts);
+            assertActiveIntent(intent, getActive());
+            return result;
+          },
+        }
+      : {}),
+  };
 }
 
 // ── Context ───────────────────────────────────────────────────────────────────
@@ -257,8 +415,107 @@ export interface WalletContextValue {
    */
   transactionState: TransactionState | null;
 
+  /**
+   * Monotonic generation counter for the active signing intent and account session.
+   * Increments on account switch, disconnect, or when a new signing intent begins,
+   * binding responses to the active intent generation and preventing stale wallet results.
+   */
+  intentGeneration: number;
+
   /** Rows for the picker modal, already ordered. */
   wallets: ModalWallet[];
+
+  /**
+   * A resumable setup action the caller asked for before the wallet was
+   * ready (#769). Non-null while a trustline setup is pending; the caller's
+   * `resume()` runs exactly once after the trustline is confirmed on chain.
+   */
+  pendingTrustlineIntent: PendingTrustlineIntent | null;
+
+  /**
+   * Request a USDC trustline and resume `onReady` **only** once it is
+   * confirmed on chain. If the user leaves mid-flow, the intent is persisted
+   * to `sessionStorage` and resumed on provider mount. The classic trustline
+   * transaction is submitted independently of any Soroban staking call.
+   */
+  requestTrustlineThen: (onReady: () => void) => Promise<void>;
+
+  /** Active cross-tab signing ownership record for the connected account, if any. */
+  signingOwnership?: WalletSigningOperationRecord | null;
+
+  /** True when another tab currently owns an active signing prompt for the connected account. */
+  signingBlockedByOtherTab?: boolean;
+
+  /** Unacknowledged uncertain recovery record from an interrupted signing prompt, if any. */
+  signingRecovery?: WalletSigningOperationRecord | null;
+
+  /** Explicitly acknowledge and dismiss a pending uncertain signing recovery record. */
+  acknowledgeSigningRecovery?: (operationId?: string) => boolean;
+
+  /** Alias for {@link acknowledgeSigningRecovery}. */
+  dismissSigningRecovery?: (operationId?: string) => boolean;
+
+  /**
+   * Acknowledge any pending uncertain recovery for the connected account and invoke
+   * `retry()` as an explicit user opt-in retry.
+   */
+  retryAfterSigningRecovery?: <T>(
+    retry: () => Promise<T>,
+    operationId?: string,
+  ) => Promise<T>;
+}
+
+/**
+ * In-memory handle to a pending trustline intent. The callback is not
+ * persisted — only the fact that an intent exists and the address it belongs
+ * to are. On remount the callback is re-registered by the caller, so a reload
+ * still resumes the original intent through `onReady`.
+ */
+export interface PendingTrustlineIntent {
+  address: string;
+  resume: () => void;
+}
+
+/**
+ * `sessionStorage` key for the persisted intent. Non-sensitive: address only.
+ *
+ * Written with a namespaced prefix so it cannot collide with any other
+ * resumable-flow key another feature may add later.
+ */
+const PENDING_TRUSTLINE_KEY = "mimir.pendingTrustlineIntent.v1";
+
+function readPendingTrustline(): { address: string } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(PENDING_TRUSTLINE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { address?: unknown };
+    if (typeof parsed?.address !== "string" || parsed.address.length === 0) return null;
+    return { address: parsed.address };
+  } catch {
+    return null;
+  }
+}
+
+function writePendingTrustline(address: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      PENDING_TRUSTLINE_KEY,
+      JSON.stringify({ address }),
+    );
+  } catch {
+    // sessionStorage can be disabled; the in-memory intent still works.
+  }
+}
+
+function clearPendingTrustline(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(PENDING_TRUSTLINE_KEY);
+  } catch {
+    // ignore
+  }
 }
 
 type ModalWallet = ShapedWallet & { connect: () => void };
@@ -267,6 +524,7 @@ const NO_WALLET = "Connect a Stellar wallet first.";
 
 const Ctx = createContext<WalletContextValue>({
   transactionState: null,
+  intentGeneration: 0,
   address: null,
   isConnected: false,
   isConnecting: false,
@@ -295,6 +553,14 @@ const Ctx = createContext<WalletContextValue>({
     checkWalletSigningCapability(null, requiredMethod, null),
   networkWarning: null,
   wallets: [],
+  pendingTrustlineIntent: null,
+  requestTrustlineThen: async () => {},
+  signingOwnership: null,
+  signingBlockedByOtherTab: false,
+  signingRecovery: null,
+  acknowledgeSigningRecovery: () => false,
+  dismissSigningRecovery: () => false,
+  retryAfterSigningRecovery: async (retry) => retry(),
 });
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -308,13 +574,15 @@ const Ctx = createContext<WalletContextValue>({
  * - `"stale"`: Transaction confirmed on-chain but the wallet session lost sync (e.g. reconnect).
  * - `"disconnected"`: Wallet disconnected during a pending transaction.
  * - `"dependency-failure"`: A required upstream step (e.g. trustline) failed.
+ * - `"uncertain-submission"`: Transaction was submitted, but transport/timeout left its outcome uncertain; reconcile by hash instead of resubmitting.
  */
 export type TransactionState =
   | "loading"
   | "invalid"
   | "stale"
   | "disconnected"
-  | "dependency-failure";
+  | "dependency-failure"
+  | "uncertain-submission";
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
 
@@ -568,13 +836,17 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [networkWarning, setNetworkWarning] = useState<string | null>(null);
-  // Exposed through the context for lifecycle feedback UI; nothing in the
-  // provider drives it yet, so it stays `null` until a write flow sets it.
-  const [transactionState] = useState<TransactionState | null>(null);
+  // Exposed through the context for lifecycle feedback UI. Driven by active
+  // signing intents, account switches, and disconnect transitions.
+  const [transactionState, setTransactionState] = useState<TransactionState | null>(null);
+  const [intentGeneration, setIntentGeneration] = useState(0);
+  const intentGenerationRef = useRef(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerLoading, setPickerLoading] = useState(false);
   const [options, setOptions] = useState<ShapedWallet[]>([]);
   const [recentId, setRecentId] = useState<string | null>(null);
+  const [pendingTrustlineIntent, setPendingTrustlineIntent] = useState<PendingTrustlineIntent | null>(null);
+  const [signingState, setSigningState] = useState<WalletSigningAccountState | null>(null);
 
   // Read by the signing callbacks, which must stay referentially stable so the
   // memoised `signer` does not change identity on every render.
@@ -595,6 +867,16 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
    * kit's memory, unlike `fetchAddress`, which asks the extension.
    */
   useEffect(() => {
+    // Restore a persisted trustline intent (#769). Non-null means the caller
+    // previously asked for a trustline setup that had not finished; the UI
+    // shows the "add trustline" gate and the caller re-registers its resume
+    // callback when it mounts. No resume callback is called here: only the
+    // caller knows what the intent was for.
+    const persisted = readPendingTrustline();
+    if (persisted) {
+      setPendingTrustlineIntent({ address: persisted.address, resume: () => {} });
+    }
+
     let cancelled = false;
 
     (async () => {
@@ -617,8 +899,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
         if (cancelled || !restored) return;
 
+        addressRef.current = restored;
+        intentGenerationRef.current += 1;
+        setIntentGeneration(intentGenerationRef.current);
         setAddress(restored);
-        setWalletId(kit.selectedModule.productId);
+        setWalletId(newWalletId);
         setWalletName(kit.selectedModule.productName);
       } catch {
         // No persisted session, or nothing selected. Stay disconnected.
@@ -641,6 +926,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!address) {
       setNetworkWarning(null);
+      networkRef.current = null;
       return;
     }
 
@@ -652,6 +938,14 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         const { networkPassphrase } = await kit.getNetwork();
 
         if (cancelled || !networkPassphrase) return;
+
+        const prevNetwork = networkRef.current;
+        networkRef.current = networkPassphrase;
+
+        if (prevNetwork !== null && prevNetwork !== networkPassphrase) {
+          sessionRevisionRef.current += 1;
+          setSessionRevision(sessionRevisionRef.current);
+        }
 
         setNetworkWarning(
           networkPassphrase === NETWORK_PASSPHRASE
@@ -668,9 +962,52 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     };
   }, [address]);
 
+  /**
+   * Detect a wallet account switch (#922).
+   *
+   * `stellar-wallets-kit` does not push account changes: the `address` state
+   * above is only set on connect / restore / disconnect. When the user switches
+   * accounts inside Freighter (or any injected wallet), that state stays on the
+   * previous account — so any flow that signed intent for account A can silently
+   * submit against account B. This effect re-reads the kit's current address on
+   * window focus and on tab visibility restore, and calls `setAddress` only when
+   * it has actually changed. No behaviour changes for users who never switch.
+   */
+  useEffect(() => {
+    if (!address) return;
+    let cancelled = false;
+
+    const check = async () => {
+      try {
+        const kit = await loadKit();
+        const { address: current } = await kit.getAddress();
+        if (cancelled || !current || current === address) return;
+        setAddress(current);
+        setWalletId(kit.selectedModule.productId);
+        setWalletName(kit.selectedModule.productName);
+        console.info("[wallet] ACCOUNT_SWITCH_DETECTED", { from: address, to: current });
+      } catch {
+        // getAddress is a best-effort read; a failure is not an account switch.
+      }
+    };
+
+    const onFocus = () => void check();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [address]);
+
   // ── Signing ────────────────────────────────────────────────────────────────
 
-  const signTransaction = useCallback<SignTransaction>(
+  const executeSignTransaction = useCallback<SignTransaction>(
     async (xdr, opts) => {
       // Do not attempt to load or invoke the wallet provider after the
       // application has lost its connected wallet state.
@@ -690,8 +1027,13 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         );
       }
 
+      const myGeneration = ++intentGenerationRef.current;
+      setIntentGeneration(myGeneration);
+      const startingAddress = addressRef.current;
+      setTransactionState("loading");
+
       const kit = await loadKit();
-      const signerAddress = opts?.address ?? addressRef.current ?? undefined;
+      const signerAddress = opts?.address ?? startingAddress ?? undefined;
 
       try {
         const signed = await kit.signTransaction(xdr, {
@@ -700,11 +1042,36 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
           ...(signerAddress ? { address: signerAddress } : {}),
         });
 
+        // Ignore late results belonging to an obsolete signing intent or
+        // a superseded wallet connection.
+        if (
+          myGeneration !== intentGenerationRef.current ||
+          !addressRef.current ||
+          addressRef.current !== startingAddress
+        ) {
+          if (!addressRef.current) {
+            setTransactionState("disconnected");
+          } else {
+            setTransactionState("stale");
+          }
+          throw new ObsoleteSigningIntentError({
+            generation: myGeneration,
+            activeGeneration: intentGenerationRef.current,
+            expectedAddress: startingAddress,
+            currentAddress: addressRef.current,
+          });
+        }
+
+        setTransactionState(null);
         return {
           signedTxXdr: signed.signedTxXdr,
           signerAddress: signed.signerAddress,
         };
       } catch (cause) {
+        if (isObsoleteSigningIntentError(cause)) {
+          throw cause;
+        }
+
         const err = toWalletError(cause, "sign this transaction");
 
         if (/network|passphrase/i.test(err.message)) {
@@ -719,6 +1086,30 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  const signTransaction = useMemo<SignTransaction>(() => {
+    const coordinated: SignTransaction = async (xdr, opts) => {
+      const activeAddress = addressRef.current;
+      if (!activeAddress) {
+        throw new Error(NO_WALLET);
+      }
+      if (opts?.submit) {
+        throw new Error(
+          "This wallet layer does not sign-and-submit; submit the signed transaction through Soroban RPC.",
+        );
+      }
+
+      const signerAddress = opts?.address ?? activeAddress;
+      const coordinator = getBrowserWalletSigningCoordinator();
+      return coordinator.runOperation(
+        { account: signerAddress, operationKind: "sign_transaction" },
+        () => executeSignTransaction(xdr, opts),
+      );
+    };
+
+    registerUncoordinatedSignTransaction(coordinated, executeSignTransaction);
+    return coordinated;
+  }, [executeSignTransaction]);
+
   const signAuthEntry = useCallback<SignAuthEntry>(
     async (authEntry, opts) => {
       // An auth-entry signature must never proceed after the wallet has
@@ -731,28 +1122,35 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         throw new Error(capability.reason);
       }
       // disconnected or the provider state has been cleared.
-      if (!addressRef.current) {
+      const activeAddress = addressRef.current;
+      if (!activeAddress) {
         throw new Error(NO_WALLET);
       }
 
-      const kit = await loadKit();
-      const signerAddress =
-        opts?.address ?? addressRef.current ?? undefined;
+      const signerAddress = opts?.address ?? activeAddress;
+      const coordinator = getBrowserWalletSigningCoordinator();
 
-      try {
-        const signed = await kit.signAuthEntry(authEntry, {
-          networkPassphrase:
-            opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
-          ...(signerAddress ? { address: signerAddress } : {}),
-        });
+      return coordinator.runOperation(
+        { account: signerAddress, operationKind: "sign_auth_entry" },
+        async () => {
+          const kit = await loadKit();
 
-        return {
-          signedAuthEntry: signed.signedAuthEntry,
-          signerAddress: signed.signerAddress,
-        };
-      } catch (cause) {
-        throw toWalletError(cause, "sign this authorization");
-      }
+          try {
+            const signed = await kit.signAuthEntry(authEntry, {
+              networkPassphrase:
+                opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
+              ...(signerAddress ? { address: signerAddress } : {}),
+            });
+
+            return {
+              signedAuthEntry: signed.signedAuthEntry,
+              signerAddress: signed.signerAddress,
+            };
+          } catch (cause) {
+            throw toWalletError(cause, "sign this authorization");
+          }
+        },
+      );
     },
     [],
   );
@@ -768,28 +1166,59 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       throw new Error(capability.reason);
     }
     // address after disconnect.
-    if (!addressRef.current) {
+    const activeAddress = addressRef.current;
+    if (!activeAddress) {
       throw new Error(NO_WALLET);
     }
 
-    const kit = await loadKit();
-    const signerAddress = addressRef.current;
+    const coordinator = getBrowserWalletSigningCoordinator();
 
-    try {
-      const signed = await kit.signMessage(message, {
-        networkPassphrase: NETWORK_PASSPHRASE,
-        address: signerAddress,
-      });
+    return coordinator.runOperation(
+      { account: activeAddress, operationKind: "sign_message" },
+      async () => {
+        const kit = await loadKit();
 
-      if (!signed.signedMessage) {
-        throw new Error("The wallet returned no signature.");
-      }
+        try {
+          const signed = await kit.signMessage(message, {
+            networkPassphrase: NETWORK_PASSPHRASE,
+            address: activeAddress,
+          });
 
-      return signed.signedMessage;
-    } catch (cause) {
-      throw toWalletError(cause, "sign this message");
-    }
+          if (!signed.signedMessage) {
+            throw new Error("The wallet returned no signature.");
+          }
+
+          return signed.signedMessage;
+        } catch (cause) {
+          throw toWalletError(cause, "sign this message");
+        }
+      },
+    );
   }, []);
+
+  const acknowledgeSigningRecovery = useCallback((operationId?: string) => {
+    const currentAddress = addressRef.current;
+    if (!currentAddress) return false;
+    const cleared = getBrowserWalletSigningCoordinator().acknowledgeUncertainRecovery(
+      currentAddress,
+      operationId ? { operationId } : undefined,
+    );
+    return cleared !== null;
+  }, []);
+
+  const retryAfterSigningRecovery = useCallback(
+    async <T,>(retry: () => Promise<T>, operationId?: string): Promise<T> => {
+      const currentAddress = addressRef.current;
+      if (currentAddress) {
+        getBrowserWalletSigningCoordinator().acknowledgeUncertainRecovery(
+          currentAddress,
+          operationId ? { operationId } : undefined,
+        );
+      }
+      return retry();
+    },
+    [],
+  );
 
   /**
    * The signer handed to `lib/contract.ts`.
@@ -856,8 +1285,16 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         // should be asked, because this is the click that asked for it.
         const { address: connected } = await kit.fetchAddress();
 
+        // Update the address ref immediately and bump the intent generation
+        // so any in-flight signatures belonging to a previous account session
+        // are recognized as obsolete and rejected.
+        addressRef.current = connected;
+        intentGenerationRef.current += 1;
+        setIntentGeneration(intentGenerationRef.current);
+        setTransactionState(null);
+
         setAddress(connected);
-        setWalletId(kit.selectedModule.productId);
+        setWalletId(newWalletId);
         setWalletName(kit.selectedModule.productName);
 
         rememberWallet(id);
@@ -880,8 +1317,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, [refreshOptions]);
 
   const disconnect = useCallback(() => {
-    // Clear the ref synchronously before doing any asynchronous kit work.
-    // The signing callbacks read this ref directly, so this prevents a stale
+    const prevAddress = addressRef.current;
+    const prevWalletId = walletIdRef.current;
+
+    // Clear the refs synchronously before doing any asynchronous kit work.
+    // The signing callbacks read addressRef directly, so this prevents a stale
     // wallet address from being used during the disconnect transition.
     addressRef.current = null;
     walletIdRef.current = null;
@@ -891,6 +1331,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     setWalletId(null);
     setWalletName(null);
     setNetworkWarning(null);
+    uncertainSubmissionRef.current = null;
+    setUncertainSubmission(null);
+    setTransactionState(null);
 
     // The recent-wallet hint deliberately survives: it is what makes coming
     // back one tap. Only the session is cleared.
@@ -898,6 +1341,44 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       .then((kit) => kit.disconnect())
       .catch(() => undefined);
   }, []);
+
+  const requestTrustlineThen = useCallback(
+    async (onReady: () => void) => {
+      if (!address || !signer) {
+        throw new Error(NO_WALLET);
+      }
+
+      // Persist the intent BEFORE submitting so a crash / reload between
+      // submission and confirmation still resumes the user's original action.
+      writePendingTrustline(address);
+      setPendingTrustlineIntent({ address, resume: onReady });
+
+      // The classic trustline transaction is submitted on its own — this is
+      // deliberately NOT part of any Soroban staking call (#769).
+      const submit = await import("./stellar-trustline");
+      const submitted = await submit.submitUsdcTrustline(signer);
+      if (submitted.status === "failed") {
+        clearPendingTrustline();
+        setPendingTrustlineIntent(null);
+        throw new Error(submitted.reason);
+      }
+
+      // Confirm by re-reading the trustline until Horizon shows it. Do not
+      // resume on submission — the whole point is that "submitted" is not
+      // "ready".
+      const confirmed = await submit.awaitUsdcTrustlineConfirmation(address);
+      if (confirmed.status === "confirmed") {
+        clearPendingTrustline();
+        setPendingTrustlineIntent(null);
+        onReady();
+        return;
+      }
+      clearPendingTrustline();
+      setPendingTrustlineIntent(null);
+      throw new Error(confirmed.reason);
+    },
+    [address, signer],
+  );
 
   const wallets = useMemo<ModalWallet[]>(
     () =>
@@ -943,7 +1424,16 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       checkTransactionCapability,
       networkWarning,
       transactionState,
+      intentGeneration,
       wallets,
+      pendingTrustlineIntent,
+      requestTrustlineThen,
+      signingOwnership: signingState?.activeOperation ?? null,
+      signingBlockedByOtherTab: signingState?.isBlockedByOtherTab ?? false,
+      signingRecovery: signingState?.uncertainRecovery ?? null,
+      acknowledgeSigningRecovery,
+      dismissSigningRecovery: acknowledgeSigningRecovery,
+      retryAfterSigningRecovery,
     }),
     [
       address,
@@ -960,7 +1450,13 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       checkTransactionCapability,
       networkWarning,
       transactionState,
+      intentGeneration,
       wallets,
+      pendingTrustlineIntent,
+      requestTrustlineThen,
+      signingState,
+      acknowledgeSigningRecovery,
+      retryAfterSigningRecovery,
     ],
   );
 
@@ -982,4 +1478,37 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
 export function useWallet(): WalletContextValue {
   return useContext(Ctx);
+}
+
+/**
+ * Hook returning the active nonsecret wallet session revision.
+ * Dependent balance and read hooks can include this in their dependency array
+ * to automatically invalidate reads whenever the connected account, network,
+ * or connector changes.
+ */
+export function useWalletSessionRevision(): number {
+  return useWallet().sessionRevision;
+}
+
+export interface WalletSession {
+  revision: number;
+  address: string | null;
+  walletId: string | null;
+  network: string;
+}
+
+/**
+ * Hook returning a high-level representation of the active wallet session.
+ */
+export function useWalletSession(): WalletSession {
+  const { sessionRevision, address, walletName } = useWallet();
+  return useMemo(
+    () => ({
+      revision: sessionRevision,
+      address,
+      walletId: walletName,
+      network: STELLAR_NETWORK,
+    }),
+    [sessionRevision, address, walletName],
+  );
 }

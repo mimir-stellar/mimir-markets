@@ -124,10 +124,42 @@ export function defaultCreatorPolicy(
   };
 }
 
+export type CreatorDecisionCode =
+  /** Candidate passed all gates and is approved for creation. */
+  | "approved"
+  /** Candidate passed all gates and is held for human review in shadow mode. */
+  | "held_for_review"
+  /** Duel candidate without a named opponent, published as an open invite. */
+  | "open_duel_invite"
+  /** Rejected due to source/preflight quality checks (score, URL allowlist, threshold). */
+  | "source_quality_rejected"
+  /** Rejected because the category's open-market count or USDC exposure budget is exhausted. */
+  | "category_budget_exhausted"
+  /** Rejected because the category is disabled by an operational kill switch. */
+  | "category_disabled"
+  /** Rejected because the category cap policy, category name, state, or stake is invalid (fail closed). */
+  | "category_cap_invalid"
+  /** Rejected because posting the stake would exceed the global USDC open-exposure cap. */
+  | "exposure_cap_exceeded"
+  /** Rejected because the active-market inventory cap is reached. */
+  | "active_market_cap_reached"
+  /** Rejected because an equivalent market already exists or was already admitted. */
+  | "duplicate_candidate"
+  /** Rejected because fixed-odds payout bps is not above 1x. */
+  | "invalid_fixed_odds"
+  /** Rejected because creator wallet liquidity cannot back fixed-odds liability. */
+  | "insufficient_liquidity"
+  /** Rejected because the requested settlement mode is unsupported on the current contract. */
+  | "unsupported_mode";
+
 export interface ModeDecision {
   settlementMode: SettlementMode;
   modifiers: ProductModifier[];
   disposition: ProposalDisposition;
+  /** Stable machine-readable decision code for creator reports. */
+  decisionCode: CreatorDecisionCode;
+  /** Which half of the category budget was exhausted, when `decisionCode === "category_budget_exhausted"`. */
+  categoryBudgetLimitedBy?: "markets" | "exposure";
   /** Why this mode, in one line, stored with the proposal for review. */
   rationale: string;
   /** Reason a proposal was downgraded or skipped. */
@@ -152,6 +184,7 @@ export function decideMode(
     return {
       ...base,
       disposition: "skip",
+      decisionCode: "source_quality_rejected",
       rationale: "below the preflight quality bar",
       blockedBy: `quality ${candidate.qualityScore} < ${policy.minQualityScore}`,
     };
@@ -160,6 +193,7 @@ export function decideMode(
     return {
       ...base,
       disposition: "skip",
+      decisionCode: "active_market_cap_reached",
       rationale: "active market cap reached",
       blockedBy: `${candidate.activeMarkets}/${policy.maxActiveMarkets} active`,
     };
@@ -168,6 +202,7 @@ export function decideMode(
     return {
       ...base,
       disposition: "skip",
+      decisionCode: "exposure_cap_exceeded",
       rationale: "would exceed the agent's open exposure cap",
       blockedBy: `${candidate.openExposureUsdc + candidate.stakeUsdc} > ${policy.maxOpenExposureUsdc}`,
     };
@@ -184,9 +219,19 @@ export function decideMode(
       stakeUsdc: candidate.stakeUsdc,
     });
     if (!categoryGate.allowed) {
+      const decisionCode: CreatorDecisionCode =
+        categoryGate.reason === "cap_exceeded"
+          ? "category_budget_exhausted"
+          : categoryGate.reason === "category_disabled"
+            ? "category_disabled"
+            : "category_cap_invalid";
       return {
         ...base,
         disposition: "skip",
+        decisionCode,
+        ...(categoryGate.reason === "cap_exceeded" && categoryGate.limitedBy
+          ? { categoryBudgetLimitedBy: categoryGate.limitedBy }
+          : {}),
         rationale: "would exceed the creator's per-category cap",
         blockedBy: categoryGate.blockedBy,
       };
@@ -202,11 +247,13 @@ export function decideMode(
           ? {
               ...base,
               disposition: "create" as ProposalDisposition,
+              decisionCode: "approved" as CreatorDecisionCode,
               rationale: `private duel against ${candidate.targetAgentId}`,
             }
           : {
               ...base,
               disposition: "open_duel_invite" as ProposalDisposition,
+              decisionCode: "open_duel_invite" as CreatorDecisionCode,
               rationale: "no named opponent — published as an open duel invitation",
             };
 
@@ -216,6 +263,7 @@ export function decideMode(
           return {
             ...base,
             disposition: "skip" as ProposalDisposition,
+            decisionCode: "invalid_fixed_odds" as CreatorDecisionCode,
             rationale: "fixed odds needs a total return above 1x",
             blockedBy: `challengerPayoutBps ${bps}`,
           };
@@ -227,6 +275,7 @@ export function decideMode(
           return {
             ...base,
             disposition: "skip" as ProposalDisposition,
+            decisionCode: "insufficient_liquidity" as CreatorDecisionCode,
             rationale: "insufficient liquidity to back the posted odds",
             blockedBy: `needs ${profitPerFullStake}, has ${candidate.availableLiquidityUsdc}`,
           };
@@ -234,6 +283,7 @@ export function decideMode(
         return {
           ...base,
           disposition: "create" as ProposalDisposition,
+          decisionCode: "approved" as CreatorDecisionCode,
           rationale: `creator-backed ${(bps / 10_000).toFixed(2)}x total return`,
         };
       }
@@ -242,6 +292,7 @@ export function decideMode(
         return {
           ...base,
           disposition: "skip" as ProposalDisposition,
+          decisionCode: "unsupported_mode" as CreatorDecisionCode,
           rationale: "squad markets need the v2 escrow",
           blockedBy: `needs contract v${SETTLEMENT_MODE_POLICY.squad_pool.requiresContractVersion}`,
         };
@@ -252,6 +303,7 @@ export function decideMode(
           ...base,
           settlementMode: "pool" as SettlementMode,
           disposition: "create" as ProposalDisposition,
+          decisionCode: "approved" as CreatorDecisionCode,
           rationale: "public multi-participant topic",
         };
     }
@@ -269,6 +321,7 @@ export function decideMode(
     return {
       ...withModifiers,
       disposition: "review",
+      decisionCode: "held_for_review",
       rationale: `${withModifiers.rationale} (shadow mode: held for review)`,
     };
   }

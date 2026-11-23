@@ -55,7 +55,7 @@ Base URL: `https://docs.xmtp.org`
 | File | Role |
 |------|------|
 | [`app/layout.tsx`](../app/layout.tsx) | `WalletProvider` wraps `{children}` + Toaster; the entire app tree has wallet context. |
-| [`lib/wallet.tsx`](../lib/wallet.tsx) | Context: `address`, `isConnected`, `connect`, `disconnect`, `error`; Stellar Wallets Kit on Stellar Testnet (connector picker; no chain-switch request exists on Stellar). |
+| [`lib/wallet.tsx`](../lib/wallet.tsx) | Context: `address`, `isConnected`, `connect`, `disconnect`, `error`, `sessionRevision`; Stellar Wallets Kit on Stellar Testnet (connector picker; no chain-switch request exists on Stellar). |
 
 **XMTP implication, and the one deliberate exception in this codebase:** XMTP's own
 auth handshake needs a protocol-level signing identity that is not Stellar-shaped,
