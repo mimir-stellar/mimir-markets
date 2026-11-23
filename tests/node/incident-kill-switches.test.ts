@@ -164,7 +164,7 @@ async function contractWrite(write: () => Promise<unknown>): Promise<Outcome> {
   return "passed";
 }
 
-async function workerCycle(worker: "market_creator" | "council", pause: Pausable): Promise<Outcome> {
+async function workerCycle(worker: "market_creator" | "council" | "traders", pause: Pausable): Promise<Outcome> {
   let cycles = 0;
   await reportingPoll(worker, `test-${worker}`, 60, async () => { cycles += 1; }, { pause });
   return cycles === 0 ? "refused" : "passed";
@@ -218,6 +218,7 @@ const PROBES: Record<Pausable, Probe> = {
 
   market_creator_worker: () => workerCycle("market_creator", "market_creator_worker"),
   council_worker: () => workerCycle("council", "council_worker"),
+  trader_worker: () => workerCycle("traders", "trader_worker"),
 
   research: async () => {
     let fetches = 0;
