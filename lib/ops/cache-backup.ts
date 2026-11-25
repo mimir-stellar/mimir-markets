@@ -25,6 +25,7 @@
  *     kind: "mimir-read-index-backup",
  *     hashAlgorithm: "sha256",
  *     createdAt,            // metadata only — NOT covered by the checksum
+ *     privateClaimRedactionPolicyVersion: "private-claim-redaction-v1",
  *     source: { … },        // metadata only — NOT covered by the checksum
  *     checksum,             // sha256 hex over the canonical `tables` payload
  *     tables: { claims, challengers, sync_meta, … }
@@ -40,6 +41,7 @@ import { createHash } from "node:crypto";
 export const CACHE_BACKUP_SCHEMA_VERSION = 1 as const;
 export const CACHE_BACKUP_KIND = "mimir-read-index-backup" as const;
 export const CACHE_BACKUP_HASH_ALGORITHM = "sha256" as const;
+export const PRIVATE_CLAIM_REDACTION_POLICY_VERSION = "private-claim-redaction-v1" as const;
 
 export const READ_INDEX_TABLES = [
   "claims",
@@ -69,10 +71,20 @@ export const PRIMARY_CONTENT_FIELDS = [
   "settlement_rule",
 ] as const;
 
+const PRIVATE_CLAIM_SUPPORTED_FIELDS = new Set([
+  "id", "creator", "creator_stake", "total_challenger_stake",
+  "reserved_creator_liability", "deadline", "state", "winner_side",
+  "confidence", "category", "parent_id", "market_type", "odds_mode",
+  "challenger_payout_bps", "max_challengers", "visibility", "challenger_count",
+  "total_pot", "first_challenger", "first_indexed_at", "updated_at", "is_final",
+  ...PRIMARY_CONTENT_FIELDS,
+]);
+
 export interface BackupSource {
   contractAddress?: string;
   network?: string;
   appVersion?: string;
+  privateClaimRedactionPolicyVersion?: string;
   [key: string]: unknown;
 }
 
@@ -81,6 +93,7 @@ export interface ReadIndexBackup {
   kind: "mimir-read-index-backup";
   hashAlgorithm: "sha256";
   createdAt: number;
+  privateClaimRedactionPolicyVersion?: string;
   source?: BackupSource;
   checksum: string;
   tables: BackupTables;
@@ -90,6 +103,8 @@ export type CacheBackupFindingCode =
   | "BACKUP_INVALID"
   | "BACKUP_KIND_MISMATCH"
   | "BACKUP_SCHEMA_UNSUPPORTED"
+  | "BACKUP_REDACTION_POLICY_UNSUPPORTED"
+  | "BACKUP_PRIVATE_FIELD_UNSUPPORTED"
   | "BACKUP_MISSING_TABLE"
   | "BACKUP_UNKNOWN_TABLE"
   | "BACKUP_ROW_INVALID"
@@ -207,6 +222,7 @@ export function makeBackup(tables: BackupTables, opts: MakeBackupOptions = {}): 
     kind: CACHE_BACKUP_KIND,
     hashAlgorithm: CACHE_BACKUP_HASH_ALGORITHM,
     createdAt: opts.createdAt ?? 0,
+    privateClaimRedactionPolicyVersion: PRIVATE_CLAIM_REDACTION_POLICY_VERSION,
     source: opts.source,
     checksum: computeBackupChecksum(tables),
     tables,
@@ -282,6 +298,10 @@ export function parseBackup(raw: unknown): ReadIndexBackup {
     kind: CACHE_BACKUP_KIND,
     hashAlgorithm: CACHE_BACKUP_HASH_ALGORITHM,
     createdAt: asNumber(envelope.createdAt),
+    privateClaimRedactionPolicyVersion:
+      typeof envelope.privateClaimRedactionPolicyVersion === "string"
+        ? envelope.privateClaimRedactionPolicyVersion
+        : PRIVATE_CLAIM_REDACTION_POLICY_VERSION,
     source: isPlainObject(envelope.source) ? (envelope.source as BackupSource) : undefined,
     checksum,
     tables: tables as BackupTables,
@@ -384,6 +404,22 @@ export function verifyCacheBackup(raw: unknown): CacheBackupReport {
 
   const { tables } = backup;
 
+  const declaredPolicy = isPlainObject(envelope)
+    ? envelope.privateClaimRedactionPolicyVersion
+    : undefined;
+  if (
+    declaredPolicy !== undefined &&
+    declaredPolicy !== PRIVATE_CLAIM_REDACTION_POLICY_VERSION
+  ) {
+    push(findings, {
+      code: "BACKUP_REDACTION_POLICY_UNSUPPORTED",
+      severity: "error",
+      message:
+        `private claim redaction policy ${JSON.stringify(declaredPolicy)} is unsupported; ` +
+        `supported policy is ${PRIVATE_CLAIM_REDACTION_POLICY_VERSION}`,
+    });
+  }
+
   if (tableRowCount(tables) === 0) {
     push(findings, {
       code: "BACKUP_EMPTY",
@@ -394,6 +430,29 @@ export function verifyCacheBackup(raw: unknown): CacheBackupReport {
   }
 
   for (const row of tables.claims) {
+    const isPrivate = row.visibility === "private" || row.visibility === "Private";
+    if (isPrivate) {
+      for (const field of Object.keys(row)) {
+        if (
+          !PRIVATE_CLAIM_SUPPORTED_FIELDS.has(field) &&
+          row[field] !== null &&
+          row[field] !== undefined &&
+          row[field] !== ""
+        ) {
+          const claimId = asNumber(row.id);
+          push(findings, {
+            code: "BACKUP_PRIVATE_FIELD_UNSUPPORTED",
+            severity: "error",
+            table: "claims",
+            claimId,
+            message:
+              `private claim ${claimId} carries unsupported field "${field}"; ` +
+              "its value cannot be verified under the declared redaction policy",
+          });
+        }
+      }
+    }
+
     const leaked = contentLeaksInClaim(row);
     if (leaked !== null) {
       const claimId = asNumber(row.id);

@@ -8,6 +8,7 @@ import {
   CACHE_BACKUP_KIND,
   CACHE_BACKUP_SCHEMA_VERSION,
   READ_INDEX_TABLES,
+  PRIVATE_CLAIM_REDACTION_POLICY_VERSION,
   backupFingerprint,
   canonicalValue,
   computeBackupChecksum,
@@ -119,6 +120,32 @@ test("negative: a private claim leaking content is refused", () => {
   assert.ok(
     report.findings.some(
       (f) => f.code === "BACKUP_PRIVATE_CONTENT_LEAK" && f.claimId === 202,
+    ),
+  );
+});
+
+test("negative: an unsupported private-claim redaction policy is refused", () => {
+  const backup = fixtureBackup();
+  const raw = JSON.parse(serializeBackup(backup)) as Record<string, unknown>;
+  raw.privateClaimRedactionPolicyVersion = "private-claim-redaction-v2";
+  const report = verifyCacheBackup(JSON.stringify(raw));
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.findings.some((f) => f.code === "BACKUP_REDACTION_POLICY_UNSUPPORTED"),
+  );
+});
+
+test("negative: an exposed unsupported private field is refused", () => {
+  const backup = fixtureBackup();
+  const privateClaim = backup.tables.claims.find((row) => row.visibility === "private");
+  assert.ok(privateClaim);
+  privateClaim.secret_payload = "must-not-restore";
+  const candidate = makeBackup(backup.tables);
+  const report = verifyCacheBackup(serializeBackup(candidate));
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.findings.some(
+      (f) => f.code === "BACKUP_PRIVATE_FIELD_UNSUPPORTED" && f.claimId === 202,
     ),
   );
 });
@@ -281,5 +308,55 @@ describeDb("an unverified archive is refused before any write", async () => {
   await assert.rejects(
     () => restoreReadIndexFromBackup(fixtureJson("private-content-visible.json")),
     /refusing to restore an unverified archive/,
+  );
+});
+
+test("supported metadata is preserved and round-trippable", () => {
+  const tables = fixtureBackup().tables;
+  const original = makeBackup(tables, {
+    createdAt: 123_456_789_000,
+    source: { network: "x" },
+  });
+  const reparsed = parseBackup(serializeBackup(original));
+  assert.equal(reparsed.checksum, original.checksum);
+  assert.deepEqual(reparsed.createdAt, original.createdAt);
+  assert.deepEqual(reparsed.source, original.source);
+  assert.equal(
+    reparsed.privateClaimRedactionPolicyVersion,
+    PRIVATE_CLAIM_REDACTION_POLICY_VERSION,
+  );
+});
+
+test("unsupported private claim fields are refused", () => {
+  const backup = fixtureBackup();
+  const privateClaim = backup.tables.claims.find((row) => row.visibility === "private");
+  assert.ok(privateClaim);
+  privateClaim.foo = "bar";
+  const candidate = makeBackup(backup.tables);
+  const report = verifyCacheBackup(serializeBackup(candidate));
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.findings.some(
+      (f) => f.code === "BACKUP_PRIVATE_FIELD_UNSUPPORTED" && f.claimId === 202,
+    ),
+  );
+});
+
+test("positive: older backups without declared policy remain compatible", () => {
+  const backup = fixtureBackup();
+  const raw = JSON.parse(serializeBackup(backup)) as Record<string, unknown>;
+  delete raw.privateClaimRedactionPolicyVersion;
+  const report = verifyCacheBackup(JSON.stringify(raw));
+  assert.equal(report.ok, true, formatCacheBackupReport(report));
+});
+
+test("unsupported policy versions are refused", () => {
+  const backup = fixtureBackup();
+  const raw = JSON.parse(serializeBackup(backup)) as Record<string, unknown>;
+  raw.privateClaimRedactionPolicyVersion = "private-claim-redaction-v2";
+  const report = verifyCacheBackup(JSON.stringify(raw));
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.findings.some((f) => f.code === "BACKUP_REDACTION_POLICY_UNSUPPORTED"),
   );
 });

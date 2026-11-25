@@ -24,6 +24,7 @@ import {
   CACHE_BACKUP_KIND,
   CACHE_BACKUP_SCHEMA_VERSION,
   CACHE_BACKUP_HASH_ALGORITHM,
+  PRIVATE_CLAIM_REDACTION_POLICY_VERSION,
   READ_INDEX_TABLES,
   backupFingerprint,
   computeBackupChecksum,
@@ -542,6 +543,7 @@ export function buildBackupSource(overrides: Record<string, unknown> = {}): NonN
     kind: CACHE_BACKUP_KIND,
     schemaVersion: CACHE_BACKUP_SCHEMA_VERSION,
     hashAlgorithm: CACHE_BACKUP_HASH_ALGORITHM,
+    privateClaimRedactionPolicyVersion: PRIVATE_CLAIM_REDACTION_POLICY_VERSION,
     ...overrides,
   };
 }
