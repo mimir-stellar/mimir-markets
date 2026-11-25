@@ -58,6 +58,7 @@
     "verify:status": "tsx scripts/verify-operational-status.ts",
     "verify:package-scripts": "node --import tsx scripts/verify-package-scripts.ts",
     "report:support-bundle": "tsx scripts/report-support-bundle.ts",
+    "report:rollback-readiness": "tsx scripts/report-rollback-readiness.ts",
     "oracle": "tsx --env-file-if-exists=.env.local agents/oracle/index.ts",
     "oracle:challenge": "AUTO_CHALLENGE=1 tsx --env-file-if-exists=.env.local agents/oracle/index.ts",
     "market-creator:manifest": "tsx scripts/market-creator-manifest.ts",

@@ -270,6 +270,8 @@ the same inputs are byte-identical, so the record can be diffed.
 For machine-readable release review bundles, `npm run report:support-bundle`
 packages the public digests, versions and bounded findings into a reproducible
 support bundle with deterministic serialization and secret shape redaction.
+`npm run report:rollback-readiness` reports the predecessor artifacts, schema
+assumptions and blockers for the rollback-area gates; see docs/ROLLBACK.md.
 Secrets. None. The checklist reads tracked repo files only.
 Environment. No .env, no DATABASE_URL, no seeds, no network.
 Tests

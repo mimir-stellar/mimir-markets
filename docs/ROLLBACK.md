@@ -120,6 +120,44 @@ After all steps, the following invariants are checked:
 
 ---
 
+## Offline rollback readiness report
+
+Before a funded release, `npm run report:rollback-readiness` answers: *if this
+release has to be rolled back, is everything the rollback needs actually here?*
+It is read-only and reproducible from a clean checkout — no deployment, no
+database write, no chain transaction, no network, no `.env`, `DATABASE_URL` or
+seed. Soroban contract state stays authoritative; the schema it describes is the
+disposable Postgres read index.
+
+```bash
+npm run report:rollback-readiness                        # text report
+npm run report:rollback-readiness -- --json              # deterministic JSON
+npm run report:rollback-readiness -- --mode=release      # funded-release mode
+npm run report:rollback-readiness -- --evidence ev.json  # include recorded rollback-gate evidence
+npm run report:rollback-readiness -- --out report.json   # write the report
+```
+
+It reports three things:
+
+| Section | What it shows |
+|---|---|
+| **Predecessor artifacts** | The pinned Wasm digest of every contract in `deploy/contract-artifacts.manifest.json` (what a rollback redeploys), plus the files a rollback reads: this document, `scripts/rollback-rehearsal.ts`, the committed schema snapshot, and the inputs of the `rollback`-area release gates (`cache-backup-verify`, `rollback-rehearsal`). |
+| **Schema assumptions** | `snapshot-committed`, `schema-matches-snapshot`, `migration-versions-unique`, `migrations-registered` — each `holds`, `violated` or `unverified`. |
+| **Blockers** | Everything observed while checking the above, plus the findings of the `rollback`-area gates from [`RELEASE_READINESS.md`](RELEASE_READINESS.md). Other gates are not repeated here. |
+
+Severity follows the release readiness modes. A missing required file, schema
+drift, a failed gate and malformed evidence are errors in both modes. An
+unpinned digest, an unevidenced rollback gate and unchecked schema drift are
+warnings in develop mode and errors with `--mode=release`. The exit code is `1`
+when there is any error-severity blocker; `rollbackReady` in the JSON is true
+only when there are no blockers at all.
+
+Output is deterministic (same inputs, byte-identical output) and every string is
+scrubbed for secret shapes. The report does not run the rehearsal itself: the
+`rollback-rehearsal` gate still needs evidence recorded by a maintainer.
+
+---
+
 ## Artifact and secret handling
 
 | Artifact | Stored? | Contains secrets? |
@@ -184,5 +222,8 @@ All tests are deterministic — no network, no filesystem, no real secrets.
 | `lib/rollback/machine.ts` | State machine: `captureSnapshot`, `buildRollbackPlan`, `rehearse` |
 | `lib/rollback/index.ts` | Public API barrel export |
 | `scripts/rollback-rehearsal.ts` | CLI script: fixture, plan building, output |
+| `lib/ops/rollback-readiness.ts` | Offline rollback readiness report (artifacts, schema assumptions, blockers) |
+| `scripts/report-rollback-readiness.ts` | CLI for the readiness report |
+| `tests/node/rollback-readiness.test.ts` | Readiness report coverage |
 | `tests/node/rollback.test.ts` | Full test coverage |
 | `docs/ROLLBACK.md` | This document |

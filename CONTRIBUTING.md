@@ -98,6 +98,7 @@ npm run check:openapi        # Agent OpenAPI contract check (-- --write to regen
 npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
 npm run verify:release-readiness # Release checklist (-- --manifest <file> for revision-bound evidence)
 npm run report:support-bundle # Offline artifact and schema support bundle
+npm run report:rollback-readiness # Offline rollback readiness report (artifacts, schema assumptions, blockers)
 npm run test:node            # Full Node test suite (alias: npm run test:smoke)
 npm run test:coverage        # Money-moving module coverage thresholds via c8
 npm run smoke:browser        # Secret-free Playwright browser smoke
