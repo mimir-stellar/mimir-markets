@@ -1614,10 +1614,9 @@ paths:
                             description: Active schema/projection generation version.
                   nextCursor:
                     type:
-                      - integer
+                      - string
                       - "null"
-                    minimum: 1
-                    description: "Cursor ID for the next page, or null when no further pages exist."
+                    description: "Opaque cursor for the next page, bound to projection generation and query filters, or null when no further pages exist. Legacy numeric cursors remain accepted."
               examples:
                 vsFeedPage:
                   summary: Paginated public VS claims with read-index freshness metadata.

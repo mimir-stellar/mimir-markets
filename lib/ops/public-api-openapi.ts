@@ -1102,9 +1102,8 @@ export function buildPublicApiSchemas(): Record<string, Record<string, unknown>>
         count: { type: "integer", minimum: 0 },
         cache: VSCacheFreshness,
         nextCursor: {
-          type: ["integer", "null"],
-          minimum: 1,
-          description: "Cursor ID for the next page, or null when no further pages exist.",
+          type: ["string", "null"],
+          description: "Opaque cursor for the next page, bound to projection generation and query filters, or null when no further pages exist. Legacy numeric cursors remain accepted.",
         },
       },
     },
@@ -1726,6 +1725,7 @@ export function buildPublicOpenApiDocument(): YamlValue {
     "/api/capabilities": {
       get: {
         operationId: PUBLIC_ENDPOINT_METADATA["/api/capabilities"].operationId,
+        summary: PUBLIC
         summary: PUBLIC_ENDPOINT_METADATA["/api/capabilities"].summary,
         description: [
           "Returns a deterministic, privacy-safe capability discovery document describing supported schema versions, Stellar network metadata, public USDC asset metadata, x402 v2 payment parameters, rate-limit tiers, and reviewed public/x402/agent endpoint capabilities.",

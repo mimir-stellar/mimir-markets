@@ -591,3 +591,24 @@ test("VS API route: combines all parameters correctly", async () => {
 // Existing API validation tests (cursor, limit) - moved from top to here for grouping
 // ---------------------------------------------------------------------------
 
+test("opaque cursor rejects a stale projection generation", async () => {
+  const { decodeCursor, encodeCursor } = await import("../../lib/api/cursor");
+  const filters = { sort: "newest", projectionGeneration: "gen_1:1" };
+  const cursor = encodeCursor({ key: 90, id: 90 }, filters);
+
+  assert.equal(decodeCursor(cursor, filters).kind, "ok");
+
+  const rebuilt = decodeCursor(cursor, { ...filters, projectionGeneration: "gen_2:1" });
+  assert.equal(rebuilt.kind, "error");
+  if (rebuilt.kind === "error") {
+    assert.equal(rebuilt.error.body.error.code, "invalid_cursor");
+  }
+});
+
+test("legacy numeric cursor remains compatible", async () => {
+  const { decodeCursor } = await import("../../lib/api/cursor");
+  const decoded = decodeCursor("90", { sort: "newest", projectionGeneration: "gen_2:1" });
+  assert.equal(decoded.kind, "ok");
+  if (decoded.kind === "ok") assert.equal(decoded.cursor, 90);
+});
+
